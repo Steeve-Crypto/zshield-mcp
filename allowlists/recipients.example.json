@@ -1,0 +1,12 @@
+{
+  "recipients": [
+    {
+      "address": "u1mockrecipientaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "label": "Demo merchant (mock UA)"
+    },
+    {
+      "address": "zs1mockdemo0000000000000000000000000000000000000000000000000000",
+      "label": "Demo shielded (mock)"
+    }
+  ]
+}
