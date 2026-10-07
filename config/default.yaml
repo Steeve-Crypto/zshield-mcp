@@ -1,0 +1,5 @@
+spending_cap_zec: 0.1
+allowlist_path: ./allowlists/recipients.example.json
+chain_mode: mock
+audit_dir: ./audits
+view_key_fingerprint_salt: dev-only-change-me
