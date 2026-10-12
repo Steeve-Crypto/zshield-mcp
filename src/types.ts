@@ -48,7 +48,7 @@ export interface PaymentReceipt {
   amountZec: number;
   recipient: string;
   memo?: string;
-  /** Opaque viewing-key material used only for fingerprinting — never logged raw */
+  /** Opaque viewing-key material used only for fingerprinting, never logged raw */
   viewKeyMaterial: string;
   mode: ChainMode;
 }

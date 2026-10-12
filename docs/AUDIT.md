@@ -14,7 +14,7 @@ Append-only JSON Lines under `AUDIT_DIR` (default `./audits/`), one file per UTC
 | `cap_zec` | number | Active hard per-call cap |
 | `status` | `ok` \| `rejected` \| `error` | Outcome |
 | `mock_txid` | string? | Present on success in mock mode |
-| `view_key_fingerprint` | string | `sha256(salt \| viewKeyMaterial)[0:16]` — **never** the raw key |
+| `view_key_fingerprint` | string | `sha256(salt \| viewKeyMaterial)[0:16]`, **never** the raw key |
 | `error` | string? | Policy or runtime message |
 | `memo` | string? | Optional memo |
 
