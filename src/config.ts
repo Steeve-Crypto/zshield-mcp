@@ -39,12 +39,16 @@ export function loadConfig(cwd = process.cwd()): Config {
       cwd,
       envOr("ALLOWLIST_PATH", fromFile.allowlist_path ?? "./allowlists/recipients.example.json", (v) => v)
     ),
-    chainMode: chainMode === "live" ? "live" : "mock",
+    chainMode: chainMode === "live" || (chainMode as string) === "testnet" ? "live" : "mock",
     auditDir: resolve(cwd, envOr("AUDIT_DIR", fromFile.audit_dir ?? "./audits", (v) => v)),
     viewKeyFingerprintSalt: envOr(
       "VIEW_KEY_FINGERPRINT_SALT",
       fromFile.view_key_fingerprint_salt ?? "dev-only-change-me",
       (v) => v
     ),
+    chainNetwork: (chainMode as string) === "testnet" ? "testnet" : undefined,
+    zingoBin: process.env.ZINGO_BIN,
+    zingoDataDir: process.env.ZINGO_DATA_DIR,
+    lightwalletd: process.env.LIGHTWALLETD_URL,
   };
 }
