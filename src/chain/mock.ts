@@ -14,7 +14,7 @@ export class MockChainAdapter implements ChainAdapter {
       .update(`mock|${req.recipient}|${req.amountZec}|${nonce}`)
       .digest("hex");
 
-    // Synthetic viewing-key material — fingerprint only in audit; never a real key
+    // Synthetic viewing-key material: fingerprint only in audit; never a real key
     const viewKeyMaterial = `vk_mock_${createHash("sha256")
       .update(`${txid}|${req.recipient}`)
       .digest("hex")

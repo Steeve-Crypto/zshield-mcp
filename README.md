@@ -1,12 +1,12 @@
 # zshield-mcp
 
-Open-source **MCP server** that exposes one tool — `zcash_pay` — for agent-initiated **shielded ZEC** payments under human policy:
+Open-source **MCP server** that exposes one tool, `zcash_pay`, for agent-initiated **shielded ZEC** payments under human policy:
 
 - **Hard per-call spending cap**
 - **Recipient allow-list**
 - **Append-only viewing-key fingerprinted audit log**
 
-Spend keys never belong in the model. **Chain is mocked first**; a live light-wallet adapter is stubbed and refused at startup.
+Spend keys never belong in the model. Mock chain by default. A live adapter sends real shielded payments on Zcash **testnet only** through zingo-cli.
 
 ## Purpose
 
@@ -64,7 +64,7 @@ Precedence: **environment variables** override `config/default.yaml`.
 |----------|---------|---------|
 | `SPENDING_CAP_ZEC` | `0.1` | Hard max ZEC **per tool call** |
 | `ALLOWLIST_PATH` | `./allowlists/recipients.example.json` | JSON allow-list |
-| `CHAIN_MODE` | `mock` | `mock` only for now (`live` exits) |
+| `CHAIN_MODE` | `mock` | `mock` or `testnet` (any other live value exits) |
 | `AUDIT_DIR` | `./audits` | JSONL audit directory |
 | `VIEW_KEY_FINGERPRINT_SALT` | from yaml | Salt for view-key fingerprints |
 
@@ -86,23 +86,59 @@ JSONL per day: `audits/YYYY-MM-DD.jsonl`. Example success line:
 {"ts":"2026-10-05T19:00:00.000Z","tool":"zcash_pay","amount_zec":0.05,"recipient":"u1…","allowlist_hit":true,"cap_zec":0.1,"status":"ok","mock_txid":"mock_…","view_key_fingerprint":"a1b2c3d4e5f60718","memo":"test"}
 ```
 
-Raw viewing-key material is **never** written — only a short fingerprint. See [docs/AUDIT.md](docs/AUDIT.md).
+Raw viewing-key material is **never** written, only a short fingerprint. See [docs/AUDIT.md](docs/AUDIT.md).
 
 ## Layout
 
 ```
 src/policy/   caps + allow-list
-src/chain/    mock adapter + live stub
+src/chain/    mock adapter, testnet adapter, address checks
 src/audit/    JSONL writer + fingerprint
 src/tools/    zcash_pay
 src/server.ts MCP registration
 tests/        happy path + rejections
 ```
 
+## Testnet mode
+
+What it does: with `CHAIN_MODE=testnet` the server checks cap, allow-list, and address network first, writes the audit row, and only then calls `zingo-cli quicksend` against a public testnet lightwalletd (default `https://testnet.zec.rocks:443`). Mainnet addresses (`u1`, `zs1`, `t1`) are rejected; testnet ones (`utest`, `ztestsapling`, `tm`) are accepted. `CHAIN_MODE=live` alone is refused.
+
+Setup:
+
+```bash
+# build zingo-cli (Rust)
+git clone https://github.com/zingolabs/zingolib && cd zingolib
+cargo build --release -p zingo-cli
+# create a fresh testnet wallet outside the repo and print its address
+zingo-cli --chain testnet --server https://testnet.zec.rocks:443 \
+  --data-dir ~/.zshield-testnet/wallet addresses
+```
+
+Fund that address with TAZ from a testnet faucet such as https://faucet.testnet.valargroup.dev (API claim) or https://zcashfaucet.jinolabs.xyz and wait for it to confirm. Keep `~/.zshield-testnet/` private; it holds the wallet seed and is never inside the repo.
+
+Run the MCP server in testnet mode:
+
+```bash
+CHAIN_MODE=testnet ZINGO_BIN=$(which zingo-cli) \
+ZINGO_DATA_DIR=~/.zshield-testnet/wallet \
+ALLOWLIST_PATH=./allowlists/testnet.json npm start
+```
+
+Optional variables: `ZINGO_BIN`, `ZINGO_DATA_DIR`, `LIGHTWALLETD_URL`.
+
+Run the demo:
+
+```bash
+npm run demo:testnet
+```
+
+The demo creates a second fresh testnet wallet as the recipient, writes a one-entry allow-list for it, and sends 0.001 TAZ through `executePay`, the same policy path the `zcash_pay` tool uses. It prints the txid and a link on https://testnet.zcashexplorer.app. A confirmed txid proves the full path works end to end: policy checks, audit write, and a real shielded transaction on the Zcash testnet.
+
 ## Status / non-goals
 
 - ✅ Mock payments, policy enforcement, audit
-- ❌ Live Zcash chain / wallet wiring (stub only)
+- ✅ Testnet shielded sends via zingo-cli
+- ❌ Mainnet (refused by design)
 - ❌ Custody of user spend keys
 
 ## License
