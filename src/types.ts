@@ -15,6 +15,10 @@ export interface Config {
   chainMode: ChainMode;
   auditDir: string;
   viewKeyFingerprintSalt: string;
+  chainNetwork?: string;
+  zingoBin?: string;
+  zingoDataDir?: string;
+  lightwalletd?: string;
 }
 
 export type PayStatus = "ok" | "rejected" | "error";

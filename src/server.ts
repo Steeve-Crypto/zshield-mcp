@@ -8,7 +8,14 @@ import { executePay, payInputSchema } from "./tools/pay.js";
 import type { Config } from "./types.js";
 
 export function createChain(config: Config): ChainAdapter {
-  return config.chainMode === "live" ? new LiveChainAdapter() : new MockChainAdapter();
+  return config.chainMode === "live"
+    ? new LiveChainAdapter({
+        network: config.chainNetwork,
+        zingoBin: config.zingoBin,
+        dataDir: config.zingoDataDir,
+        server: config.lightwalletd,
+      })
+    : new MockChainAdapter();
 }
 
 export function createServer(config: Config = loadConfig()): McpServer {
