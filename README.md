@@ -1,3 +1,7 @@
+<p align="center"><img src="docs/images/logo.png" alt="zshield-mcp logo" width="160"></p>
+
+![zshield-mcp banner](docs/images/banner.png)
+
 # zshield-mcp
 
 Open-source **MCP server** that exposes one tool, `zcash_pay`, for agent-initiated **shielded ZEC** payments under human policy:
@@ -8,11 +12,19 @@ Open-source **MCP server** that exposes one tool, `zcash_pay`, for agent-initiat
 
 Spend keys never belong in the model. Mock chain by default. A live adapter sends real shielded payments on Zcash **testnet only** through zingo-cli.
 
+![Flow: AI agent to zshield-mcp to Zcash testnet](docs/images/flow.png)
+
 ## Purpose
 
 Agents need a payment tool they can call safely. This server enforces policy *before* any payment attempt, records an audit row for every call (success or reject), and fingerprints viewing-key material so auditors can correlate receipts without storing raw keys in the log.
 
 Built as a concrete, minimal artifact for design-partner review of shielded agent-payment MCP surfaces (see Zcash Community Grants discussions around agent/MCP payment tooling).
+
+## Demo
+
+Real output of `npm run demo:mock` (mock chain, no coins spent): one payment allowed, one blocked by the spending cap, one blocked by the allow-list, then the audit log.
+
+![Mock demo terminal output](docs/images/demo.png)
 
 ## Quickstart
 

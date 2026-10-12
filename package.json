@@ -11,7 +11,8 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "test": "node --import tsx --test tests/policy.test.ts tests/pay.test.ts tests/live.test.ts",
-    "demo:testnet": "tsx scripts/demo-testnet.ts"
+    "demo:testnet": "tsx scripts/demo-testnet.ts",
+    "demo:mock": "tsx scripts/demo-mock.ts"
   },
   "engines": {
     "node": ">=20"
