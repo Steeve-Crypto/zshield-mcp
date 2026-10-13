@@ -4,7 +4,7 @@ import type { ChainAdapter } from "./types.js";
 import type { PaymentReceipt, PaymentRequest } from "../types.js";
 import { assertTestnetAddress, NetworkError } from "./network.js";
 
-export const TESTNET_EXPLORER = "https://testnet.zcashexplorer.app/transactions/";
+export const TESTNET_EXPLORER = "https://blockexplorer.one/zcash/testnet/tx/";
 
 /** Runs a zingo-cli invocation and returns stdout. Injectable for tests. */
 export type CliRunner = (bin: string, args: string[]) => Promise<string>;
