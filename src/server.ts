@@ -1,5 +1,4 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
 import { MockChainAdapter } from "./chain/mock.js";
 import { LiveChainAdapter } from "./chain/live.js";
 import type { ChainAdapter } from "./chain/types.js";
@@ -28,11 +27,7 @@ export function createServer(config: Config = loadConfig()): McpServer {
   server.tool(
     "zcash_pay",
     "Pay shielded ZEC to an allow-listed recipient under a hard per-call spending cap. Mock chain by default; writes a viewing-key-fingerprinted audit log entry.",
-    {
-      amount_zec: payInputSchema.shape.amount_zec,
-      recipient: payInputSchema.shape.recipient,
-      memo: payInputSchema.shape.memo,
-    },
+    payInputSchema.shape,
     async (args) => {
       const parsed = payInputSchema.parse(args);
       const result = await executePay(parsed, { config, chain });
@@ -68,6 +63,3 @@ export function createServer(config: Config = loadConfig()): McpServer {
 
   return server;
 }
-
-// Keep zod import used for type-side clarity in tool registration
-void z;
