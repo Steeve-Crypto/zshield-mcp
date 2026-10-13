@@ -9,6 +9,8 @@ function envOr<T>(key: string, fallback: T, parse: (v: string) => T): T {
   return parse(v);
 }
 
+const KNOWN_MODES = ["mock", "live", "testnet"];
+
 export function loadConfig(cwd = process.cwd()): Config {
   const yamlPath = resolve(cwd, "config/default.yaml");
   let fromFile: Partial<{
@@ -23,30 +25,32 @@ export function loadConfig(cwd = process.cwd()): Config {
     fromFile = parseYaml(readFileSync(yamlPath, "utf8")) ?? {};
   }
 
-  const chainMode = envOr(
-    "CHAIN_MODE",
-    (fromFile.chain_mode as ChainMode) ?? "mock",
-    (v) => v as ChainMode
-  );
+  const rawMode = envOr("CHAIN_MODE", fromFile.chain_mode ?? "mock", (v) => v).trim().toLowerCase();
+  if (!KNOWN_MODES.includes(rawMode)) {
+    throw new Error(
+      `Unknown CHAIN_MODE "${rawMode}". Expected one of: ${KNOWN_MODES.join(", ")}. Mainnet is not supported.`
+    );
+  }
+  const chainMode: ChainMode = rawMode === "mock" ? "mock" : "live";
+  const spendingCapZec = envOr("SPENDING_CAP_ZEC", fromFile.spending_cap_zec ?? 0.1, (v) => Number(v));
+  if (!Number.isFinite(spendingCapZec) || spendingCapZec <= 0) {
+    throw new Error(`SPENDING_CAP_ZEC must be a positive number, got "${spendingCapZec}".`);
+  }
 
   return {
-    spendingCapZec: envOr(
-      "SPENDING_CAP_ZEC",
-      fromFile.spending_cap_zec ?? 0.1,
-      (v) => Number(v)
-    ),
+    spendingCapZec,
     allowlistPath: resolve(
       cwd,
       envOr("ALLOWLIST_PATH", fromFile.allowlist_path ?? "./allowlists/recipients.example.json", (v) => v)
     ),
-    chainMode: chainMode === "live" || (chainMode as string) === "testnet" ? "live" : "mock",
+    chainMode,
     auditDir: resolve(cwd, envOr("AUDIT_DIR", fromFile.audit_dir ?? "./audits", (v) => v)),
     viewKeyFingerprintSalt: envOr(
       "VIEW_KEY_FINGERPRINT_SALT",
       fromFile.view_key_fingerprint_salt ?? "dev-only-change-me",
       (v) => v
     ),
-    chainNetwork: (chainMode as string) === "testnet" ? "testnet" : undefined,
+    chainNetwork: rawMode === "testnet" ? "testnet" : undefined,
     zingoBin: process.env.ZINGO_BIN,
     zingoDataDir: process.env.ZINGO_DATA_DIR,
     lightwalletd: process.env.LIGHTWALLETD_URL,
