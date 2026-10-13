@@ -82,3 +82,19 @@ describe("executePay (mock)", () => {
     assert.match(result.audit.error ?? "", /allow-list/i);
   });
 });
+
+describe("executePay with a broken allow-list", () => {
+  it("rejects and still writes an audit entry", async () => {
+    const config = tempConfig({ allowlistPath: "/nonexistent/allow.json" });
+    const result = await executePay(
+      { amount_zec: 0.01, recipient: "u1x" },
+      { config, chain: new MockChainAdapter() }
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.audit.status, "rejected");
+    assert.equal(result.audit.allowlist_hit, false);
+    const day = result.audit.ts.slice(0, 10);
+    const lines = readFileSync(join(config.auditDir, `${day}.jsonl`), "utf8").trim().split("\n");
+    assert.equal(lines.length, 1);
+  });
+});

@@ -43,3 +43,14 @@ describe("allowlist", () => {
     assert.throws(() => assertRecipientAllowed("u1stranger", list), PolicyError);
   });
 });
+
+describe("loadAllowlist errors", () => {
+  it("rejects a missing file with a PolicyError", () => {
+    assert.throws(() => loadAllowlist("/nonexistent/allow.json"), PolicyError);
+  });
+  it("rejects malformed JSON with a PolicyError", () => {
+    const f = join(mkdtempSync(join(tmpdir(), "zs-")), "a.json");
+    writeFileSync(f, "{not json");
+    assert.throws(() => loadAllowlist(f), PolicyError);
+  });
+});
