@@ -47,7 +47,11 @@ export class LiveChainAdapter implements ChainAdapter {
   }
 
   baseArgs(): string[] {
-    return ["--chain", "testnet", "--server", this.server, "--data-dir", this.dataDir, "--waitsync"];
+    // --waitsync can block past the runner timeout (background sync never reports done),
+    // so it is opt-in via ZINGO_WAITSYNC=1. One-shot commands still sync at startup.
+    const args = ["--chain", "testnet", "--server", this.server, "--data-dir", this.dataDir];
+    if (process.env.ZINGO_WAITSYNC === "1") args.push("--waitsync");
+    return args;
   }
 
   async run(cmd: string[]): Promise<string> {
