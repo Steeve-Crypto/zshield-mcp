@@ -23,8 +23,7 @@ export async function executePay(
   deps: PayDeps
 ): Promise<{ ok: boolean; text: string; audit: AuditEntry }> {
   const { config, chain } = deps;
-  const allowlist = loadAllowlist(config.allowlistPath);
-  const allowlistHit = isRecipientAllowed(input.recipient, allowlist);
+  let allowlistHit = false;
 
   let status: PayStatus = "ok";
   let error: string | undefined;
@@ -32,6 +31,8 @@ export async function executePay(
   let viewKeyFingerprint = fingerprintViewKey("none", config.viewKeyFingerprintSalt);
 
   try {
+    const allowlist = loadAllowlist(config.allowlistPath);
+    allowlistHit = isRecipientAllowed(input.recipient, allowlist);
     assertWithinCap(input.amount_zec, config.spendingCapZec);
     assertRecipientAllowed(input.recipient, allowlist);
 
