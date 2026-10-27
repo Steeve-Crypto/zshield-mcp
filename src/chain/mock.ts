@@ -114,6 +114,9 @@ export class MockChainAdapter implements ChainAdapter {
         kind: t.kind,
         valueZats: t.valueZats,
         feeZats: t.feeZats,
+        ...(t.kind === "sent" && t.recipient
+          ? { outgoing: [{ recipient: t.recipient, valueZats: t.valueZats, memo: t.memo ?? "" }] }
+          : {}),
       }));
   }
 }

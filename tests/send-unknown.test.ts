@@ -21,8 +21,12 @@ function liveConfig(): Config {
   return config;
 }
 
-/** A fake zingo-cli `transactions` block. */
-function txBlock(txid: string, kind: string, value: number, datetime?: string): string {
+/** A fake zingo-cli `transactions` block, with one outgoing note for a sent one. */
+function txBlock(txid: string, kind: string, value: number, datetime?: string, recipient = UTEST, memo = "m"): string {
+  const note =
+    kind === "sent"
+      ? ["    outgoing ironwood notes: ", "\t{", `            value: ${value}`, `            memo: ${memo}`, `            recipient: ${recipient}`, "            output index: 0", "        }"]
+      : [];
   return [
     "{",
     `    txid: ${txid}`,
@@ -30,6 +34,7 @@ function txBlock(txid: string, kind: string, value: number, datetime?: string): 
     "    status: transmitted",
     `    kind: ${kind}`,
     `    value: ${value}`,
+    ...note,
     "}",
   ]
     .filter(Boolean)
@@ -106,6 +111,7 @@ describe("SEND_UNCONFIRMED", () => {
     assert.match(body.message, /may have been broadcast/);
     assert.match(body.message, /zcash_history/);
     assert.deepEqual(body.possible_txids, [TXID]);
+    assert.equal(body.possible_sends[0].confidence, "medium");
     const rows = readAuditRows(config);
     assert.deepEqual(rows.map((x) => x.status), ["pending", "unknown"]);
     assert.equal(rows[1].code, "SEND_UNCONFIRMED");
@@ -139,23 +145,37 @@ describe("SEND_UNCONFIRMED", () => {
 });
 
 describe("findPossibleSends", () => {
-  const tx = (over: Partial<TxSummary>): TxSummary => ({ txid: TXID, status: "transmitted", kind: "sent", valueZats: 5n, ...over });
+  const note = { recipient: UTEST, valueZats: 5n, memo: "" };
+  const tx = (over: Partial<TxSummary>): TxSummary => ({
+    txid: TXID,
+    status: "transmitted",
+    kind: "sent",
+    valueZats: 5n,
+    outgoing: [note],
+    ...over,
+  });
   const chainOf = (txs: TxSummary[]) => ({ async getHistory() { return txs; }, async getViewingKey() { return TEST_UFVK; } }) as unknown as ChainAdapter;
 
-  it("matches recent sent transactions of the same amount and skips failed ones", async () => {
+  it("matches recent sends to the same recipient and amount, and skips failed ones", async () => {
     const now = Date.now();
     const found = await findPossibleSends(
       chainOf([
         tx({ txid: "1".repeat(64) }),
         tx({ txid: "2".repeat(64), time: new Date(now).toISOString() }),
         tx({ txid: "3".repeat(64), time: new Date(now - 3 * 60 * 60_000).toISOString() }),
-        tx({ txid: "4".repeat(64), valueZats: 6n }),
-        tx({ txid: "5".repeat(64), kind: "received" }),
+        tx({ txid: "4".repeat(64), valueZats: 6n, outgoing: [{ ...note, valueZats: 6n }] }),
+        tx({ txid: "5".repeat(64), kind: "received", outgoing: undefined }),
         tx({ txid: "6".repeat(64), status: "failed" }),
       ]),
-      5n,
+      { amountZats: 5n, recipient: UTEST },
       now
     );
-    assert.deepEqual(found, ["1".repeat(64), "2".repeat(64)]);
+    assert.deepEqual(
+      found.map((f) => [f.txid, f.confidence]),
+      [
+        ["1".repeat(64), "low"],
+        ["2".repeat(64), "medium"],
+      ]
+    );
   });
 });
