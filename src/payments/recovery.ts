@@ -209,6 +209,12 @@ async function recoverLocked(
   // Sync first, bounded, then read history offline so no read starts a sync of its own.
   const sync = await boundedSync(chain);
   const evidence = chainEvidence(chain, sync, opts.maxLagBlocks ?? config.healthMaxLagBlocks ?? 10);
+  // One history read for the whole run: the wallet does not change while the lease is
+  // held, and N pending calls should not mean N full reads.
+  let history: ReturnType<ChainAdapter["getHistory"]> | undefined;
+  const once: ChainAdapter = Object.create(chain, {
+    getHistory: { value: (limit: number, o?: { offline?: boolean }) => (history ??= chain.getHistory(limit, o)) },
+  });
   const rows: RecoveryAuditEntry[] = [];
   for (const callId of todo) {
     try {
@@ -221,7 +227,7 @@ async function recoverLocked(
       store.clearPending(callId);
       continue;
     }
-    const row = await reconcile(record, chain, {
+    const row = await reconcile(record, once, {
       now: opts.now,
       offline: sync !== undefined,
       evidence,
