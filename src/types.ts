@@ -180,4 +180,8 @@ export interface ChainHealth {
   /** Latest block height reported by the server */
   chainTip: number;
   spendableZats: bigint;
+  /** Whether the bounded sync before the check finished. Absent when no sync was run */
+  synced?: boolean;
+  /** Why the sync did not finish */
+  syncDetail?: string;
 }

@@ -2,8 +2,10 @@ import { z } from "zod";
 import { TESTNET_EXPLORER } from "../chain/live.js";
 import type { ChainAdapter } from "../chain/types.js";
 import { paymentIndexFor, type PaymentRecord } from "../payments/index.js";
-import { reconcile, RECOVERY_EXPIRY_MS, walletSynced } from "../payments/recovery.js";
+import { boundedSync, reconcile, RECOVERY_EXPIRY_MS, walletSynced } from "../payments/recovery.js";
+import { acquireWalletLock, BusyError } from "../payments/lock.js";
 import type { AuditEntry, Config, PossibleSend } from "../types.js";
+import type { SyncResult } from "../chain/sync.js";
 import { ReadRejection, runReadTool, type ReadDeps } from "./read.js";
 
 /** Where a zcash_pay call stands. */
@@ -29,6 +31,12 @@ export interface PaymentStatus {
   code?: string;
   possible_sends?: PossibleSend[];
   message: string;
+  /**
+   * Set when the wallet could not be synced first (the sync timed out, or a send held the
+   * wallet). The state is the last one the wallet knew; wallet_height says how far it got.
+   */
+  stale?: boolean;
+  sync_note?: string;
 }
 
 function lookup(config: Config, input: PaymentStatusInput): { callId: string; record?: PaymentRecord; key?: string } {
@@ -38,6 +46,9 @@ function lookup(config: Config, input: PaymentStatusInput): { callId: string; re
     throw new ReadRejection("INVALID_LOOKUP", "Give exactly one of call_id or idempotency_key.");
   }
   const index = paymentIndexFor(config);
+  // A call made by another process on the same audit log: re-read the log once.
+  const known = byCall ? index.byCallId(input.call_id!) : index.byIdempotencyKey(input.idempotency_key!);
+  if (!known) index.reload();
   if (byCall) {
     const record = index.byCallId(input.call_id!);
     if (!record) throw new ReadRejection("PAYMENT_NOT_FOUND", "No zcash_pay call with this call_id in the audit log.");
@@ -49,8 +60,14 @@ function lookup(config: Config, input: PaymentStatusInput): { callId: string; re
 }
 
 /** Look a known txid up in wallet history: mined, broadcast, or failed. */
-async function byTxid(chain: ChainAdapter, txid: string, sentAt: number, now: number): Promise<Partial<PaymentStatus> & { state: PaymentState; message: string }> {
-  const tx = (await chain.getHistory(50)).find((t) => t.txid === txid);
+async function byTxid(
+  chain: ChainAdapter,
+  txid: string,
+  sentAt: number,
+  now: number,
+  offline: boolean
+): Promise<Partial<PaymentStatus> & { state: PaymentState; message: string }> {
+  const tx = (await chain.getHistory(50, { offline })).find((t) => t.txid === txid);
   if (!tx) {
     return now - sentAt < RECOVERY_EXPIRY_MS
       ? { state: "broadcast", txid, message: "Sent; not in the wallet's history yet." }
@@ -88,11 +105,8 @@ export async function paymentStatus(
   // Reserved by a call still running in this process.
   if (!record) return { ...base, state: "pending", message: "The payment is being sent now." };
   const result = record.result;
-  const intent = record.intent as AuditEntry | undefined;
-  const amount = (result ?? intent)?.amount_zats;
-  const started = Date.parse((intent ?? result)!.ts);
-
   if (result?.status === "rejected" || result?.status === "error") {
+    const amount = (result ?? record.intent)?.amount_zats;
     return {
       ...base,
       state: "failed",
@@ -101,21 +115,73 @@ export async function paymentStatus(
       message: `Not sent: ${result.error ?? result.code ?? result.status}.`,
     };
   }
+  if (record.recovery?.status === "not_found" && !(result?.status === "ok")) {
+    return { ...base, state: "expired", amount_zats: (result ?? record.intent)?.amount_zats, message: record.recovery.note };
+  }
+  if (!chain.syncWallet) return fromChain(config, chain, record, base, now, undefined);
+
+  // Live: sync first, bounded by STATUS_SYNC_TIMEOUT_MS, so a mined payment reads as
+  // mined. Only while no send holds the wallet; never wait for one.
+  let release: (() => void) | undefined;
+  try {
+    release = await acquireWalletLock(chain, 0, "zcash_payment_status");
+  } catch (e) {
+    if (!(e instanceof BusyError)) throw e;
+  }
+  try {
+    const sync = release ? await boundedSync(chain) : undefined;
+    const s = await fromChain(config, chain, record, base, now, sync);
+    if (sync?.complete) return s;
+    let walletHeight = s.wallet_height;
+    if (walletHeight === undefined) {
+      try {
+        walletHeight = await chain.walletHeight?.();
+      } catch {
+        walletHeight = undefined;
+      }
+    }
+    return {
+      ...s,
+      stale: true,
+      wallet_height: walletHeight,
+      sync_note: release
+        ? `Wallet sync did not finish: ${sync?.detail ?? "no detail"}. This is the last state the wallet knew.`
+        : "Another send or sync holds the wallet, so it was not synced. This is the last state the wallet knew.",
+    };
+  } finally {
+    release?.();
+  }
+}
+
+async function fromChain(
+  config: Config,
+  chain: ChainAdapter,
+  record: PaymentRecord,
+  base: { call_id: string; idempotency_key?: string },
+  now: number,
+  sync: SyncResult | undefined
+): Promise<PaymentStatus> {
+  // Live reads are offline: the bounded sync, if any, already ran under the lock.
+  const offline = chain.syncWallet !== undefined;
+  const result = record.result;
+  const intent = record.intent as AuditEntry | undefined;
+  const amount = (result ?? intent)?.amount_zats;
+  const started = Date.parse((intent ?? result)!.ts);
+
   if (result?.status === "ok" && result.mock_txid) {
-    return { ...base, amount_zats: amount, ...(await byTxid(chain, result.mock_txid, started, now)) };
+    return { ...base, amount_zats: amount, ...(await byTxid(chain, result.mock_txid, started, now, offline)) };
   }
   if (record.recovery?.status === "confirmed" && record.recovery.txid) {
-    return { ...base, amount_zats: amount, ...(await byTxid(chain, record.recovery.txid, started, now)) };
-  }
-  if (record.recovery?.status === "not_found") {
-    return { ...base, state: "expired", amount_zats: amount, message: record.recovery.note };
+    return { ...base, amount_zats: amount, ...(await byTxid(chain, record.recovery.txid, started, now, offline)) };
   }
   if (!intent) return { ...base, state: "unknown", amount_zats: amount, code: result?.code, message: "No pending row to check against." };
 
   // Outcome not recorded (SEND_UNCONFIRMED, or the process stopped mid-send): look for it.
-  const r = await reconcile(record, chain, { now, synced: walletSynced(chain, config.healthMaxLagBlocks ?? 10) });
+  const lagOk = walletSynced(chain, config.healthMaxLagBlocks ?? 10);
+  const synced = async () => (!offline || sync?.complete === true) && (await lagOk());
+  const r = await reconcile(record, chain, { now, synced, offline });
   const common = { ...base, amount_zats: amount, code: result?.code };
-  if (r.status === "confirmed" && r.txid) return { ...common, ...(await byTxid(chain, r.txid, started, now)) };
+  if (r.status === "confirmed" && r.txid) return { ...common, ...(await byTxid(chain, r.txid, started, now, offline)) };
   if (r.status === "not_found") return { ...common, state: "expired", message: r.note };
   const candidates = r.possible_sends ?? [];
   if (candidates.length === 1 && candidates[0].status !== "failed") {

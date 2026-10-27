@@ -5,6 +5,10 @@ import type { ChainAdapter } from "./types.js";
 import type { ChainHealth, OutgoingNote, PaymentReceipt, PaymentRequest, TxSummary, WalletBalance } from "../types.js";
 import { assertTestnetAddress, NetworkError } from "./network.js";
 import { ChainUnreachableError, CliTimeoutError, SendOutcomeUnknownError } from "./outcome.js";
+import { defaultSyncer, type SyncResult, type WalletSyncer } from "./sync.js";
+
+/** Used when a test injects a runner and no syncer: no process is started. */
+const skipSync: WalletSyncer = async () => ({ complete: true, elapsedMs: 0 });
 
 export const TESTNET_EXPLORER = "https://blockexplorer.one/zcash/testnet/tx/";
 
@@ -33,6 +37,26 @@ export const DEFAULT_HEALTH_TIMEOUT_MS = 30_000;
 export function healthTimeoutMs(): number {
   const v = Number(process.env.ZINGO_HEALTH_TIMEOUT_MS);
   return Number.isFinite(v) && v > 0 ? v : DEFAULT_HEALTH_TIMEOUT_MS;
+}
+
+/** Default limit for the bounded sync before a status answer or recovery. */
+export const DEFAULT_STATUS_SYNC_TIMEOUT_MS = 90_000;
+/** Default limit for the bounded sync before the pre-send funds check. */
+export const DEFAULT_HEALTH_SYNC_TIMEOUT_MS = 90_000;
+
+function envMs(name: string, fallback: number): number {
+  const v = Number(process.env[name]);
+  return Number.isFinite(v) && v >= 0 ? v : fallback;
+}
+
+/** STATUS_SYNC_TIMEOUT_MS: how long zcash_payment_status and recovery sync first. 0 skips it. */
+export function statusSyncTimeoutMs(): number {
+  return envMs("STATUS_SYNC_TIMEOUT_MS", DEFAULT_STATUS_SYNC_TIMEOUT_MS);
+}
+
+/** HEALTH_SYNC_TIMEOUT_MS: how long a live send syncs before checking funds. 0 skips it. */
+export function healthSyncTimeoutMs(): number {
+  return envMs("HEALTH_SYNC_TIMEOUT_MS", DEFAULT_HEALTH_SYNC_TIMEOUT_MS);
 }
 
 export function readTimeoutMs(): number {
@@ -106,6 +130,13 @@ export interface LiveOptions {
   dataDir?: string;
   server?: string;
   runner?: CliRunner;
+  /**
+   * Runs the bounded sync. Defaults to the real zingo-cli prompt, except when a test
+   * passes its own runner without a syncer: then sync is skipped and reported complete.
+   */
+  syncer?: WalletSyncer;
+  /** Directory for the wallet lock file. Defaults to the wallet directory, or none for a test runner. */
+  lockDir?: string;
   /** Clock for the export_ufvk backoff. Tests pass a fake one. */
   now?: () => number;
 }
@@ -126,8 +157,14 @@ export class LiveChainAdapter implements ChainAdapter {
   get walletId(): string {
     return `live:${this.dataDir}`;
   }
+  /**
+   * Where the wallet lock file lives: beside the wallet, so every process on it shares
+   * one. Undefined only for test adapters built with a runner and no lockDir.
+   */
+  readonly lockDir?: string;
   readonly server: string;
   private readonly runner: CliRunner;
+  private readonly syncer: WalletSyncer;
   /** Cached in memory only, for this process. Never logged or written. */
   private viewingKey?: Promise<string>;
   private viewKeyFailures = 0;
@@ -143,6 +180,8 @@ export class LiveChainAdapter implements ChainAdapter {
     this.dataDir = resolveWalletDir(opts.dataDir);
     this.server = opts.server ?? "https://testnet.zec.rocks:443";
     this.runner = opts.runner ?? defaultRunner;
+    this.syncer = opts.syncer ?? (opts.runner ? skipSync : defaultSyncer);
+    this.lockDir = opts.lockDir ?? (opts.runner ? undefined : this.dataDir);
     this.now = opts.now ?? Date.now;
   }
 
@@ -158,20 +197,49 @@ export class LiveChainAdapter implements ChainAdapter {
     return this.runner(this.bin, [...this.baseArgs(), ...cmd], opts);
   }
 
-  /** Read-only: runs `balance` and `spendable_balance`. Never sends. */
-  async getBalance(): Promise<WalletBalance> {
+  /**
+   * Read-only: runs `balance` and `spendable_balance`. Never sends. With `offline`, reads
+   * the wallet file as last synced and starts no sync of its own.
+   */
+  async getBalance(opts: { offline?: boolean } = {}): Promise<WalletBalance> {
     const timeoutMs = readTimeoutMs();
-    const pools = parseBalance(await this.run(["balance"], { timeoutMs }));
-    const spendableZats = parseSpendable(await this.run(["spendable_balance"], { timeoutMs }));
+    const args = (cmd: string) => (opts.offline ? this.offline(cmd) : [...this.baseArgs(), cmd]);
+    const pools = parseBalance(await this.runner(this.bin, args("balance"), { timeoutMs }));
+    const spendableZats = parseSpendable(await this.runner(this.bin, args("spendable_balance"), { timeoutMs }));
     return { ...pools, spendableZats };
   }
 
   /**
-   * Read-only pre-send check. `info` asks the server for the chain tip, without --waitsync
-   * so it cannot block on a sync. `height` and `spendable_balance` read the wallet file in
-   * offline sessions. Every run has a short timeout.
+   * Sync the wallet to the chain tip, for at most `timeoutMs`, through zingo-cli's prompt.
+   * Read-only on the chain: it scans blocks and saves the wallet, and never sends. The
+   * caller must hold the wallet lock, since it writes the wallet file. Never throws.
    */
-  async checkHealth(): Promise<ChainHealth> {
+  async syncWallet(timeoutMs: number): Promise<SyncResult> {
+    if (timeoutMs <= 0) return { complete: false, elapsedMs: 0, detail: "sync skipped (timeout is 0)" };
+    const args = ["--chain", "testnet", "--server", this.server, "--data-dir", this.dataDir];
+    try {
+      return await this.syncer(this.bin, args, { timeoutMs });
+    } catch (e) {
+      return { complete: false, elapsedMs: 0, detail: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  /**
+   * Read-only pre-send check. First a bounded sync (HEALTH_SYNC_TIMEOUT_MS), because a
+   * wallet that has not finished scanning reports a spendable balance of 0. Then `info`
+   * asks the server for the chain tip without syncing, and `height` and
+   * `spendable_balance` read the wallet file in offline sessions. Every run has a timeout.
+   * `synced` tells the caller whether the sync finished.
+   */
+  async checkHealth(opts: { sync?: boolean } = {}): Promise<ChainHealth> {
+    let synced: boolean | undefined;
+    let syncDetail: string | undefined;
+    const syncMs = healthSyncTimeoutMs();
+    if (opts.sync !== false && syncMs > 0) {
+      const r = await this.syncWallet(syncMs);
+      synced = r.complete;
+      syncDetail = r.detail;
+    }
     const timeoutMs = healthTimeoutMs();
     let chainTip: number;
     try {
@@ -184,10 +252,13 @@ export class LiveChainAdapter implements ChainAdapter {
         `lightwalletd at ${this.server} did not report the chain tip: ${e instanceof Error ? e.message : String(e)}`
       );
     }
-    const offline = (cmd: string) => ["--chain", "testnet", "--data-dir", this.dataDir, "--offline", cmd];
-    const walletHeight = parseWalletHeight(await this.runner(this.bin, offline("height"), { timeoutMs }));
-    const spendableZats = parseSpendable(await this.runner(this.bin, offline("spendable_balance"), { timeoutMs }));
-    return { walletHeight, chainTip, spendableZats };
+    const walletHeight = parseWalletHeight(await this.runner(this.bin, this.offline("height"), { timeoutMs }));
+    const spendableZats = parseSpendable(await this.runner(this.bin, this.offline("spendable_balance"), { timeoutMs }));
+    return { walletHeight, chainTip, spendableZats, ...(synced === undefined ? {} : { synced }), ...(syncDetail ? { syncDetail } : {}) };
+  }
+
+  private offline(cmd: string): string[] {
+    return ["--chain", "testnet", "--data-dir", this.dataDir, "--offline", cmd];
   }
 
   /** Read-only, offline: the height the wallet has synced to. */
@@ -196,15 +267,20 @@ export class LiveChainAdapter implements ChainAdapter {
     return parseWalletHeight(await this.runner(this.bin, args, { timeoutMs: healthTimeoutMs() }));
   }
 
-  /** Read-only: runs `transactions` and returns the newest `limit` entries. */
-  async getHistory(limit: number): Promise<TxSummary[]> {
-    const all = parseTransactions(await this.run(["transactions"], { timeoutMs: readTimeoutMs() }));
+  /**
+   * Read-only: runs `transactions` and returns the newest `limit` entries. With
+   * `offline`, reads the wallet file as last synced and starts no sync of its own.
+   */
+  async getHistory(limit: number, opts: { offline?: boolean } = {}): Promise<TxSummary[]> {
+    const args = opts.offline ? this.offline("transactions") : [...this.baseArgs(), "transactions"];
+    const all = parseTransactions(await this.runner(this.bin, args, { timeoutMs: readTimeoutMs() }));
     return all.slice(0, limit);
   }
 
   /** Read-only: runs `addresses` and returns the newest unified address. Refuses a mainnet one. */
-  async getReceiveAddress(): Promise<string> {
-    const address = parseReceiveAddress(await this.run(["addresses"], { timeoutMs: readTimeoutMs() }));
+  async getReceiveAddress(opts: { offline?: boolean } = {}): Promise<string> {
+    const args = opts.offline ? this.offline("addresses") : [...this.baseArgs(), "addresses"];
+    const address = parseReceiveAddress(await this.runner(this.bin, args, { timeoutMs: readTimeoutMs() }));
     assertTestnetAddress(address);
     return address;
   }

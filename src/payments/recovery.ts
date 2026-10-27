@@ -3,7 +3,9 @@ import { writeAuditRow } from "../audit/log.js";
 import { matchSend } from "../tools/pay.js";
 import type { AuditEntry, Config, MatchConfidence, PossibleSend } from "../types.js";
 import { paymentIndexFor, type PaymentRecord } from "./index.js";
-import { SEND_QUEUE_WAIT_MAX_MS, sendLockFor } from "./lock.js";
+import { acquireWalletLock, SEND_QUEUE_WAIT_MAX_MS } from "./lock.js";
+import { statusSyncTimeoutMs } from "../chain/live.js";
+import type { SyncResult } from "../chain/sync.js";
 
 /**
  * How long after its pending row a send that never showed up counts as not sent. zingo-cli
@@ -42,7 +44,7 @@ export interface RecoveryAuditEntry {
 export async function reconcile(
   record: PaymentRecord,
   chain: ChainAdapter,
-  opts: { now?: number; synced: boolean | (() => Promise<boolean>) }
+  opts: { now?: number; synced: boolean | (() => Promise<boolean>); offline?: boolean }
 ): Promise<RecoveryAuditEntry> {
   const intent = record.intent as AuditEntry;
   const now = opts.now ?? Date.now();
@@ -60,7 +62,7 @@ export async function reconcile(
   let matches: PossibleSend[];
   let heights = new Map<string, number | undefined>();
   try {
-    const txs = await chain.getHistory(50);
+    const txs = await chain.getHistory(50, { offline: opts.offline });
     matches = [];
     for (const t of txs) {
       const m = matchSend(t, target, startedAt);
@@ -125,7 +127,7 @@ export async function recoverPendingPayments(
   if (todo.length === 0) return [];
   let release: () => void;
   try {
-    release = await sendLockFor(chain).acquire(SEND_QUEUE_WAIT_MAX_MS);
+    release = await acquireWalletLock(chain, SEND_QUEUE_WAIT_MAX_MS, "recovery");
   } catch {
     return [];
   }
@@ -143,10 +145,13 @@ async function recoverLocked(
   opts: { now?: number; maxLagBlocks?: number }
 ): Promise<RecoveryAuditEntry[]> {
   const index = paymentIndexFor(config);
-  const synced = walletSynced(chain, opts.maxLagBlocks ?? config.healthMaxLagBlocks ?? 10);
+  // Sync first, bounded, then read history offline so no read starts a sync of its own.
+  const sync = await boundedSync(chain);
+  const lagOk = walletSynced(chain, opts.maxLagBlocks ?? config.healthMaxLagBlocks ?? 10);
+  const synced = async () => (sync === undefined || sync.complete) && (await lagOk());
   const rows: RecoveryAuditEntry[] = [];
   for (const record of todo) {
-    const row = await reconcile(record, chain, { now: opts.now, synced });
+    const row = await reconcile(record, chain, { now: opts.now, synced, offline: sync !== undefined });
     writeAuditRow(config, row);
     index.recordRecovery(row);
     rows.push(row);
@@ -164,10 +169,20 @@ export function walletSynced(chain: ChainAdapter, maxLag: number): () => Promise
     (answer ??= (async () => {
       if (!chain.checkHealth) return true;
       try {
-        const h = await chain.checkHealth();
+        // No sync here: callers run the bounded sync first.
+        const h = await chain.checkHealth({ sync: false });
         return h.chainTip - h.walletHeight <= maxLag;
       } catch {
         return false;
       }
     })());
+}
+
+/**
+ * The bounded sync for status and recovery, STATUS_SYNC_TIMEOUT_MS at most. The caller
+ * holds the wallet lock. Undefined for a chain that has no sync (mock).
+ */
+export async function boundedSync(chain: ChainAdapter): Promise<SyncResult | undefined> {
+  if (!chain.syncWallet) return undefined;
+  return chain.syncWallet(statusSyncTimeoutMs());
 }
