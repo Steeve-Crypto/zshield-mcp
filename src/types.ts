@@ -21,11 +21,13 @@ export interface Config {
   lightwalletd?: string;
 }
 
-export type PayStatus = "ok" | "rejected" | "error";
+export type PayStatus = "pending" | "ok" | "rejected" | "error";
 
 export interface AuditEntry {
   ts: string;
   tool: "zcash_pay";
+  /** Correlates the pending row written before a send with its result row */
+  call_id: string;
   amount_zec: number;
   recipient: string;
   allowlist_hit: boolean;
