@@ -6,7 +6,9 @@ import { assertRecipientAllowed, isRecipientAllowed, loadAllowlist } from "../po
 import type { AuditEntry, Config, PayStatus } from "../types.js";
 
 export const payInputSchema = z.object({
-  amount_zec: z.number().describe("Amount of ZEC to pay (must be <= spending cap)"),
+  amount_zec: z
+    .union([z.string(), z.number()])
+    .describe('Amount of ZEC to pay as a decimal string like "0.05" or a number, at most 8 decimals (must be <= spending cap)'),
   recipient: z.string().describe("Recipient address; must be on the allow-list"),
   memo: z.string().max(512).optional().describe("Optional memo (mock only)"),
 });
@@ -28,12 +30,13 @@ export async function executePay(
   let status: PayStatus = "ok";
   let error: string | undefined;
   let mockTxid: string | undefined;
+  let amountZats: bigint | undefined;
   let viewKeyFingerprint = fingerprintViewKey("none", config.viewKeyFingerprintSalt);
 
   try {
     const allowlist = loadAllowlist(config.allowlistPath);
     allowlistHit = isRecipientAllowed(input.recipient, allowlist);
-    assertWithinCap(input.amount_zec, config.spendingCapZec);
+    amountZats = assertWithinCap(input.amount_zec, config.spendingCapZec);
     assertRecipientAllowed(input.recipient, allowlist);
 
     if (config.chainMode === "live" && chain.mode !== "live") {
@@ -41,7 +44,7 @@ export async function executePay(
     }
 
     const receipt = await chain.pay({
-      amountZec: input.amount_zec,
+      amountZats,
       recipient: input.recipient,
       memo: input.memo,
     });
@@ -60,6 +63,7 @@ export async function executePay(
     ts: new Date().toISOString(),
     tool: "zcash_pay",
     amount_zec: input.amount_zec,
+    amount_zats: amountZats?.toString(),
     recipient: input.recipient,
     allowlist_hit: allowlistHit,
     cap_zec: config.spendingCapZec,
@@ -88,6 +92,7 @@ export async function executePay(
         status: "ok",
         txid: mockTxid,
         amount_zec: input.amount_zec,
+        amount_zats: amountZats?.toString(),
         recipient: input.recipient,
         mode: config.chainMode,
         view_key_fingerprint: viewKeyFingerprint,
