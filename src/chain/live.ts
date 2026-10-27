@@ -269,7 +269,8 @@ export function parseReceiveAddress(out: string): string {
  * Parse `zingo-cli transactions`. It prints one `{ ... }` block per transaction with
  * top-level fields indented by four spaces (txid, datetime, status, blockheight, kind,
  * value, fee) and nested note lists indented deeper, which are ignored here.
- * Returns newest first: pending entries without a height, then by height descending.
+ * Returns newest first: entries that are not confirmed, then confirmed ones by mined
+ * height descending.
  */
 export function parseTransactions(out: string): TxSummary[] {
   const txs: TxSummary[] = [];
@@ -282,19 +283,27 @@ export function parseTransactions(out: string): TxSummary[] {
     if (!txid || !/^[0-9a-f]{64}$/i.test(txid)) continue;
     const value = fields.get("value");
     if (!value || !/^[\d_]+$/.test(value)) continue;
-    const height = fields.get("blockheight");
+    const heightText = fields.get("blockheight");
+    const height = heightText && /^\d+$/.test(heightText) ? Number(heightText) : undefined;
+    const status = fields.get("status") || "unknown";
+    // zingo-cli prints a height for every status. Only a confirmed one is a mined height;
+    // for the rest it is the target height the transaction was built for.
+    const confirmed = status === "confirmed";
     const fee = fields.get("fee") ?? fields.get("transaction fee");
     txs.push({
       txid: txid.toLowerCase(),
       time: toIso(fields.get("datetime")),
-      status: fields.get("status") || "unknown",
-      blockHeight: height && /^\d+$/.test(height) ? Number(height) : undefined,
+      status,
+      blockHeight: confirmed ? height : undefined,
+      targetHeight: confirmed ? undefined : height,
       kind: fields.get("kind") || "unknown",
       valueZats: BigInt(value.replace(/_/g, "")),
       feeZats: fee && /^[\d_]+$/.test(fee) ? BigInt(fee.replace(/_/g, "")) : undefined,
     });
   }
-  return txs.sort((a, b) => (b.blockHeight ?? Infinity) - (a.blockHeight ?? Infinity) || 0);
+  const height = (t: TxSummary) => t.blockHeight ?? Number.MAX_SAFE_INTEGER;
+  const time = (t: TxSummary) => (t.time ? Date.parse(t.time) || 0 : 0);
+  return txs.sort((a, b) => height(b) - height(a) || time(b) - time(a));
 }
 
 /** "2026-10-12 14:23:01 UTC" becomes "2026-10-12T14:23:01.000Z". */

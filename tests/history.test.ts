@@ -75,12 +75,56 @@ describe("zingo-cli transactions parsing", () => {
     const sent = txs[1];
     assert.equal(sent.kind, "sent");
     assert.equal(sent.status, "transmitted");
-    assert.equal(sent.blockHeight, 4493939);
+    // A transmitted tx has a target height from zingo-cli, not a mined height.
+    assert.equal(sent.blockHeight, undefined);
+    assert.equal(sent.targetHeight, 4493939);
     assert.equal(sent.valueZats, 100_000n);
     assert.equal(sent.feeZats, 10_000n);
     assert.equal(sent.time, "2026-10-13T00:51:59.000Z");
     assert.equal(txs[0].blockHeight, undefined);
     assert.equal(txs[0].valueZats, 1_000n);
+  });
+  it("reports the mined height only for confirmed transactions", () => {
+    // The same send after a full sync: it was mined at 4493943.
+    const out = `{
+    txid: ${TX}
+    datetime: 2026-10-13 00:52:06 UTC
+    status: confirmed
+    blockheight: 4493943
+    kind: sent
+    value: 100000
+    fee: 10000
+}
+{
+    txid: ${"bb".repeat(32)}
+    datetime: 2026-10-15 10:00:00 UTC
+    status: failed
+    blockheight: 4495000
+    kind: sent
+    value: 2000
+    fee: 10000
+}`;
+    const [failed, mined] = parseTransactions(out);
+    assert.equal(mined.status, "confirmed");
+    assert.equal(mined.blockHeight, 4493943);
+    assert.equal(mined.targetHeight, undefined);
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.blockHeight, undefined);
+    assert.equal(failed.targetHeight, 4495000);
+  });
+  it("puts unconfirmed entries first, newest first, then confirmed by height", () => {
+    const block = (txid: string, status: string, height: number, dt: string) =>
+      `{\n    txid: ${txid}\n    datetime: ${dt}\n    status: ${status}\n    blockheight: ${height}\n    kind: sent\n    value: 1\n}`;
+    const out = [
+      block("1".repeat(64), "confirmed", 100, "2026-10-01 00:00:00 UTC"),
+      block("2".repeat(64), "transmitted", 150, "2026-10-02 00:00:00 UTC"),
+      block("3".repeat(64), "confirmed", 120, "2026-10-01 01:00:00 UTC"),
+      block("4".repeat(64), "mempool", 160, "2026-10-03 00:00:00 UTC"),
+    ].join("\n");
+    assert.deepEqual(
+      parseTransactions(out).map((t) => t.txid[0]),
+      ["4", "2", "3", "1"]
+    );
   });
   it("returns an empty list when there are no transactions", () => {
     assert.deepEqual(parseTransactions("Launching save task...\nSave task shutdown successfully."), []);
@@ -151,6 +195,10 @@ describe("executeHistory", () => {
     assert.equal(body.count, 3);
     assert.equal(body.transactions[1].explorer_url, `https://blockexplorer.one/zcash/testnet/tx/${TX}`);
     assert.equal(body.transactions[1].value_zec, "0.001");
+    assert.equal(body.transactions[1].block_height, undefined);
+    assert.equal(body.transactions[1].target_height, 4493939);
+    assert.equal(body.transactions[2].block_height, 4492422);
+    assert.equal(body.transactions[2].target_height, undefined);
   });
 
   it("rejects a bad limit, audits it, and never calls the CLI", async () => {

@@ -86,9 +86,19 @@ export interface TxSummary {
   txid: string;
   /** ISO-8601 time, when known */
   time?: string;
-  /** For example confirmed, transmitted, or mempool */
+  /**
+   * As zingo-cli reports it: confirmed (mined), transmitted (sent to the server, not yet
+   * seen in a block by this wallet), mempool, calculated (built, not sent), or failed
+   * (expired or rejected without being mined, so its inputs are spendable again)
+   */
   status: string;
+  /** Block the transaction was mined in. Only set when status is confirmed */
   blockHeight?: number;
+  /**
+   * For a transaction that is not confirmed, the height it was built for. It expires
+   * unmined about 40 blocks later. Not a mined height
+   */
+  targetHeight?: number;
   /** For example sent or received */
   kind: string;
   /** Value moved, in integer zatoshis */

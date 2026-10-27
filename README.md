@@ -199,7 +199,9 @@ In testnet mode it comes from `zingo-cli addresses`, and a mainnet address is re
 |-----|------|----------|-------------|
 | `limit` | integer | no | How many recent transactions to return. Default `10`, allowed `1` to `50` |
 
-Returns recent transactions, newest first. Pending ones with no block height come first.
+Returns recent transactions, newest first. Ones that are not confirmed yet come first.
+
+`status` is what `zingo-cli` reports. `confirmed` means mined, and `block_height` is the block it was mined in. `transmitted` means the wallet sent it but has not seen it in a block yet, which can simply mean the wallet has not synced that far. `mempool` and `calculated` are also not mined yet. `failed` means it expired or was rejected without being mined, so its funds are spendable again. For anything not confirmed, `block_height` is absent and `target_height` is the height it was built for. It expires unmined about 40 blocks after that.
 
 ```json
 {
@@ -209,9 +211,9 @@ Returns recent transactions, newest first. Pending ones with no block height com
   "transactions": [
     {
       "txid": "59d9cb1b5a47…",
-      "time": "2026-10-13T00:51:59.000Z",
-      "status": "transmitted",
-      "block_height": 4493939,
+      "time": "2026-10-13T00:52:06.000Z",
+      "status": "confirmed",
+      "block_height": 4493943,
       "kind": "sent",
       "value_zats": "100000",
       "value_zec": "0.001",

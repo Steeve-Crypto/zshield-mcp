@@ -39,6 +39,7 @@ export async function executeHistory(input: HistoryInput, deps: ReadDeps) {
         time: t.time,
         status: t.status,
         block_height: t.blockHeight,
+        target_height: t.targetHeight,
         kind: t.kind,
         value_zats: t.valueZats.toString(),
         value_zec: formatZats(t.valueZats),
