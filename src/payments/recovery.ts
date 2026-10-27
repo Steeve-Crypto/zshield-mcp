@@ -41,7 +41,7 @@ export interface RecoveryAuditEntry {
 export async function reconcile(
   record: PaymentRecord,
   chain: ChainAdapter,
-  opts: { now?: number; synced: boolean }
+  opts: { now?: number; synced: boolean | (() => Promise<boolean>) }
 ): Promise<RecoveryAuditEntry> {
   const intent = record.intent as AuditEntry;
   const now = opts.now ?? Date.now();
@@ -94,7 +94,7 @@ export async function reconcile(
           : "A matching transaction was found but is not mined yet.",
     };
   }
-  if (!opts.synced) {
+  if (now - startedAt >= RECOVERY_EXPIRY_MS && !(typeof opts.synced === "function" ? await opts.synced() : opts.synced)) {
     return { ...base, status: "unknown", note: "No match, but the wallet is not synced to the chain tip." };
   }
   if (now - startedAt < RECOVERY_EXPIRY_MS) {
@@ -121,15 +121,7 @@ export async function recoverPendingPayments(
   const index = paymentIndexFor(config);
   const todo = index.unresolved();
   if (todo.length === 0) return [];
-  let synced = true;
-  if (chain.checkHealth) {
-    try {
-      const h = await chain.checkHealth();
-      synced = h.chainTip - h.walletHeight <= (opts.maxLagBlocks ?? config.healthMaxLagBlocks ?? 10);
-    } catch {
-      synced = false;
-    }
-  }
+  const synced = walletSynced(chain, opts.maxLagBlocks ?? config.healthMaxLagBlocks ?? 10);
   const rows: RecoveryAuditEntry[] = [];
   for (const record of todo) {
     const row = await reconcile(record, chain, { now: opts.now, synced });
@@ -138,4 +130,22 @@ export async function recoverPendingPayments(
     rows.push(row);
   }
   return rows;
+}
+
+/**
+ * A once-only check that the wallet is within `maxLag` blocks of the chain tip. Asks the
+ * server only when first called. A chain with no health check (mock) counts as synced.
+ */
+export function walletSynced(chain: ChainAdapter, maxLag: number): () => Promise<boolean> {
+  let answer: Promise<boolean> | undefined;
+  return () =>
+    (answer ??= (async () => {
+      if (!chain.checkHealth) return true;
+      try {
+        const h = await chain.checkHealth();
+        return h.chainTip - h.walletHeight <= maxLag;
+      } catch {
+        return false;
+      }
+    })());
 }

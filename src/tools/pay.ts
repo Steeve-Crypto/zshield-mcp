@@ -33,7 +33,7 @@ class ViewKeyUnavailable extends Error {}
 
 /** Shown with SEND_UNCONFIRMED so a client does not retry blindly. */
 export const SEND_UNCONFIRMED_GUIDANCE =
-  "The payment may have been broadcast. Do not retry yet. Call zcash_history and look for a sent transaction with this amount; retry only if none appears after the wallet has synced.";
+  "The payment may have been broadcast. Do not retry with a new idempotency key. Call zcash_payment_status with this call_id; pay again only if it reports expired.";
 
 /** How far back a history entry may be and still count as a match for an unknown send. */
 export const MATCH_WINDOW_MS = 30 * 60_000;
@@ -327,7 +327,7 @@ function replay(input: PayInput, deps: PayDeps, callId: string, originalCallId: 
   }
   // In flight in this process, or a pending row with no result (the process stopped mid-send).
   const message =
-    "A payment with this idempotency key was started and has no recorded result yet. It was not sent again. Check its status before doing anything else.";
+    "A payment with this idempotency key was started and has no recorded result yet. It was not sent again. Call zcash_payment_status with this idempotency_key.";
   return {
     ok: false,
     code: "PAYMENT_PENDING",

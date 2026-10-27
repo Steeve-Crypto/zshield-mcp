@@ -39,7 +39,7 @@ export async function runReadTool<T>(
   config: Config,
   fn: () => Promise<T>,
   toJson: (data: T) => Record<string, unknown>,
-  extra: Pick<ReadAuditEntry, "limit"> = {}
+  extra: Pick<ReadAuditEntry, "limit" | "ref_call_id"> | (() => Pick<ReadAuditEntry, "limit" | "ref_call_id">) = {}
 ): Promise<ReadResult<T>> {
   let data: T | undefined;
   let status: ReadAuditEntry["status"] = "ok";
@@ -66,7 +66,7 @@ export async function runReadTool<T>(
     status,
     code,
     error,
-    ...extra,
+    ...(typeof extra === "function" ? extra() : extra),
   };
   const auditWarning = writeAuditRow(config, audit).warning;
 

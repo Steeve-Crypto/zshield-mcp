@@ -109,7 +109,7 @@ describe("SEND_UNCONFIRMED", () => {
     assert.equal(body.status, "unknown");
     assert.equal(body.code, "SEND_UNCONFIRMED");
     assert.match(body.message, /may have been broadcast/);
-    assert.match(body.message, /zcash_history/);
+    assert.match(body.message, /zcash_payment_status/);
     assert.deepEqual(body.possible_txids, [TXID]);
     assert.equal(body.possible_sends[0].confidence, "medium");
     const rows = readAuditRows(config);

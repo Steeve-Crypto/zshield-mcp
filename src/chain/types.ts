@@ -21,4 +21,6 @@ export interface ChainAdapter {
    * pre-send check. Throws ChainUnreachableError when the server does not answer in time.
    */
   checkHealth?(): Promise<ChainHealth>;
+  /** Read-only, offline. The height the wallet has synced to, for confirmation counts. */
+  walletHeight?(): Promise<number>;
 }

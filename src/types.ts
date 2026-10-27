@@ -71,7 +71,7 @@ export interface AuditEntry {
 }
 
 /** Read-only tools. They never move funds. */
-export type ReadTool = "zcash_balance" | "zcash_receive_address" | "zcash_history";
+export type ReadTool = "zcash_balance" | "zcash_receive_address" | "zcash_history" | "zcash_payment_status";
 
 /** One audit row per read-only tool call. Holds no balances, addresses, or keys. */
 export interface ReadAuditEntry {
@@ -85,6 +85,8 @@ export interface ReadAuditEntry {
   error?: string;
   /** zcash_history only: the limit that was asked for */
   limit?: unknown;
+  /** zcash_payment_status only: the zcash_pay call that was looked up, when found */
+  ref_call_id?: string;
 }
 
 /** One summary row for calls refused by the rate limit in a window. Holds no caller input. */

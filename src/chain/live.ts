@@ -188,6 +188,12 @@ export class LiveChainAdapter implements ChainAdapter {
     return { walletHeight, chainTip, spendableZats };
   }
 
+  /** Read-only, offline: the height the wallet has synced to. */
+  async walletHeight(): Promise<number> {
+    const args = ["--chain", "testnet", "--data-dir", this.dataDir, "--offline", "height"];
+    return parseWalletHeight(await this.runner(this.bin, args, { timeoutMs: healthTimeoutMs() }));
+  }
+
   /** Read-only: runs `transactions` and returns the newest `limit` entries. */
   async getHistory(limit: number): Promise<TxSummary[]> {
     const all = parseTransactions(await this.run(["transactions"], { timeoutMs: readTimeoutMs() }));

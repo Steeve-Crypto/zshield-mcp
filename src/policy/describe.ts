@@ -5,7 +5,7 @@ import type { Config } from "../types.js";
 
 export const POLICY_URI = "zshield://policy";
 export const PAYMENT_TOOLS = ["zcash_pay"] as const;
-export const READ_ONLY_TOOLS = ["zcash_balance", "zcash_receive_address", "zcash_history"] as const;
+export const READ_ONLY_TOOLS = ["zcash_balance", "zcash_receive_address", "zcash_history", "zcash_payment_status"] as const;
 
 /**
  * Snapshot of the active policy for the zshield://policy resource.
