@@ -22,9 +22,9 @@ export class NetworkError extends Error {
 export function assertTestnetAddress(addr: string): void {
   const net = addressNetwork(addr);
   if (net === "mainnet") {
-    throw new NetworkError(`Mainnet address rejected in testnet mode: ${addr.slice(0, 12)}...`);
+    throw new NetworkError("Mainnet address rejected in testnet mode.");
   }
   if (net !== "testnet") {
-    throw new NetworkError(`Unrecognized address network: ${addr.slice(0, 12)}...`);
+    throw new NetworkError("Unrecognized address network.");
   }
 }

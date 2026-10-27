@@ -63,8 +63,10 @@ Or during development: `"command": "npx", "args": ["tsx", "src/index.ts"]` with 
 | Arg | Type | Required | Description |
 |-----|------|----------|-------------|
 | `amount_zec` | number | yes | Must be `> 0` and `<= SPENDING_CAP_ZEC` |
-| `recipient` | string | yes | Must exactly match an allow-list `address` |
-| `memo` | string | no | Optional memo (mock) |
+| `recipient` | string | yes | At most 256 characters, visible ASCII only. Must exactly match an allow-list `address` |
+| `memo` | string | no | Optional memo, at most 512 UTF-8 bytes (the Zcash memo size) |
+
+Oversized or malformed input is rejected before anything else runs. Error messages never repeat the recipient or memo, and errors from `zingo-cli` have them replaced with `[recipient]` and `[memo]`. Each audit row is capped at 8 KiB, see [docs/AUDIT.md](docs/AUDIT.md).
 
 Resource `zshield://policy` returns the active cap, allow-list path, and chain mode.
 

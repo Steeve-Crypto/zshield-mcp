@@ -29,6 +29,7 @@ export interface AuditEntry {
   /** Correlates the pending row written before a send with its result row */
   call_id: string;
   amount_zec: number;
+  /** Address as passed; an oversized one is cut to a prefix and recipient_sha256 is set */
   recipient: string;
   allowlist_hit: boolean;
   cap_zec: number;
@@ -37,6 +38,10 @@ export interface AuditEntry {
   view_key_fingerprint: string;
   error?: string;
   memo?: string;
+  /** Only when the recipient was too long to store: sha256 of the full value */
+  recipient_sha256?: string;
+  /** Set when the row was shortened to fit the size limit */
+  truncated?: boolean;
 }
 
 export interface PaymentRequest {

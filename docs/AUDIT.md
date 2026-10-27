@@ -12,14 +12,18 @@ Every call writes at least one row. A call that passes policy writes a `pending`
 | `tool` | `"zcash_pay"` | Always |
 | `call_id` | string | Same value on the `pending` row and its result row |
 | `amount_zec` | number | Requested amount |
-| `recipient` | string | Address as passed to the tool |
+| `recipient` | string | Address as passed to the tool. One longer than 256 characters is cut to its first 64, and `recipient_sha256` holds the hash of the full value |
+| `recipient_sha256` | string? | Only on rows with an oversized recipient |
 | `allowlist_hit` | boolean | Whether recipient was on the allow-list |
 | `cap_zec` | number | Active hard per-call cap |
 | `status` | `pending` \| `ok` \| `rejected` \| `error` | `pending` is written before the send; the others are outcomes |
 | `mock_txid` | string? | Present on success in mock mode |
 | `view_key_fingerprint` | string | `sha256(salt \| viewKeyMaterial)[0:16]`, **never** the raw key |
 | `error` | string? | Policy or runtime message |
-| `memo` | string? | Optional memo |
+| `memo` | string? | Optional memo, at most 512 UTF-8 bytes |
+| `truncated` | boolean? | Present when the row was shortened to fit the size limit |
+
+Each row is capped at 8 KiB (8192 bytes of UTF-8 JSON). If a row would be larger, string fields over 1024 characters are cut and marked `...[truncated]`. If it is still too large, only the identifying fields are kept (`ts`, `tool`, `call_id`, `status`, `mock_txid`, `recipient_sha256`, `view_key_fingerprint`, and the `code` once codes exist). The tool response carries the same bounded row.
 
 ## Retention
 
