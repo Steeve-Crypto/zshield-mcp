@@ -198,8 +198,19 @@ async function fromChain(
   if (record.txid && (record.state === "sent" || record.state === "mined")) {
     const s = await byTxid(chain, record.txid, started, now, offline);
     if (s.state === "mined") safely(() => store.advance({ ts: new Date(now).toISOString(), call_id: record.callId, state: "mined", txid: record.txid, block_height: s.block_height, by: "status" }));
+    if (record.state === "mined" && s.state !== "mined") {
+      // Seen mined before. A read that no longer shows it (a reorg, or a wallet rescan)
+      // never moves the call back; report what was recorded and why it may look different.
+      return {
+        ...base,
+        amount_zats: amount,
+        state: "mined",
+        txid: record.txid,
+        block_height: record.blockHeight,
+        message: `Mined${record.blockHeight !== undefined ? ` at height ${record.blockHeight}` : ""} when last seen; the wallet now reports it as ${s.state}. Check the explorer. Do not pay again.`,
+      };
+    }
     // A txid the send itself returned was broadcast; never report it as anything less.
-    if (s.state === "unknown" || s.state === "failed") return { ...base, amount_zats: amount, ...s };
     return { ...base, amount_zats: amount, ...s };
   }
   if (!intent) return { ...common, state: "unknown", message: "No intent recorded to check against. Do not pay again." };
