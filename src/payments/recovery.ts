@@ -2,7 +2,7 @@ import type { ChainAdapter } from "../chain/types.js";
 import { writeAuditRow } from "../audit/log.js";
 import { lookalikeSends, MATCH_AFTER_MS, MATCH_SKEW_MS, matchHistory, placedInTime } from "../tools/pay.js";
 import type { Config, MatchConfidence, PossibleSend } from "../types.js";
-import { acquireWalletLock, SEND_QUEUE_WAIT_MAX_MS, type WalletLock } from "./lock.js";
+import { acquireWalletLock, BusyError, type WalletLock } from "./lock.js";
 import { isSettled, storeFor, type CallEvent, type CallRecord, type CallState, type PaymentStore } from "./store.js";
 import { statusSyncTimeoutMs } from "../chain/live.js";
 import type { SyncResult } from "../chain/sync.js";
@@ -16,6 +16,17 @@ export const RECOVERY_EXPIRY_MS = 2 * 60 * 60_000;
 export const TX_EXPIRY_BLOCKS = 40;
 /** Extra blocks past expiry before a missing send counts as proven not sent. */
 export const EXPIRY_MARGIN_BLOCKS = 10;
+
+/** Startup recovery handles at most this many calls per run, so one lock hold stays short. */
+export const RECOVERY_MAX_CALLS = 100;
+/** Once this long has passed, recovery stops after the call it is on and lets go of the lock. */
+export const RECOVERY_BUDGET_MS = 120_000;
+/** Recovery's own sync never runs longer than this, whatever STATUS_SYNC_TIMEOUT_MS says. */
+export const RECOVERY_SYNC_MAX_MS = 120_000;
+/** How long one attempt to take the wallet lock waits, and how many attempts recovery makes. */
+export const RECOVERY_LOCK_WAIT_MS = 60_000;
+export const RECOVERY_LOCK_ATTEMPTS = 5;
+export const RECOVERY_LOCK_PAUSE_MS = 5_000;
 
 /** Recovery outcome for a call with no settled result. */
 export type RecoveryStatus = "confirmed" | "not_found" | "unknown";
@@ -204,8 +215,20 @@ export function recordReconcile(store: PaymentStore, row: RecoveryAuditEntry, by
   return store.advance(eventFor(row, by));
 }
 
+export interface RecoveryOptions {
+  now?: number;
+  maxLagBlocks?: number;
+  /** Calls per run. Default RECOVERY_MAX_CALLS. */
+  maxCalls?: number;
+  /** Milliseconds before the run stops taking new calls. Default RECOVERY_BUDGET_MS. */
+  budgetMs?: number;
+  lockWaitMs?: number;
+  lockAttempts?: number;
+  lockPauseMs?: number;
+}
+
 /**
- * On startup: reconcile every call with a pending marker (the process stopped mid-send,
+ * On startup: reconcile up to RECOVERY_MAX_CALLS calls with a pending marker (the process stopped mid-send,
  * or the outcome was unknown). Holds the wallet lease while it runs, so no send overlaps
  * it, and re-reads each call fresh before deciding, so a call another process settled is
  * skipped. Writes one recovery audit row per call it decides. Never resends. Never throws.
@@ -213,7 +236,7 @@ export function recordReconcile(store: PaymentStore, row: RecoveryAuditEntry, by
 export async function recoverPendingPayments(
   config: Config,
   chain: ChainAdapter,
-  opts: { now?: number; maxLagBlocks?: number } = {}
+  opts: RecoveryOptions = {}
 ): Promise<RecoveryAuditEntry[]> {
   let store: PaymentStore;
   let todo: string[];
@@ -224,12 +247,20 @@ export async function recoverPendingPayments(
     return [];
   }
   if (todo.length === 0) return [];
-  let lock: WalletLock;
-  try {
-    lock = await acquireWalletLock(store, SEND_QUEUE_WAIT_MAX_MS, "recovery");
-  } catch {
-    return [];
+  // A bounded wait per attempt, with the in-process queue released in between, so a long
+  // send in another process neither stalls this server's own payments nor lets recovery
+  // wait without end.
+  let lock: WalletLock | undefined;
+  const attempts = Math.max(1, opts.lockAttempts ?? RECOVERY_LOCK_ATTEMPTS);
+  for (let i = 0; i < attempts && !lock; i++) {
+    try {
+      lock = await acquireWalletLock(store, opts.lockWaitMs ?? RECOVERY_LOCK_WAIT_MS, "recovery");
+    } catch (e) {
+      if (!(e instanceof BusyError)) return [];
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, opts.lockPauseMs ?? RECOVERY_LOCK_PAUSE_MS));
+    }
   }
+  if (!lock) return [];
   try {
     return await recoverLocked(config, chain, store, lock, todo, opts);
   } catch {
@@ -245,10 +276,10 @@ async function recoverLocked(
   store: PaymentStore,
   lock: WalletLock,
   todo: string[],
-  opts: { now?: number; maxLagBlocks?: number }
+  opts: RecoveryOptions
 ): Promise<RecoveryAuditEntry[]> {
   // Sync first, bounded, then read history offline so no read starts a sync of its own.
-  const sync = await boundedSync(chain);
+  const sync = await boundedSync(chain, RECOVERY_SYNC_MAX_MS);
   const evidence = chainEvidence(chain, sync, opts.maxLagBlocks ?? config.healthMaxLagBlocks ?? 10);
   // One history read for the whole run: the wallet does not change while the lease is
   // held, and N pending calls should not mean N full reads.
@@ -257,7 +288,12 @@ async function recoverLocked(
     getHistory: { value: (limit: number, o?: { offline?: boolean }) => (history ??= chain.getHistory(limit, o)) },
   });
   const rows: RecoveryAuditEntry[] = [];
-  for (const callId of todo) {
+  const budgetMs = opts.budgetMs ?? RECOVERY_BUDGET_MS;
+  const started = Date.now();
+  for (const callId of todo.slice(0, opts.maxCalls ?? RECOVERY_MAX_CALLS)) {
+    // Let timers run, the lease heartbeat among them, between calls.
+    await new Promise<void>((r) => setImmediate(r));
+    if (rows.length > 0 && Date.now() - started >= budgetMs) break;
     try {
       lock.assertHeld();
     } catch {
@@ -311,7 +347,7 @@ export function chainEvidence(chain: ChainAdapter, sync: SyncResult | undefined,
  * The bounded sync for status and recovery, STATUS_SYNC_TIMEOUT_MS at most. The caller
  * holds the wallet lock. Undefined for a chain that has no sync (mock).
  */
-export async function boundedSync(chain: ChainAdapter): Promise<SyncResult | undefined> {
+export async function boundedSync(chain: ChainAdapter, maxMs = Infinity): Promise<SyncResult | undefined> {
   if (!chain.syncWallet) return undefined;
-  return chain.syncWallet(statusSyncTimeoutMs());
+  return chain.syncWallet(Math.min(statusSyncTimeoutMs(), maxMs));
 }

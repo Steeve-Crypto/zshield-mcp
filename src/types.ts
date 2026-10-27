@@ -166,6 +166,12 @@ export interface PaymentRequest {
   amountZats: bigint;
   recipient: string;
   memo?: string;
+  /**
+   * Called synchronously right before the wallet process is started, with nothing in
+   * between. It throws if the caller no longer holds the wallet lease; the send is then
+   * not started. The live adapter honors it; the mock chain has nothing to fence.
+   */
+  fence?: () => void;
 }
 
 export interface PaymentReceipt {

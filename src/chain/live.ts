@@ -15,8 +15,10 @@ const skipSync: WalletSyncer = async () => ({ complete: true, elapsedMs: 0 });
 export const TESTNET_EXPLORER = "https://blockexplorer.one/zcash/testnet/tx/";
 
 export interface RunOptions {
-  /** Kill the CLI after this many milliseconds. */
+  /** Stop the CLI after this many milliseconds: SIGTERM, then SIGKILL after killGraceMs. */
   timeoutMs?: number;
+  /** How long a CLI that ignores SIGTERM gets before SIGKILL. Default RUNNER_KILL_GRACE_MS. */
+  killGraceMs?: number;
   /**
    * Written to the CLI's stdin, which is then closed. Used to drive the interactive prompt
    * so payment details never appear in argv. When set, stderr is appended to the result,
@@ -107,10 +109,17 @@ export function redactingRunner(runner: CliRunner): CliRunner {
   };
 }
 
+/** A CLI that ignores SIGTERM after its timeout is killed outright after this long. */
+export const RUNNER_KILL_GRACE_MS = 5_000;
+
 export const defaultRunner: CliRunner = (bin, args, opts = {}) =>
   new Promise((resolve, reject) => {
     const timeout = opts.timeoutMs ?? SEND_TIMEOUT_MS;
+    // execFile's own timeout only sends SIGTERM, and a process can ignore it and keep the
+    // call, and the wallet lock above it, waiting forever. This timer makes the bound hard.
+    const hardKill = setTimeout(() => child.kill("SIGKILL"), timeout + (opts.killGraceMs ?? RUNNER_KILL_GRACE_MS));
     const child = execFile(bin, args, { maxBuffer: 16 * 1024 * 1024, timeout }, (err, stdout, stderr) => {
+      clearTimeout(hardKill);
       if (err) {
         const detail = (stderr || err.message).toString().slice(0, 500);
         // execFile sets killed and signal when the timeout fires or the process is killed.
@@ -374,6 +383,8 @@ export class LiveChainAdapter implements ChainAdapter {
     const input = buildSendInput(req);
     let out: string;
     try {
+      // The last check, with nothing between it and the start of the wallet process.
+      req.fence?.();
       out = await this.runner(this.bin, this.baseArgs(), { timeoutMs: SEND_TIMEOUT_MS, input });
     } catch (e) {
       // A send that was cut off may still have been broadcast.

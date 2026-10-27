@@ -40,6 +40,9 @@ function assertNetworkAllowed(recipient: string, config: Config): void {
 
 class ViewKeyUnavailable extends Error {}
 
+/** The wallet lease was lost at the last moment before the wallet process would start. */
+class FenceError extends Error {}
+
 /** Shown with SEND_UNCONFIRMED so a client does not retry blindly. */
 export const SEND_UNCONFIRMED_GUIDANCE =
   "The payment may have been broadcast. Do not pay again. Call zcash_payment_status with this call_id; it reports expired only once the wallet proves the payment was never sent.";
@@ -610,6 +613,17 @@ async function runPay(
       }
     }
 
+    // The health check can take minutes. Read the key's binding again now that the lease is
+    // proven: if another call took it meanwhile, this call is a replay and sends nothing.
+    if (policyPassed && amountZats !== undefined && lock && keyFields.idempotency_key) {
+      const other = store.readKey(keyFields.idempotency_key);
+      if (other && other.call_id !== callId) {
+        lock.release();
+        lock = undefined;
+        return priorUse(input, deps, store, callId, keyFields.idempotency_key, keyFields.params_sha256!)!;
+      }
+    }
+
     if (policyPassed && amountZats !== undefined && lock) {
       // Record the intent, then the audit pending row, then bind the key: all on disk
       // before the broadcast. The key is bound last so a call that stops here leaves it
@@ -682,7 +696,18 @@ async function runPay(
 
       if (ready) {
         try {
-          const receipt = await chain.pay({ amountZats, recipient: input.recipient, memo: input.memo });
+          const receipt = await chain.pay({
+            amountZats,
+            recipient: input.recipient,
+            memo: input.memo,
+            fence: () => {
+              try {
+                lock!.assertHeld();
+              } catch (e) {
+                throw new FenceError(lostLeaseMessage(e));
+              }
+            },
+          });
           mockTxid = receipt.txid;
           status = "ok";
           code = undefined;
@@ -704,6 +729,9 @@ async function runPay(
               callId
             );
             recordSafely(store, { ts: now(), call_id: callId, state: "unknown", code, error, possible_sends: possibleSends, by: "send" }, warnings);
+          } else if (e instanceof FenceError) {
+            fail("error", "BUSY", e.message);
+            recordSafely(store, { ts: now(), call_id: callId, state: "not_sent", code, error, by: "send" }, warnings);
           } else {
             fail("error", "CHAIN_ERROR", redactInput(e instanceof Error ? e.message : String(e), input));
             recordSafely(store, { ts: now(), call_id: callId, state: "not_sent", code, error, by: "send" }, warnings);
