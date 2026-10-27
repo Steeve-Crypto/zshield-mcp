@@ -49,7 +49,7 @@ export interface AuditEntry {
 }
 
 /** Read-only tools. They never move funds. */
-export type ReadTool = "zcash_balance";
+export type ReadTool = "zcash_balance" | "zcash_receive_address";
 
 /** One audit row per read-only tool call. Holds no balances, addresses, or keys. */
 export interface ReadAuditEntry {

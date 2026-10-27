@@ -26,6 +26,7 @@ describe("MCP server", () => {
     const names = (await client.listTools()).tools.map((t) => t.name).sort();
     assert.ok(names.includes("zcash_pay"));
     assert.ok(names.includes("zcash_balance"));
+    assert.ok(names.includes("zcash_receive_address"));
   });
 
   it("answers zcash_balance in mock mode", async () => {
@@ -34,5 +35,12 @@ describe("MCP server", () => {
     assert.equal(res.isError, false);
     const body = JSON.parse(textOf(res));
     assert.equal(body.spendable_zec, "10");
+  });
+
+  it("answers zcash_receive_address in mock mode", async () => {
+    const { client } = await connect();
+    const res = await client.callTool({ name: "zcash_receive_address", arguments: {} });
+    assert.equal(res.isError, false);
+    assert.match(JSON.parse(textOf(res)).address, /^u1mockwallet/);
   });
 });

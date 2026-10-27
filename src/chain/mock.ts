@@ -4,6 +4,8 @@ import type { PaymentReceipt, PaymentRequest, WalletBalance } from "../types.js"
 
 /** Flat fee the mock charges per send, in zatoshis (matches the ZIP 317 minimum of 10,000). */
 export const MOCK_FEE_ZATS = 10_000n;
+/** Fixed, obviously fake unified address for the mock wallet. */
+export const MOCK_RECEIVE_ADDRESS = "u1mockwallet" + "0".repeat(60);
 /** Default starting balance of the mock wallet: 10 ZEC. */
 export const MOCK_START_ZATS = 1_000_000_000n;
 
@@ -92,5 +94,9 @@ export class MockChainAdapter implements ChainAdapter {
       spendableZats: this.balanceZats,
       unconfirmedZats: 0n,
     };
+  }
+
+  async getReceiveAddress(): Promise<string> {
+    return MOCK_RECEIVE_ADDRESS;
   }
 }

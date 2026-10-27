@@ -28,7 +28,7 @@ Each row is capped at 8 KiB (8192 bytes of UTF-8 JSON). If a row would be larger
 
 ## Read-only tool rows
 
-Read-only tools such as `zcash_balance` write one row per call with these fields: `ts`, `tool`, `call_id`, `mode` (`mock` or `live`), `status` (`ok`, `rejected`, or `error`), and `error` when the call failed. They never record balances, addresses, or transaction details.
+Read-only tools (`zcash_balance`, `zcash_receive_address`) write one row per call with these fields: `ts`, `tool`, `call_id`, `mode` (`mock` or `live`), `status` (`ok`, `rejected`, or `error`), and `error` when the call failed. They never record balances, addresses, or transaction details.
 
 ## Retention
 
