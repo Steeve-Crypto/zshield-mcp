@@ -108,3 +108,66 @@ export function appendAuditEntry(auditDir: string, entry: AuditEntry | ReadAudit
   appendDurable(file, `${JSON.stringify(boundAuditEntry(entry))}\n`);
   return file;
 }
+
+/** Where rows go when the main audit directory cannot be written: AUDIT_FALLBACK_PATH, else beside the audit dir. */
+export function fallbackAuditPath(auditDir: string, configured?: string): string {
+  return configured ?? join(dirname(auditDir), "audit-fallback.jsonl");
+}
+
+export interface AuditWriteResult {
+  /** True when the row reached disk, in the main log or the fallback file. */
+  durable: boolean;
+  /** The file the row went to, when durable. */
+  file?: string;
+  /** Set when the main log failed. */
+  warning?: string;
+}
+
+type AuditRow = AuditEntry | ReadAuditEntry | RateLimitAuditEntry;
+type StderrWrite = (line: string) => void;
+
+function msg(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * Write one audit row and never throw. Tries the main log, retries once, then appends to
+ * the fallback file (mode 0600, fsynced). If that also fails, the row goes to stderr and
+ * the result says it is not durable. Any failure is reported in `warning`.
+ */
+export function writeAuditRow(
+  target: { auditDir: string; auditFallbackPath?: string },
+  entry: AuditRow,
+  stderr: StderrWrite = (line) => process.stderr.write(line)
+): AuditWriteResult {
+  const { auditDir } = target;
+  let mainError = "";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return { durable: true, file: appendAuditEntry(auditDir, entry) };
+    } catch (e) {
+      mainError = msg(e);
+    }
+  }
+  const line = `${JSON.stringify(boundAuditEntry(entry))}\n`;
+  const fallback = fallbackAuditPath(auditDir, target.auditFallbackPath);
+  try {
+    ensureDurableDir(dirname(fallback));
+    appendDurable(fallback, line);
+    return {
+      durable: true,
+      file: fallback,
+      warning: `Audit row could not be written to ${auditDir} (${mainError}); it was written to ${fallback}.`,
+    };
+  } catch (e) {
+    try {
+      stderr(`zshield-mcp audit (not written to disk): ${line}`);
+    } catch {
+      // Nothing left to try.
+    }
+    return {
+      durable: false,
+      warning: `Audit row could not be written to ${auditDir} (${mainError}) or ${fallback} (${msg(e)}); it was printed to stderr only.`,
+    };
+  }
+}

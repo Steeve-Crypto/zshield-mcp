@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { ChainAdapter } from "../chain/types.js";
-import { appendAuditEntry, fingerprintViewKey } from "../audit/log.js";
+import { fingerprintViewKey, writeAuditRow } from "../audit/log.js";
 import { assertWithinCap, PolicyError } from "../policy/caps.js";
 import { assertRecipientAllowed, isRecipientAllowed, loadAllowlist } from "../policy/allowlist.js";
 import { assertPayInputBounded, MAX_MEMO_BYTES, MAX_RECIPIENT_LENGTH, memoProblem } from "../policy/limits.js";
@@ -140,6 +140,7 @@ export async function executePay(
 
   let policyPassed = false;
   let intentWriteFailed = false;
+  const warnings: string[] = [];
   try {
     // Bound caller strings first. The schema enforces the same limits for MCP calls; this
     // covers direct callers and keeps oversized values out of errors and audit rows.
@@ -173,15 +174,16 @@ export async function executePay(
   }
 
   if (policyPassed && amountZats !== undefined) {
-    // Record intent before broadcast. If this write fails, nothing is sent.
+    // Record intent before broadcast, fsynced to the main log or the fallback file.
+    // If it cannot be made durable anywhere, nothing is sent.
     status = "pending";
-    try {
-      appendAuditEntry(config.auditDir, entry());
-    } catch (e) {
+    const intent = writeAuditRow(config, entry());
+    if (intent.warning) warnings.push(intent.warning);
+    if (!intent.durable) {
       intentWriteFailed = true;
       status = "error";
       code = "AUDIT_WRITE_FAILED";
-      error = `Audit write failed before send; payment not sent: ${e instanceof Error ? e.message : String(e)}`;
+      error = `Audit write failed before send; payment not sent: ${intent.warning}`;
     }
 
     if (!intentWriteFailed) {
@@ -211,17 +213,11 @@ export async function executePay(
 
   // The response carries the same bounded row that goes to disk.
   const audit = boundAuditEntry(entry());
-  let auditWarning: string | undefined;
-  try {
-    appendAuditEntry(config.auditDir, audit);
-  } catch (e) {
-    // Never throw here. A send may already have happened, and throwing would hide the txid
-    // and invite a retry that pays twice. Report the failed write alongside the result instead.
-    // When the intent write already failed, nothing was sent and that error is already reported.
-    if (!intentWriteFailed) {
-      auditWarning = `Result audit row could not be written: ${e instanceof Error ? e.message : String(e)}`;
-    }
-  }
+  // writeAuditRow never throws. A send may already have happened, and throwing would hide
+  // the txid and invite a retry that pays twice. A failed write is reported with the result.
+  const final = writeAuditRow(config, audit);
+  if (final.warning) warnings.push(final.warning);
+  const auditWarning = warnings.length > 0 ? warnings.join(" ") : undefined;
 
   if (status !== "ok") {
     return {

@@ -21,6 +21,7 @@ export function loadConfig(cwd = process.cwd()): Config {
     allowlist_path: string;
     chain_mode: string;
     audit_dir: string;
+    audit_fallback_path: string;
     view_key_fingerprint_salt: string;
     rate_limit_per_min: number | string;
   }> = {};
@@ -46,6 +47,8 @@ export function loadConfig(cwd = process.cwd()): Config {
     );
   }
 
+  const fallbackPath = envOr<string | undefined>("AUDIT_FALLBACK_PATH", fromFile.audit_fallback_path, (v) => v);
+
   return {
     spendingCapZec,
     allowlistPath: resolve(
@@ -54,6 +57,7 @@ export function loadConfig(cwd = process.cwd()): Config {
     ),
     chainMode,
     auditDir: resolve(cwd, envOr("AUDIT_DIR", fromFile.audit_dir ?? "./audits", (v) => v)),
+    auditFallbackPath: fallbackPath === undefined ? undefined : resolve(cwd, fallbackPath),
     viewKeyFingerprintSalt: envOr(
       "VIEW_KEY_FINGERPRINT_SALT",
       fromFile.view_key_fingerprint_salt ?? "dev-only-change-me",

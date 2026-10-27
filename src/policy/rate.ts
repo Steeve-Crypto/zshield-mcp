@@ -1,4 +1,4 @@
-import { appendAuditEntry } from "../audit/log.js";
+import { writeAuditRow } from "../audit/log.js";
 import type { RateLimitAuditEntry } from "../types.js";
 
 export const RATE_LIMIT_DEFAULT_PER_MIN = 60;
@@ -23,7 +23,8 @@ export class RateLimiter {
     private readonly limitPerMin: number,
     private readonly auditDir: string,
     private readonly now: () => number = Date.now,
-    private readonly windowMs: number = RATE_LIMIT_WINDOW_MS
+    private readonly windowMs: number = RATE_LIMIT_WINDOW_MS,
+    private readonly auditFallbackPath?: string
   ) {
     this.windowStart = this.now();
   }
@@ -73,11 +74,8 @@ export class RateLimiter {
       refused_by_tool: { ...this.refused },
     };
     this.refused = {};
-    try {
-      appendAuditEntry(this.auditDir, row);
-    } catch {
-      // A failed summary write must not break the next allowed call. The count is lost.
-    }
+    // Never throws: falls back to the fallback file, then stderr.
+    writeAuditRow({ auditDir: this.auditDir, auditFallbackPath: this.auditFallbackPath }, row);
   }
 }
 

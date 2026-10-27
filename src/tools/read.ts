@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { appendAuditEntry } from "../audit/log.js";
+import { writeAuditRow } from "../audit/log.js";
 import type { ChainAdapter } from "../chain/types.js";
 import { NetworkError } from "../chain/network.js";
 import type { ReadErrorCode } from "../errors.js";
@@ -68,12 +68,7 @@ export async function runReadTool<T>(
     error,
     ...extra,
   };
-  let auditWarning: string | undefined;
-  try {
-    appendAuditEntry(config.auditDir, audit);
-  } catch (e) {
-    auditWarning = `Audit row could not be written: ${e instanceof Error ? e.message : String(e)}`;
-  }
+  const auditWarning = writeAuditRow(config, audit).warning;
 
   if (status !== "ok" || data === undefined) {
     return {
