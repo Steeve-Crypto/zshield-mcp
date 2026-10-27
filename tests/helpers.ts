@@ -5,6 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../src/server.ts";
 import type { CliRunner } from "../src/chain/live.ts";
+import type { ChainAdapter } from "../src/chain/types.ts";
 import type { Config } from "../src/types.ts";
 
 export const ALLOWED = "u1mockrecipientaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -54,4 +55,35 @@ export const TEST_UFVK = "uviewtest1" + "q".repeat(80);
 export function withUfvk(runner: CliRunner): CliRunner {
   return async (bin, args, opts) =>
     args.includes("export_ufvk") ? JSON.stringify({ ufvk: TEST_UFVK, birthday: 1 }) : runner(bin, args, opts);
+}
+
+/** Read methods for fake chain adapters in pay tests. They fail if a test reaches them. */
+export const unusedReads: Pick<ChainAdapter, "getBalance" | "getReceiveAddress" | "getHistory"> = {
+  async getBalance() {
+    throw new Error("getBalance not expected in this test");
+  },
+  async getReceiveAddress() {
+    throw new Error("getReceiveAddress not expected in this test");
+  },
+  async getHistory() {
+    throw new Error("getHistory not expected in this test");
+  },
+};
+
+/**
+ * Runs `fn` with an environment variable set to `value`, or removed when `value` is
+ * undefined, then puts back whatever was there before. Keeps tests independent of the
+ * shell they run in.
+ */
+export async function withEnv<T>(name: string, value: string | undefined, fn: () => Promise<T>): Promise<T> {
+  const had = Object.prototype.hasOwnProperty.call(process.env, name);
+  const before = process.env[name];
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+  try {
+    return await fn();
+  } finally {
+    if (had) process.env[name] = before;
+    else delete process.env[name];
+  }
 }

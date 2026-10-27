@@ -7,6 +7,7 @@ import { MockChainAdapter, MOCK_UFVK } from "../src/chain/mock.ts";
 import { executePay } from "../src/tools/pay.ts";
 import type { ChainAdapter } from "../src/chain/types.ts";
 import type { AuditEntry, Config, PaymentRequest } from "../src/types.ts";
+import { unusedReads } from "./helpers.ts";
 
 function tempConfig(overrides: Partial<Config> = {}): Config {
   const root = mkdtempSync(join(tmpdir(), "zshield-pay-"));
@@ -48,7 +49,7 @@ describe("executePay (mock)", () => {
     assert.equal(result.audit.status, "ok");
     assert.ok(result.audit.mock_txid?.startsWith("mock_"));
     assert.equal(result.audit.allowlist_hit, true);
-    assert.match(result.audit.view_key_fingerprint, /^[a-f0-9]{16}$/);
+    assert.match(result.audit.view_key_fingerprint ?? "", /^[a-f0-9]{16}$/);
 
     const day = result.audit.ts.slice(0, 10);
     const log = readFileSync(join(config.auditDir, `${day}.jsonl`), "utf8");
@@ -115,6 +116,7 @@ describe("audit row is written before the chain send", () => {
     const config = tempConfig();
     let seenAtSend: AuditEntry[] = [];
     const chain: ChainAdapter = {
+      ...unusedReads,
       mode: "mock",
       getViewingKey: async () => MOCK_UFVK,
       async pay(_req: PaymentRequest) {
@@ -157,6 +159,7 @@ describe("audit row is written before the chain send", () => {
     const config = tempConfig();
     let calls = 0;
     const chain: ChainAdapter = {
+      ...unusedReads,
       mode: "mock",
       getViewingKey: async () => MOCK_UFVK,
       async pay() {
@@ -178,6 +181,7 @@ describe("audit row is written before the chain send", () => {
     const config = tempConfig({ auditDir: join(blocker, "audits") });
     let calls = 0;
     const chain: ChainAdapter = {
+      ...unusedReads,
       mode: "mock",
       getViewingKey: async () => MOCK_UFVK,
       async pay() {
@@ -196,6 +200,7 @@ describe("audit row is written before the chain send", () => {
     const config = tempConfig();
     let calls = 0;
     const chain: ChainAdapter = {
+      ...unusedReads,
       mode: "mock",
       getViewingKey: async () => MOCK_UFVK,
       async pay(req: PaymentRequest) {
