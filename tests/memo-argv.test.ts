@@ -101,7 +101,7 @@ process.stdin.on("end", () => {
   it("writes the input to stdin, keeps argv clean, and appends stderr", async () => {
     const { bin, record } = fakeCli();
     const a = new LiveChainAdapter({ network: "testnet", zingoBin: bin, dataDir: "/tmp/none", runner: withUfvk(defaultRunner) });
-    const memo = "it's private\nreally";
+    const memo = "it's private, \"really\" \\ ok";
     const r = await a.pay({ amountZats: 5_000n, recipient: UTEST, memo });
     assert.equal(r.txid, TXID);
     const seen = JSON.parse(readFileSync(record, "utf8"));
