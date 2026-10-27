@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { ChainAdapter } from "../chain/types.js";
 import { appendAuditEntry, fingerprintViewKey } from "../audit/log.js";
@@ -23,6 +24,7 @@ export async function executePay(
   deps: PayDeps
 ): Promise<{ ok: boolean; text: string; audit: AuditEntry }> {
   const { config, chain } = deps;
+  const callId = randomUUID();
   let allowlistHit = false;
 
   let status: PayStatus = "ok";
@@ -30,35 +32,10 @@ export async function executePay(
   let mockTxid: string | undefined;
   let viewKeyFingerprint = fingerprintViewKey("none", config.viewKeyFingerprintSalt);
 
-  try {
-    const allowlist = loadAllowlist(config.allowlistPath);
-    allowlistHit = isRecipientAllowed(input.recipient, allowlist);
-    assertWithinCap(input.amount_zec, config.spendingCapZec);
-    assertRecipientAllowed(input.recipient, allowlist);
-
-    if (config.chainMode === "live" && chain.mode !== "live") {
-      throw new Error("CHAIN_MODE=live but adapter is not live");
-    }
-
-    const receipt = await chain.pay({
-      amountZec: input.amount_zec,
-      recipient: input.recipient,
-      memo: input.memo,
-    });
-
-    mockTxid = receipt.txid;
-    viewKeyFingerprint = fingerprintViewKey(
-      receipt.viewKeyMaterial,
-      config.viewKeyFingerprintSalt
-    );
-  } catch (e) {
-    status = e instanceof PolicyError ? "rejected" : "error";
-    error = e instanceof Error ? e.message : String(e);
-  }
-
-  const audit: AuditEntry = {
+  const entry = (): AuditEntry => ({
     ts: new Date().toISOString(),
     tool: "zcash_pay",
+    call_id: callId,
     amount_zec: input.amount_zec,
     recipient: input.recipient,
     allowlist_hit: allowlistHit,
@@ -68,9 +45,64 @@ export async function executePay(
     view_key_fingerprint: viewKeyFingerprint,
     error,
     memo: input.memo,
-  };
+  });
 
-  appendAuditEntry(config.auditDir, audit);
+  let policyPassed = false;
+  let intentWriteFailed = false;
+  try {
+    const allowlist = loadAllowlist(config.allowlistPath);
+    allowlistHit = isRecipientAllowed(input.recipient, allowlist);
+    assertWithinCap(input.amount_zec, config.spendingCapZec);
+    assertRecipientAllowed(input.recipient, allowlist);
+
+    if (config.chainMode === "live" && chain.mode !== "live") {
+      throw new Error("CHAIN_MODE=live but adapter is not live");
+    }
+    policyPassed = true;
+  } catch (e) {
+    status = e instanceof PolicyError ? "rejected" : "error";
+    error = e instanceof Error ? e.message : String(e);
+  }
+
+  if (policyPassed) {
+    // Record intent before broadcast. If this write fails, nothing is sent.
+    status = "pending";
+    try {
+      appendAuditEntry(config.auditDir, entry());
+    } catch (e) {
+      intentWriteFailed = true;
+      status = "error";
+      error = `Audit write failed before send; payment not sent: ${e instanceof Error ? e.message : String(e)}`;
+    }
+
+    if (!intentWriteFailed) {
+      try {
+        const receipt = await chain.pay({
+          amountZec: input.amount_zec,
+          recipient: input.recipient,
+          memo: input.memo,
+        });
+
+        mockTxid = receipt.txid;
+        viewKeyFingerprint = fingerprintViewKey(
+          receipt.viewKeyMaterial,
+          config.viewKeyFingerprintSalt
+        );
+        status = "ok";
+      } catch (e) {
+        status = "error";
+        error = e instanceof Error ? e.message : String(e);
+      }
+    }
+  }
+
+  const audit = entry();
+  try {
+    appendAuditEntry(config.auditDir, audit);
+  } catch (e) {
+    // The intent write already failed and nothing was sent, so report that error instead.
+    if (!intentWriteFailed) throw e;
+  }
 
   if (status !== "ok") {
     return {

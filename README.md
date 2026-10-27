@@ -92,10 +92,10 @@ Allow-list shape:
 
 ## Audit log format
 
-JSONL per day: `audits/YYYY-MM-DD.jsonl`. Example success line:
+JSONL per day: `audits/YYYY-MM-DD.jsonl`. A call that passes policy writes a `pending` row before the chain send and a result row after it, linked by `call_id`. A rejected call writes one `rejected` row. Example success line:
 
 ```json
-{"ts":"2026-10-05T19:00:00.000Z","tool":"zcash_pay","amount_zec":0.05,"recipient":"u1…","allowlist_hit":true,"cap_zec":0.1,"status":"ok","mock_txid":"mock_…","view_key_fingerprint":"a1b2c3d4e5f60718","memo":"test"}
+{"ts":"2026-10-05T19:00:00.000Z","tool":"zcash_pay","call_id":"3f0c…","amount_zec":0.05,"recipient":"u1…","allowlist_hit":true,"cap_zec":0.1,"status":"ok","mock_txid":"mock_…","view_key_fingerprint":"a1b2c3d4e5f60718","memo":"test"}
 ```
 
 Raw viewing-key material is **never** written, only a short fingerprint. See [docs/AUDIT.md](docs/AUDIT.md).
