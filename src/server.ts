@@ -7,6 +7,7 @@ import { executePay, payInputSchema } from "./tools/pay.js";
 import { balanceInputSchema, executeBalance } from "./tools/balance.js";
 import { executeReceiveAddress, receiveAddressInputSchema } from "./tools/address.js";
 import { executeHistory, historyInputSchema, HISTORY_MAX_LIMIT } from "./tools/history.js";
+import { describePolicy, POLICY_URI } from "./policy/describe.js";
 import type { Config } from "./types.js";
 
 export function createChain(config: Config): ChainAdapter {
@@ -80,28 +81,15 @@ export function createServer(config: Config = loadConfig()): McpServer {
     }
   );
 
-  server.resource(
-    "policy",
-    "zshield://policy",
-    async () => ({
-      contents: [
-        {
-          uri: "zshield://policy",
-          mimeType: "application/json",
-          text: JSON.stringify(
-            {
-              spending_cap_zec: config.spendingCapZec,
-              allowlist_path: config.allowlistPath,
-              chain_mode: config.chainMode,
-              audit_dir: config.auditDir,
-            },
-            null,
-            2
-          ),
-        },
-      ],
-    })
-  );
+  server.resource("policy", POLICY_URI, { mimeType: "application/json" }, async () => ({
+    contents: [
+      {
+        uri: POLICY_URI,
+        mimeType: "application/json",
+        text: JSON.stringify(describePolicy(config), null, 2),
+      },
+    ],
+  }));
 
   return server;
 }

@@ -68,7 +68,40 @@ Or during development: `"command": "npx", "args": ["tsx", "src/index.ts"]` with 
 
 Oversized or malformed input is rejected before anything else runs. Error messages never repeat the amount text, recipient, or memo, and errors from `zingo-cli` have them replaced with `[recipient]` and `[memo]`. Each audit row is capped at 8 KiB, see [docs/AUDIT.md](docs/AUDIT.md).
 
-Resource `zshield://policy` returns the active cap, allow-list path, and chain mode.
+## Resource: `zshield://policy`
+
+Read this before paying to see the rules the server will apply. It is JSON, read fresh on every request:
+
+```json
+{
+  "mode": "mock",
+  "chain_adapter": "mock",
+  "mainnet": "refused",
+  "limits": {
+    "per_call_cap_zec": "0.1",
+    "per_call_cap_zats": "10000000",
+    "daily_or_rolling_cap": "none",
+    "amount_unit": "integer zatoshis, 1 ZEC = 100000000",
+    "max_decimals": 8
+  },
+  "allowlist": {
+    "path": "/abs/path/allowlists/recipients.example.json",
+    "size": 2,
+    "match": "exact address string"
+  },
+  "audit": {
+    "dir": "/abs/path/audits",
+    "every_call_audited": true,
+    "pending_row_before_send": true
+  },
+  "tools": {
+    "payment": ["zcash_pay"],
+    "read_only": ["zcash_balance", "zcash_receive_address", "zcash_history"]
+  }
+}
+```
+
+`mode` is `mock` or `testnet`. `size` counts unique addresses in the allow-list file right now. If the file cannot be read, `size` is `null`, `error` says why, and every `zcash_pay` call is rejected until it is fixed. The cap is per call only; there is no daily or rolling limit yet. The fingerprint salt is never shown.
 
 ## Read-only tools
 
