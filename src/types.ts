@@ -49,7 +49,7 @@ export interface AuditEntry {
 }
 
 /** Read-only tools. They never move funds. */
-export type ReadTool = "zcash_balance" | "zcash_receive_address";
+export type ReadTool = "zcash_balance" | "zcash_receive_address" | "zcash_history";
 
 /** One audit row per read-only tool call. Holds no balances, addresses, or keys. */
 export interface ReadAuditEntry {
@@ -59,6 +59,8 @@ export interface ReadAuditEntry {
   mode: ChainMode;
   status: "ok" | "rejected" | "error";
   error?: string;
+  /** zcash_history only: the limit that was asked for */
+  limit?: unknown;
 }
 
 /** Wallet balance in integer zatoshis. */
@@ -69,6 +71,21 @@ export interface WalletBalance {
   spendableZats: bigint;
   /** Seen but not yet confirmed */
   unconfirmedZats: bigint;
+}
+
+/** One wallet transaction, newest first in history results. */
+export interface TxSummary {
+  txid: string;
+  /** ISO-8601 time, when known */
+  time?: string;
+  /** For example confirmed, transmitted, or mempool */
+  status: string;
+  blockHeight?: number;
+  /** For example sent or received */
+  kind: string;
+  /** Value moved, in integer zatoshis */
+  valueZats: bigint;
+  feeZats?: bigint;
 }
 
 export interface PaymentRequest {

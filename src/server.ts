@@ -6,6 +6,7 @@ import { loadConfig } from "./config.js";
 import { executePay, payInputSchema } from "./tools/pay.js";
 import { balanceInputSchema, executeBalance } from "./tools/balance.js";
 import { executeReceiveAddress, receiveAddressInputSchema } from "./tools/address.js";
+import { executeHistory, historyInputSchema, HISTORY_MAX_LIMIT } from "./tools/history.js";
 import type { Config } from "./types.js";
 
 export function createChain(config: Config): ChainAdapter {
@@ -59,6 +60,19 @@ export function createServer(config: Config = loadConfig()): McpServer {
     receiveAddressInputSchema.shape,
     async () => {
       const result = await executeReceiveAddress({ config, chain });
+      return {
+        content: [{ type: "text" as const, text: result.text }],
+        isError: !result.ok,
+      };
+    }
+  );
+
+  server.tool(
+    "zcash_history",
+    `Read-only. Returns recent wallet transactions, newest first. Optional limit from 1 to ${HISTORY_MAX_LIMIT}, default 10. Never moves funds. Writes an audit row.`,
+    historyInputSchema.shape,
+    async (args) => {
+      const result = await executeHistory(historyInputSchema.parse(args), { config, chain });
       return {
         content: [{ type: "text" as const, text: result.text }],
         isError: !result.ok,

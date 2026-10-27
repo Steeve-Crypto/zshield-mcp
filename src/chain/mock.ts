@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { ChainAdapter } from "./types.js";
-import type { PaymentReceipt, PaymentRequest, WalletBalance } from "../types.js";
+import type { PaymentReceipt, PaymentRequest, TxSummary, WalletBalance } from "../types.js";
 
 /** Flat fee the mock charges per send, in zatoshis (matches the ZIP 317 minimum of 10,000). */
 export const MOCK_FEE_ZATS = 10_000n;
@@ -98,5 +98,20 @@ export class MockChainAdapter implements ChainAdapter {
 
   async getReceiveAddress(): Promise<string> {
     return MOCK_RECEIVE_ADDRESS;
+  }
+
+  async getHistory(limit: number): Promise<TxSummary[]> {
+    return this.txs
+      .slice()
+      .reverse()
+      .slice(0, limit)
+      .map((t) => ({
+        txid: t.txid,
+        time: t.datetime,
+        status: "confirmed",
+        kind: t.kind,
+        valueZats: t.valueZats,
+        feeZats: t.feeZats,
+      }));
   }
 }
