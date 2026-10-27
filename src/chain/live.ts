@@ -82,6 +82,13 @@ export class LiveChainAdapter implements ChainAdapter {
     return { ...pools, spendableZats };
   }
 
+  /** Read-only: runs `addresses` and returns the newest unified address. Refuses a mainnet one. */
+  async getReceiveAddress(): Promise<string> {
+    const address = parseReceiveAddress(await this.run(["addresses"], { timeoutMs: readTimeoutMs() }));
+    assertTestnetAddress(address);
+    return address;
+  }
+
   async pay(req: PaymentRequest): Promise<PaymentReceipt> {
     assertTestnetAddress(req.recipient);
     if (typeof req.amountZats !== "bigint" || req.amountZats <= 0n) {
@@ -140,4 +147,31 @@ export function parseSpendable(out: string): bigint {
   const m = out.match(/"?spendable_balance"?\s*:\s*([\d_]+)/i);
   if (!m) throw new Error(`zingo-cli spendable_balance returned no value: ${out.trim().slice(0, 300)}`);
   return parseZatsToken(m[1]);
+}
+
+/**
+ * Parse `zingo-cli addresses`, a JSON array of `{ account, address_index, encoded_address }`.
+ * Returns the address with the highest index on account 0, which is the newest one.
+ */
+export function parseReceiveAddress(out: string): string {
+  const start = out.indexOf("[");
+  const end = out.lastIndexOf("]");
+  if (start < 0 || end < start) {
+    throw new Error(`zingo-cli addresses returned no address list: ${out.trim().slice(0, 300)}`);
+  }
+  let list: unknown;
+  try {
+    list = JSON.parse(out.slice(start, end + 1));
+  } catch {
+    throw new Error(`zingo-cli addresses returned unreadable output: ${out.trim().slice(0, 300)}`);
+  }
+  if (!Array.isArray(list)) throw new Error("zingo-cli addresses did not return a list");
+  const entries = list
+    .filter((e): e is { account?: number; address_index?: number; encoded_address: string } =>
+      typeof e?.encoded_address === "string" && e.encoded_address.length > 0
+    )
+    .filter((e) => (e.account ?? 0) === 0)
+    .sort((a, b) => (b.address_index ?? 0) - (a.address_index ?? 0));
+  if (entries.length === 0) throw new Error("zingo-cli addresses returned no unified address");
+  return entries[0].encoded_address;
 }

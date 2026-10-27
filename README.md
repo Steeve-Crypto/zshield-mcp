@@ -95,6 +95,21 @@ Zatoshi values are strings so they stay exact in JSON. `confirmed` is the sum of
 
 In mock mode the wallet starts with 10 ZEC. Each mock payment takes the amount plus a 0.0001 ZEC fee, and a payment larger than the balance fails with an insufficient funds error.
 
+### `zcash_receive_address`
+
+No arguments. Returns the wallet's current unified address, which is the newest one on account 0:
+
+```json
+{
+  "ok": true,
+  "mode": "live",
+  "address": "utest14dsty0x36s…",
+  "network": "testnet"
+}
+```
+
+In testnet mode it comes from `zingo-cli addresses`, and a mainnet address is refused. In mock mode it is a fixed fake address that starts with `u1mockwallet`.
+
 ## Config: caps & allow-list
 
 Precedence: **environment variables** override `config/default.yaml`.

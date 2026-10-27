@@ -5,6 +5,7 @@ import type { ChainAdapter } from "./chain/types.js";
 import { loadConfig } from "./config.js";
 import { executePay, payInputSchema } from "./tools/pay.js";
 import { balanceInputSchema, executeBalance } from "./tools/balance.js";
+import { executeReceiveAddress, receiveAddressInputSchema } from "./tools/address.js";
 import type { Config } from "./types.js";
 
 export function createChain(config: Config): ChainAdapter {
@@ -45,6 +46,19 @@ export function createServer(config: Config = loadConfig()): McpServer {
     balanceInputSchema.shape,
     async () => {
       const result = await executeBalance({ config, chain });
+      return {
+        content: [{ type: "text" as const, text: result.text }],
+        isError: !result.ok,
+      };
+    }
+  );
+
+  server.tool(
+    "zcash_receive_address",
+    "Read-only. Returns the wallet's current unified address so others can pay it. Never moves funds. Writes an audit row.",
+    receiveAddressInputSchema.shape,
+    async () => {
+      const result = await executeReceiveAddress({ config, chain });
       return {
         content: [{ type: "text" as const, text: result.text }],
         isError: !result.ok,
