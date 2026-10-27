@@ -38,8 +38,7 @@ export function createChain(config: Config): ChainAdapter {
     : new MockChainAdapter();
 }
 
-export function createServer(config: Config = loadConfig()): McpServer {
-  const chain = createChain(config);
+export function createServer(config: Config = loadConfig(), chain: ChainAdapter = createChain(config)): McpServer {
   const limiter = new RateLimiter(
     config.rateLimitPerMin ?? RATE_LIMIT_DEFAULT_PER_MIN,
     config.auditDir,

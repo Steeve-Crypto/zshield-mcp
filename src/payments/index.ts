@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { fallbackAuditPath } from "../audit/log.js";
 import { parseZecToZats } from "../policy/amount.js";
 import type { AuditEntry } from "../types.js";
+import type { RecoveryAuditEntry } from "./recovery.js";
 
 /** What the index knows about one zcash_pay call, rebuilt from audit rows. */
 export interface PaymentRecord {
@@ -14,6 +15,8 @@ export interface PaymentRecord {
   intent?: AuditEntry;
   /** The last row after the send: ok, error, rejected, or unknown */
   result?: AuditEntry;
+  /** The latest startup recovery row, for a send with no result row */
+  recovery?: RecoveryAuditEntry;
 }
 
 interface Reservation {
@@ -82,6 +85,10 @@ export class PaymentIndex {
 
   /** Take in one audit row. Rows from other tools and replays are ignored. */
   record(row: Record<string, unknown>): void {
+    if (row.tool === "zcash_pay_recovery") {
+      this.recordRecovery(row as unknown as RecoveryAuditEntry);
+      return;
+    }
     if (row.tool !== "zcash_pay" || typeof row.call_id !== "string" || row.replay_of !== undefined) return;
     const entry = row as unknown as AuditEntry;
     let rec = this.byCall.get(entry.call_id);
@@ -96,6 +103,11 @@ export class PaymentIndex {
       rec.paramsSha256 = entry.params_sha256;
       if (!this.byKey.has(entry.idempotency_key)) this.byKey.set(entry.idempotency_key, entry.call_id);
     }
+  }
+
+  recordRecovery(row: RecoveryAuditEntry): void {
+    const rec = this.byCall.get(row.call_id);
+    if (rec) rec.recovery = row;
   }
 
   byCallId(callId: string): PaymentRecord | undefined {
@@ -120,9 +132,11 @@ export class PaymentIndex {
     if (this.reserved.get(key)?.callId === callId) this.reserved.delete(key);
   }
 
-  /** Calls with a pending row and no result row. */
+  /** Calls with a pending row, no result row, and no settled recovery row. */
   unresolved(): PaymentRecord[] {
-    return [...this.byCall.values()].filter((r) => r.intent && !r.result);
+    return [...this.byCall.values()].filter(
+      (r) => r.intent && !r.result && (r.recovery === undefined || r.recovery.status === "unknown")
+    );
   }
 }
 

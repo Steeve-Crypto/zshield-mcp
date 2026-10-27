@@ -1,0 +1,172 @@
+import assert from "node:assert/strict";
+import { beforeEach, describe, it } from "node:test";
+import { appendAuditEntry } from "../src/audit/log.ts";
+import type { ChainAdapter } from "../src/chain/types.ts";
+import { paymentIndexFor, resetPaymentIndexes } from "../src/payments/index.ts";
+import { RECOVERY_EXPIRY_MS, recoverPendingPayments } from "../src/payments/recovery.ts";
+import type { AuditEntry, ChainHealth, Config, TxSummary } from "../src/types.ts";
+import { readAuditRows, tempConfig } from "./helpers.ts";
+
+const R = "utest1" + "r".repeat(100);
+const T0 = Date.parse("2026-10-26T12:00:00Z");
+
+function pending(config: Config, callId: string, extra: Partial<AuditEntry> = {}) {
+  const row: AuditEntry = {
+    ts: new Date(T0).toISOString(),
+    tool: "zcash_pay",
+    call_id: callId,
+    amount_zec: "0.0001",
+    amount_zats: "10000",
+    recipient: R,
+    allowlist_hit: true,
+    cap_zec: "0.01",
+    status: "pending",
+    view_key_fingerprint: "abc",
+    memo: "rent",
+    ...extra,
+  };
+  appendAuditEntry(config.auditDir, row);
+}
+
+function sent(txid: string, opts: Partial<TxSummary> = {}, memo = "rent"): TxSummary {
+  return {
+    txid,
+    time: new Date(T0 + 5000).toISOString(),
+    status: "confirmed",
+    blockHeight: 500,
+    kind: "sent",
+    valueZats: -10000n,
+    outgoing: [{ recipient: R, valueZats: 10000n, memo }],
+    ...opts,
+  };
+}
+
+/** A chain that only reads. Any send fails the test. */
+function chain(history: TxSummary[] | (() => Promise<TxSummary[]>), health?: ChainHealth | Error) {
+  const calls = { pay: 0, history: 0 };
+  const c: ChainAdapter = {
+    async pay() {
+      calls.pay++;
+      throw new Error("recovery must never send");
+    },
+    async getBalance() {
+      throw new Error("unused");
+    },
+    async getReceiveAddress() {
+      throw new Error("unused");
+    },
+    async getHistory() {
+      calls.history++;
+      return typeof history === "function" ? history() : history;
+    },
+    getViewingKey: async () => "uview",
+  } as unknown as ChainAdapter;
+  if (health) {
+    c.checkHealth = async () => {
+      if (health instanceof Error) throw health;
+      return health;
+    };
+  }
+  return { c, calls };
+}
+
+const synced: ChainHealth = { walletHeight: 1000, chainTip: 1001, spendableZats: 0n };
+const late = T0 + RECOVERY_EXPIRY_MS + 1;
+const recoveryRows = (config: Config) => readAuditRows(config).filter((r) => r.tool === "zcash_pay_recovery");
+
+beforeEach(() => resetPaymentIndexes());
+
+describe("crash recovery on startup", () => {
+  it("confirms a mined send that matches and never resends", async () => {
+    const config = tempConfig();
+    pending(config, "c1", { idempotency_key: "k1" });
+    const { c, calls } = chain([sent("aa".repeat(32))], synced);
+    const rows = await recoverPendingPayments(config, c, { now: T0 + 60_000 });
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].status, "confirmed");
+    assert.equal(rows[0].txid, "aa".repeat(32));
+    assert.equal(rows[0].block_height, 500);
+    assert.equal(rows[0].confidence, "high");
+    assert.equal(rows[0].idempotency_key, "k1");
+    assert.equal(calls.pay, 0);
+    assert.equal(recoveryRows(config).length, 1);
+  });
+
+  it("does not confirm on amount alone", async () => {
+    const config = tempConfig();
+    pending(config, "c1");
+    const other = sent("bb".repeat(32), { outgoing: [{ recipient: "utest1other", valueZats: 10000n, memo: "rent" }] });
+    const { c } = chain([other, sent("cc".repeat(32), {}, "different memo")], synced);
+    const [row] = await recoverPendingPayments(config, c, { now: T0 + 60_000 });
+    assert.equal(row.status, "unknown");
+    assert.equal(row.txid, undefined);
+  });
+
+  it("not_found only after the expiry window in a synced wallet", async () => {
+    const config = tempConfig();
+    pending(config, "c1");
+    const early = await recoverPendingPayments(config, chain([], synced).c, { now: T0 + 60_000 });
+    assert.equal(early[0].status, "unknown");
+    assert.match(early[0].note, /expiry/);
+
+    const behind = await recoverPendingPayments(config, chain([], { ...synced, walletHeight: 900 }).c, { now: late });
+    assert.equal(behind[0].status, "unknown");
+    assert.match(behind[0].note, /not synced/);
+
+    const offline = await recoverPendingPayments(config, chain([], new Error("no server")).c, { now: late });
+    assert.equal(offline[0].status, "unknown");
+
+    const done = await recoverPendingPayments(config, chain([], synced).c, { now: late });
+    assert.equal(done[0].status, "not_found");
+  });
+
+  it("a match that is not mined yet stays unknown with the candidate", async () => {
+    const config = tempConfig();
+    pending(config, "c1");
+    const { c } = chain([sent("dd".repeat(32), { status: "transmitted", blockHeight: undefined })], synced);
+    const [row] = await recoverPendingPayments(config, c, { now: late });
+    assert.equal(row.status, "unknown");
+    assert.equal(row.possible_sends?.[0].txid, "dd".repeat(32));
+  });
+
+  it("unknown when history cannot be read", async () => {
+    const config = tempConfig();
+    pending(config, "c1");
+    const { c } = chain(async () => {
+      throw new Error("zingo-cli timed out");
+    }, synced);
+    const [row] = await recoverPendingPayments(config, c, { now: late });
+    assert.equal(row.status, "unknown");
+    assert.match(row.note, /timed out/);
+  });
+
+  it("skips calls with a result row and settled recoveries, retries unknown ones after a restart", async () => {
+    const config = tempConfig();
+    pending(config, "done");
+    appendAuditEntry(config.auditDir, {
+      ts: new Date(T0 + 1).toISOString(), tool: "zcash_pay", call_id: "done", amount_zec: "0.0001", recipient: R,
+      allowlist_hit: true, cap_zec: "0.01", status: "ok", view_key_fingerprint: "abc",
+    });
+    pending(config, "open");
+    const first = chain([], synced);
+    assert.deepEqual((await recoverPendingPayments(config, first.c, { now: T0 + 60_000 })).map((r) => [r.call_id, r.status]), [["open", "unknown"]]);
+
+    // Restart: the index is rebuilt from disk, recovery rows included.
+    resetPaymentIndexes();
+    const second = chain([sent("ee".repeat(32))], synced);
+    const again = await recoverPendingPayments(config, second.c, { now: T0 + 60_000 });
+    assert.deepEqual(again.map((r) => r.status), ["confirmed"]);
+    assert.equal(paymentIndexFor(config).byCallId("open")?.recovery?.status, "confirmed");
+
+    resetPaymentIndexes();
+    const third = chain([], synced);
+    assert.deepEqual(await recoverPendingPayments(config, third.c), []);
+    assert.equal(third.calls.history, 0);
+  });
+
+  it("does nothing when there is nothing to recover", async () => {
+    const { c, calls } = chain([], synced);
+    assert.deepEqual(await recoverPendingPayments(tempConfig(), c), []);
+    assert.equal(calls.history, 0);
+  });
+});
