@@ -23,9 +23,11 @@ async function main() {
   );
   // Sends interrupted by a crash or kill: reconcile against wallet history in the
   // background and write a recovery row for each. Never resends.
-  void recoverPendingPayments(config, chain).then((rows) => {
-    for (const r of rows) console.error(`zshield-mcp recovery: call ${r.call_id} ${r.status}${r.txid ? ` ${r.txid}` : ""}`);
-  });
+  void recoverPendingPayments(config, chain)
+    .then((rows) => {
+      for (const r of rows) console.error(`zshield-mcp recovery: call ${r.call_id} ${r.status}${r.txid ? ` ${r.txid}` : ""}`);
+    })
+    .catch((e: unknown) => console.error(`zshield-mcp recovery failed: ${e instanceof Error ? e.message : String(e)}`));
 }
 
 main().catch((err) => {
