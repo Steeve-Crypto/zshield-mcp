@@ -52,16 +52,20 @@ describe("LiveChainAdapter.getViewingKey", () => {
     assert.ok(!calls[0].args.includes("--server"));
     assert.ok((calls[0].opts?.timeoutMs ?? 0) > 0);
   });
-  it("does not cache a failure", async () => {
+  it("does not cache a failure, and retries after the backoff", async () => {
+    let t = 0;
     let n = 0;
     const runner: CliRunner = async () => {
       n++;
       if (n === 1) throw new Error("zingo-cli failed: wallet locked");
       return EXPORT_OUT;
     };
-    const a = new LiveChainAdapter({ network: "testnet", runner });
+    const a = new LiveChainAdapter({ network: "testnet", runner, now: () => t });
     await assert.rejects(a.getViewingKey(), /wallet locked/);
+    await assert.rejects(a.getViewingKey(), /next try in 1s/);
+    t += 1_000;
     assert.equal(await a.getViewingKey(), TEST_UFVK);
+    assert.equal(n, 2);
   });
 });
 
