@@ -170,3 +170,24 @@ describe("crash recovery on startup", () => {
     assert.equal(calls.history, 0);
   });
 });
+
+describe("recovery and sends", () => {
+  it("holds the send lock, so a send waits until recovery is done", async () => {
+    const { sendLockFor } = await import("../src/payments/lock.ts");
+    const config = tempConfig();
+    pending(config, "c1");
+    let finish!: () => void;
+    const gate = new Promise<void>((r) => (finish = r));
+    const { c } = chain(async () => {
+      await gate;
+      return [];
+    }, synced);
+    const run = recoverPendingPayments(config, c, { now: T0 + 60_000 });
+    await new Promise((r) => setTimeout(r, 10));
+    await assert.rejects(sendLockFor(c).acquire(5), /BUSY|busy|another/i);
+    finish();
+    await run;
+    const release = await sendLockFor(c).acquire(5);
+    release();
+  });
+});
