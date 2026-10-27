@@ -18,7 +18,7 @@ It is a policy gate for a single local operator. It is not a custody system, it 
 
 Limits today:
 
-- zshield-mcp does not encrypt the wallet file and does not check its permissions. Anyone who can read that file as the server's OS user, or as root, can take the testnet funds. Keep `~/.zshield-testnet` readable only by you (`chmod -R go-rwx ~/.zshield-testnet`).
+- zshield-mcp does not encrypt the wallet file. In testnet mode it refuses to start if the wallet directory gives any access to group or other users. It wants `700` on the directory, and the error prints the `chmod` that fixes it. It refuses rather than warns because a warning on stderr is easy to miss when an MCP client starts the server. A file inside a private directory with a mode looser than `600` only gets a warning: other users cannot reach it, and `zingo-cli` rewrites the wallet file with the current umask on every save, so a hard refusal would trip after any manual `zingo-cli` run. The server sets umask `077` in testnet mode so its own `zingo-cli` runs keep the file at `600`. Root and the server's own OS user can still read the file, and the check runs only at startup.
 - The server process runs as the same OS user as the wallet. A bug or compromise in the server process, its npm dependencies, or `zingo-cli` can reach the keys. Nothing in this design isolates them.
 
 ## What the server can do
@@ -105,7 +105,7 @@ What it does not give: it is not a signature. Anyone who knows the UFVK and the 
 | Retry after a timeout pays twice | Post-send audit failures return the txid instead of throwing. `CHAIN_ERROR` is documented as "check history before retrying" | A `zingo-cli` timeout can hide a send that did go out. There is no idempotency key |
 | Memo leaks data | Memo is capped at 512 UTF-8 bytes | The agent chooses the memo text. Anything in it reaches an allow-listed recipient and the audit log. It is passed over stdin, not argv, so other local users cannot read it from the process list |
 | Oversized arguments fill the disk or memory | Recipient is capped at 256 characters, memo at 512 bytes, amount strings at 32 characters, all in the input schema and again in the handler. Each audit row is capped at 8 KiB. Errors do not repeat the caller's text | A caller can still make many small calls. There is no rate limit and no log rotation |
-| Key theft from disk | Keys stay in the `zingo-cli` wallet file, outside the repo | The file is not encrypted by zshield-mcp and its permissions are not checked |
+| Key theft from disk | Keys stay in the `zingo-cli` wallet file, outside the repo. Testnet mode refuses to start if the wallet directory is open to group or other users, warns about loose file modes, and runs with umask `077` | The file is not encrypted by zshield-mcp. Root and the server's OS user can read it. Permissions are checked only at startup |
 | Lying or stale lightwalletd | None in the server | Balances and history are only as good as the server `zingo-cli` talks to |
 | Hostile allow-list or config edit | None in the server | Whoever can write those files sets policy. The allow-list is re-read on every call, so an edit takes effect at once |
 | Slow or stuck `zingo-cli` | Read tools time out after `ZINGO_READ_TIMEOUT_MS`, default 120 seconds. Sends time out after 15 minutes | A stuck send blocks that tool call until the timeout |
@@ -129,5 +129,5 @@ What it does not give: it is not a signature. Anyone who knows the UFVK and the 
 - Network checks: `src/chain/network.ts`
 - Testnet adapter and viewing-key read: `src/chain/live.ts`
 - Fingerprint hash: `src/audit/log.ts`
-- Startup refusal of mainnet: `src/config.ts`, `src/index.ts`
+- Startup refusal of mainnet and of an exposed wallet: `src/config.ts`, `src/startup.ts`, `src/chain/perms.ts`, `src/index.ts`
 - Stable codes: `src/errors.ts`

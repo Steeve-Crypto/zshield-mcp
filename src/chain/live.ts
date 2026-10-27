@@ -44,6 +44,11 @@ export const defaultRunner: CliRunner = (bin, args, opts = {}) =>
     }
   });
 
+/** Where the testnet wallet lives when ZINGO_DATA_DIR is not set. */
+export function defaultWalletDir(): string {
+  return `${process.env.HOME}/.zshield-testnet/wallet`;
+}
+
 export interface LiveOptions {
   network: string | undefined;
   zingoBin?: string;
@@ -70,7 +75,7 @@ export class LiveChainAdapter implements ChainAdapter {
       throw new NetworkError("Live mode requires CHAIN_MODE=testnet. Mainnet is not supported.", "mode");
     }
     this.bin = opts.zingoBin ?? "zingo-cli";
-    this.dataDir = opts.dataDir ?? `${process.env.HOME}/.zshield-testnet/wallet`;
+    this.dataDir = opts.dataDir ?? defaultWalletDir();
     this.server = opts.server ?? "https://testnet.zec.rocks:443";
     this.runner = opts.runner ?? defaultRunner;
   }
