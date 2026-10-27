@@ -8,7 +8,7 @@ import {
   type IcaclsRunner,
 } from "./chain/winacl.js";
 import type { Config } from "./types.js";
-import { readdirSync } from "node:fs";
+import { mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fallbackAuditPath } from "./audit/log.js";
 import { checkPrivateFile, ensurePrivateDir } from "./fsafe.js";
@@ -75,6 +75,8 @@ export function startupChecks(config: Config, platform: string = process.platfor
     const icacls = deps.icacls ?? defaultIcacls;
     const env = deps.env ?? process.env;
     const harden = deps.harden ?? defaultHardener;
+    // Create them now so their ACL is checked before the first payment row lands in them.
+    for (const dir of [config.auditDir, stateDir]) mkdirSync(dir, { recursive: true });
     const warnings = assertWindowsWalletPrivate(dataDir, icacls, env, harden);
     warnings.push(...assertWindowsWalletPrivate(config.auditDir, icacls, env, harden, "The audit log names recipients and amounts"));
     warnings.push(...assertWindowsWalletPrivate(stateDir, icacls, env, harden, "The payment store names recipients and amounts"));
