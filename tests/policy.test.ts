@@ -38,7 +38,12 @@ describe("parseZecToZats", () => {
     assert.equal(parseZecToZats("1.10000000"), 110_000_000n);
     assert.equal(parseZecToZats(" 0.1 "), 10_000_000n);
     assert.equal(parseZecToZats("21000000"), 2_100_000_000_000_000n);
-    assert.equal(parseZecToZats(1e21), 100_000_000_000_000_000_000_000_000_000n);
+  });
+
+  it("rejects amounts above the 21M ZEC supply", () => {
+    assert.throws(() => parseZecToZats("21000000.00000001"), /supply/);
+    assert.throws(() => parseZecToZats(1e21), /supply/);
+    assert.throws(() => assertWithinCap("0.01", "99999999"), /Invalid spending cap/);
   });
 
   it("rejects more than 8 decimals instead of rounding", () => {
