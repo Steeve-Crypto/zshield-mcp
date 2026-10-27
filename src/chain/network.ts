@@ -13,7 +13,11 @@ export function addressNetwork(addr: string): AddressNetwork {
 }
 
 export class NetworkError extends Error {
-  constructor(message: string) {
+  /** "mainnet" when a mainnet address or network was refused */
+  constructor(
+    message: string,
+    readonly reason: "mainnet" | "unknown" | "mode" = "unknown"
+  ) {
     super(message);
     this.name = "NetworkError";
   }
@@ -22,7 +26,7 @@ export class NetworkError extends Error {
 export function assertTestnetAddress(addr: string): void {
   const net = addressNetwork(addr);
   if (net === "mainnet") {
-    throw new NetworkError("Mainnet address rejected in testnet mode.");
+    throw new NetworkError("Mainnet address rejected in testnet mode.", "mainnet");
   }
   if (net !== "testnet") {
     throw new NetworkError("Unrecognized address network.");

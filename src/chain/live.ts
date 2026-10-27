@@ -54,7 +54,7 @@ export class LiveChainAdapter implements ChainAdapter {
 
   constructor(opts: LiveOptions) {
     if (opts.network !== "testnet") {
-      throw new NetworkError("Live mode requires CHAIN_MODE=testnet. Mainnet is not supported.");
+      throw new NetworkError("Live mode requires CHAIN_MODE=testnet. Mainnet is not supported.", "mode");
     }
     this.bin = opts.zingoBin ?? "zingo-cli";
     this.dataDir = opts.dataDir ?? `${process.env.HOME}/.zshield-testnet/wallet`;

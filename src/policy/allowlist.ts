@@ -8,10 +8,10 @@ export function loadAllowlist(path: string): RecipientEntry[] {
     parsed = JSON.parse(readFileSync(path, "utf8")) as AllowlistFile;
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);
-    throw new PolicyError(`Cannot read allow-list at ${path}: ${reason}`);
+    throw new PolicyError("ALLOWLIST_UNAVAILABLE", `Cannot read allow-list at ${path}: ${reason}`);
   }
   if (!parsed?.recipients || !Array.isArray(parsed.recipients)) {
-    throw new PolicyError(`Allow-list at ${path} must contain a "recipients" array.`);
+    throw new PolicyError("ALLOWLIST_UNAVAILABLE", `Allow-list at ${path} must contain a "recipients" array.`);
   }
   return parsed.recipients.filter((r) => typeof r?.address === "string" && r.address.length > 0);
 }
@@ -23,7 +23,7 @@ export function assertRecipientAllowed(
   const hit = allowlist.find((r) => r.address === recipient);
   if (!hit) {
     // The recipient is not repeated here; it is already in the audit row's recipient field.
-    throw new PolicyError("Recipient is not on the allow-list. Add it to the allow-list file and restart.");
+    throw new PolicyError("NOT_ALLOWLISTED", "Recipient is not on the allow-list. Add it to the allow-list file and restart.");
   }
   return hit;
 }

@@ -103,6 +103,48 @@ Read this before paying to see the rules the server will apply. It is JSON, read
 
 `mode` is `mock` or `testnet`. `size` counts unique addresses in the allow-list file right now. If the file cannot be read, `size` is `null`, `error` says why, and every `zcash_pay` call is rejected until it is fixed. The cap is per call only; there is no daily or rolling limit yet. The fingerprint salt is never shown.
 
+### Rejection codes
+
+Every failed `zcash_pay` call returns `isError: true` and a body like this:
+
+```json
+{
+  "ok": false,
+  "status": "rejected",
+  "code": "CAP_EXCEEDED",
+  "message": "Amount 0.5 ZEC exceeds hard per-call spending cap of 0.1 ZEC.",
+  "error": "Amount 0.5 ZEC exceeds hard per-call spending cap of 0.1 ZEC."
+}
+```
+
+Branch on `code`. It is stable. `message` is for people and may change. `error` holds the same text as `message` for older clients. The audit row for the call records the same `code`.
+
+`status` is `rejected` when policy refused the call. Nothing was sent and there is no `pending` row.
+
+| Code | Meaning |
+|------|---------|
+| `INVALID_RECIPIENT` | Recipient is empty, longer than 256 characters, or has characters that cannot appear in an address. The value is not repeated in the message |
+| `INVALID_MEMO` | Memo is longer than 512 UTF-8 bytes |
+| `INVALID_AMOUNT` | Amount is not a positive decimal with at most 8 decimals, or is above the 21,000,000 ZEC supply |
+| `CAP_EXCEEDED` | Amount is above `SPENDING_CAP_ZEC` |
+| `INVALID_CAP` | The configured cap itself is not valid, so every payment is refused |
+| `MAINNET_REFUSED` | Testnet mode got a mainnet address (`u1`, `zs1`, `t1`, `t3`, `zc`). Refused even if it is on the allow-list |
+| `INVALID_ADDRESS` | Testnet mode got an address from no known Zcash network |
+| `NOT_ALLOWLISTED` | Recipient is not an exact match for an allow-list entry |
+| `ALLOWLIST_UNAVAILABLE` | The allow-list file is missing or malformed, so every payment is refused |
+
+`status` is `error` when something failed outside policy:
+
+| Code | Meaning |
+|------|---------|
+| `AUDIT_WRITE_FAILED` | The `pending` audit row could not be written, so the payment was not sent |
+| `CHAIN_ERROR` | Policy passed and the send was attempted, but the chain or `zingo-cli` failed. A `pending` row exists. Check `zcash_history` before retrying, because a timeout can hide a send that did go out |
+| `CONFIG_ERROR` | The server is misconfigured, for example testnet mode without the testnet adapter. Nothing was sent |
+
+Checks run in this order, and the first failure decides the code: recipient and memo size, allow-list file, amount, cap, address network (testnet mode only), allow-list match.
+
+Read-only tools use the same shape. `zcash_history` returns `INVALID_LIMIT` with status `rejected` for a bad `limit`. A wallet read failure is `CHAIN_ERROR`, and a wallet that reports a mainnet address is `MAINNET_REFUSED`.
+
 ## Read-only tools
 
 These tools never send anything. Each call writes one audit row with the tool name, mode, and outcome. The row does not hold balances, addresses, or transaction data. If that row cannot be written, the tool still answers and adds an `audit_warning`, since nothing moved.

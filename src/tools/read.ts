@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { appendAuditEntry } from "../audit/log.js";
 import type { ChainAdapter } from "../chain/types.js";
+import { NetworkError } from "../chain/network.js";
+import type { ReadErrorCode } from "../errors.js";
 import type { Config, ReadAuditEntry, ReadTool } from "../types.js";
 
 export interface ReadDeps {
@@ -18,7 +20,10 @@ export interface ReadResult<T> {
 
 /** Thrown by a read tool for bad input. Audited as `rejected`, not `error`. */
 export class ReadRejection extends Error {
-  constructor(message: string) {
+  constructor(
+    readonly code: ReadErrorCode,
+    message: string
+  ) {
     super(message);
     this.name = "ReadRejection";
   }
@@ -39,10 +44,17 @@ export async function runReadTool<T>(
   let data: T | undefined;
   let status: ReadAuditEntry["status"] = "ok";
   let error: string | undefined;
+  let code: ReadErrorCode | undefined;
   try {
     data = await fn();
   } catch (e) {
-    status = e instanceof ReadRejection ? "rejected" : "error";
+    if (e instanceof ReadRejection) {
+      status = "rejected";
+      code = e.code;
+    } else {
+      status = "error";
+      code = e instanceof NetworkError && e.reason === "mainnet" ? "MAINNET_REFUSED" : "CHAIN_ERROR";
+    }
     error = e instanceof Error ? e.message : String(e);
   }
 
@@ -52,6 +64,7 @@ export async function runReadTool<T>(
     call_id: randomUUID(),
     mode: config.chainMode,
     status,
+    code,
     error,
     ...extra,
   };
@@ -65,7 +78,11 @@ export async function runReadTool<T>(
   if (status !== "ok" || data === undefined) {
     return {
       ok: false,
-      text: JSON.stringify({ ok: false, status, error, audit_warning: auditWarning }, null, 2),
+      text: JSON.stringify(
+        { ok: false, status, code, message: error, error, audit_warning: auditWarning },
+        null,
+        2
+      ),
       audit,
       auditWarning,
     };

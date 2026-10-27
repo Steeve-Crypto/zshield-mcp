@@ -92,7 +92,8 @@ describe("policy runs before chain in live mode", () => {
     const notListed = await executePay({ amount_zec: 0.001, recipient: ZTEST }, { config: c, chain });
     assert.equal(notListed.audit.status, "rejected");
     const mainnet = await executePay({ amount_zec: 0.001, recipient: "u1mainnetlisted" }, { config: c, chain });
-    assert.equal(mainnet.audit.status, "error");
+    assert.equal(mainnet.audit.status, "rejected");
+    assert.equal(mainnet.audit.code, "MAINNET_REFUSED");
     assert.equal(calls.length, 0);
     const ok = await executePay({ amount_zec: 0.001, recipient: UTEST }, { config: c, chain });
     assert.equal(ok.audit.status, "ok");

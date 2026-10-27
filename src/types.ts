@@ -40,6 +40,8 @@ export interface AuditEntry {
   status: PayStatus;
   mock_txid?: string;
   view_key_fingerprint: string;
+  /** Stable machine code on rejected and error rows, see README */
+  code?: string;
   error?: string;
   memo?: string;
   /** Only when the recipient was too long to store: sha256 of the full value */
@@ -58,6 +60,8 @@ export interface ReadAuditEntry {
   call_id: string;
   mode: ChainMode;
   status: "ok" | "rejected" | "error";
+  /** Stable machine code on rejected and error rows */
+  code?: string;
   error?: string;
   /** zcash_history only: the limit that was asked for */
   limit?: unknown;

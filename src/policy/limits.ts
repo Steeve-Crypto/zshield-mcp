@@ -35,6 +35,8 @@ export function memoProblem(memo: unknown): string | undefined {
  * caller's value, so a hostile input cannot grow the error, the audit row, or the response.
  */
 export function assertPayInputBounded(recipient: unknown, memo: unknown): void {
-  const problem = recipientProblem(recipient) ?? memoProblem(memo);
-  if (problem) throw new PolicyError(problem);
+  const recipientIssue = recipientProblem(recipient);
+  if (recipientIssue) throw new PolicyError("INVALID_RECIPIENT", recipientIssue);
+  const memoIssue = memoProblem(memo);
+  if (memoIssue) throw new PolicyError("INVALID_MEMO", memoIssue);
 }
