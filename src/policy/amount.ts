@@ -1,0 +1,76 @@
+/**
+ * ZEC amounts as integer zatoshis (1 ZEC = 100,000,000 zatoshis).
+ * Parsing works on the decimal digits only, never on float math, and never rounds.
+ */
+export const ZATS_PER_ZEC = 100_000_000n;
+export const MAX_DECIMALS = 8;
+
+export class AmountError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AmountError";
+  }
+}
+
+/** Turn a JS number into its exact shortest decimal string, expanding exponent notation. */
+function numberToDecimalString(n: number): string {
+  const s = String(n);
+  const m = s.match(/^(-?)(\d+)(?:\.(\d+))?e([+-]\d+)$/i);
+  if (!m) return s;
+  const [, sign, intPart, fracPart = "", expStr] = m;
+  const exp = Number(expStr);
+  const digits = intPart + fracPart;
+  const point = intPart.length + exp;
+  if (point <= 0) return `${sign}0.${"0".repeat(-point)}${digits}`;
+  if (point >= digits.length) return `${sign}${digits}${"0".repeat(point - digits.length)}`;
+  return `${sign}${digits.slice(0, point)}.${digits.slice(point)}`;
+}
+
+/**
+ * Parse a ZEC amount given as a decimal string or a number into zatoshis.
+ * Rejects non-finite, zero, negative, malformed, and more-than-8-decimal amounts.
+ */
+export function parseZecToZats(value: unknown, label = "Amount"): bigint {
+  let text: string;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new AmountError(`${label} must be a finite number, got ${value}.`);
+    }
+    text = numberToDecimalString(value);
+  } else if (typeof value === "string") {
+    text = value.trim();
+  } else {
+    throw new AmountError(`${label} must be a decimal string or number, got ${typeof value}.`);
+  }
+
+  if (/^[+-]?(nan|infinity)$/i.test(text)) {
+    throw new AmountError(`${label} must be a finite number, got "${text}".`);
+  }
+  if (text.startsWith("-")) {
+    throw new AmountError(`${label} must be positive, got ${text}.`);
+  }
+  const m = text.match(/^(\d+)(?:\.(\d+))?$/);
+  if (!m) {
+    throw new AmountError(`${label} must be a plain decimal ZEC value like "0.05", got "${text}".`);
+  }
+  const [, intPart, fracPart = ""] = m;
+  if (fracPart.length > MAX_DECIMALS) {
+    throw new AmountError(
+      `${label} ${text} has more than ${MAX_DECIMALS} decimal places; ZEC amounts must be whole zatoshis.`
+    );
+  }
+  const zats = BigInt(intPart) * ZATS_PER_ZEC + BigInt(fracPart.padEnd(MAX_DECIMALS, "0"));
+  if (zats <= 0n) {
+    throw new AmountError(`${label} must be greater than zero, got ${text}.`);
+  }
+  return zats;
+}
+
+/** Format zatoshis as a ZEC decimal string without trailing zeros, e.g. 5000000n -> "0.05". */
+export function formatZats(zats: bigint): string {
+  const sign = zats < 0n ? "-" : "";
+  const abs = zats < 0n ? -zats : zats;
+  const whole = abs / ZATS_PER_ZEC;
+  const frac = (abs % ZATS_PER_ZEC).toString().padStart(MAX_DECIMALS, "0").replace(/0+$/, "");
+  return frac ? `${sign}${whole}.${frac}` : `${sign}${whole}`;
+}

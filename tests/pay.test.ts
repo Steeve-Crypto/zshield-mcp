@@ -218,3 +218,50 @@ describe("audit row is written before the chain send", () => {
     assert.match(body.audit_warning, /could not be written/);
   });
 });
+
+describe("executePay amounts in zatoshis", () => {
+  const recipient = "u1mockrecipientaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+  it("accepts a decimal string and records exact zatoshis", async () => {
+    const config = tempConfig();
+    const result = await executePay(
+      { amount_zec: "0.05", recipient },
+      { config, chain: new MockChainAdapter() }
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.audit.amount_zats, "5000000");
+  });
+
+  it("rejects and audits an amount with more than 8 decimals", async () => {
+    const config = tempConfig();
+    const result = await executePay(
+      { amount_zec: "0.050000001", recipient },
+      { config, chain: new MockChainAdapter() }
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.audit.status, "rejected");
+    assert.equal(result.audit.amount_zats, undefined);
+    assert.match(result.audit.error ?? "", /more than 8 decimal places/);
+    const day = result.audit.ts.slice(0, 10);
+    const lines = readFileSync(join(config.auditDir, `${day}.jsonl`), "utf8").trim().split("\n");
+    assert.equal(lines.length, 1);
+  });
+
+  it("rejects zero and negative amounts", async () => {
+    const config = tempConfig();
+    for (const amount_zec of [0, "0", -0.01, "-1"]) {
+      const result = await executePay({ amount_zec, recipient }, { config, chain: new MockChainAdapter() });
+      assert.equal(result.audit.status, "rejected", String(amount_zec));
+    }
+  });
+
+  it("rejects when the configured cap has more than 8 decimals", async () => {
+    const config = tempConfig({ spendingCapZec: "0.100000001" });
+    const result = await executePay(
+      { amount_zec: "0.01", recipient },
+      { config, chain: new MockChainAdapter() }
+    );
+    assert.equal(result.audit.status, "rejected");
+    assert.match(result.audit.error ?? "", /Invalid spending cap/);
+  });
+});

@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { parseZecToZats } from "./policy/amount.js";
 import type { Config, ChainMode } from "./types.js";
 
 function envOr<T>(key: string, fallback: T, parse: (v: string) => T): T {
@@ -14,7 +15,7 @@ const KNOWN_MODES = ["mock", "live", "testnet"];
 export function loadConfig(cwd = process.cwd()): Config {
   const yamlPath = resolve(cwd, "config/default.yaml");
   let fromFile: Partial<{
-    spending_cap_zec: number;
+    spending_cap_zec: number | string;
     allowlist_path: string;
     chain_mode: string;
     audit_dir: string;
@@ -32,9 +33,14 @@ export function loadConfig(cwd = process.cwd()): Config {
     );
   }
   const chainMode: ChainMode = rawMode === "mock" ? "mock" : "live";
-  const spendingCapZec = envOr("SPENDING_CAP_ZEC", fromFile.spending_cap_zec ?? 0.1, (v) => Number(v));
-  if (!Number.isFinite(spendingCapZec) || spendingCapZec <= 0) {
-    throw new Error(`SPENDING_CAP_ZEC must be a positive number, got "${spendingCapZec}".`);
+  // Kept as given (env values stay strings) and validated as whole zatoshis, never rounded.
+  const spendingCapZec = envOr<number | string>("SPENDING_CAP_ZEC", fromFile.spending_cap_zec ?? 0.1, (v) => v);
+  try {
+    parseZecToZats(spendingCapZec, "SPENDING_CAP_ZEC");
+  } catch (e) {
+    throw new Error(
+      `SPENDING_CAP_ZEC must be a positive ZEC amount with at most 8 decimals, got "${spendingCapZec}". ${e instanceof Error ? e.message : ""}`.trim()
+    );
   }
 
   return {
