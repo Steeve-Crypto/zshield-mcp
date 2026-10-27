@@ -10,12 +10,16 @@ Each row is written with `fsync` on the file, and on a new file also on its dire
 
 ## Idempotency, replay, and recovery rows
 
-The server rebuilds its view of past payments from these files (and the fallback file) at startup. That is how an `idempotency_key` survives a restart and how interrupted sends are found.
+The audit log is the human trail. Payment state lives in the payment store in the wallet directory (see [RELIABILITY_DESIGN.md](RELIABILITY_DESIGN.md)), and the server does not rebuild anything from these files. The first time a server opens the store with a given `AUDIT_DIR`, it imports that log and its fallback file once, so keys and results from before the store existed still count. Editing a row afterwards changes no payment state.
 
 - The `pending` row of a call with a key carries `idempotency_key` and `params_sha256`, the hash of the amount in zatoshis, recipient, and memo.
 - A repeat call with the same key writes its own row with status `replayed`, its own `call_id`, and `replay_of` set to the first call's `call_id`. It sends nothing. It copies `allowlist_hit` and `view_key_fingerprint` from the first call, so the row says which wallet and which allow-list decision it repeats.
-- Before sending, a call with a key re-reads the log under the wallet lock. If another server process bound the key in the meantime, the call is a replay (or `IDEMPOTENCY_CONFLICT`) and sends nothing.
-- At startup, every `pending` row with no result row gets a recovery row: `tool` `zcash_pay_recovery`, the original `call_id`, `status` (`confirmed`, `not_found`, or `unknown`), `txid`, `block_height`, and `confidence` when a match was found, `possible_sends` when there were candidates but no single mined match, `idempotency_key` when the call had one, and a plain `note` saying why. `confirmed` and `not_found` are final; `unknown` is checked again on the next start.
+- Before sending, a call with a key re-reads the store under the wallet lock and binds the key with an exclusive create. If another server process bound the key first, the call is a replay (or `IDEMPOTENCY_CONFLICT`) and sends nothing.
+- At startup, every unsettled call gets a recovery row: `tool` `zcash_pay_recovery`, the original `call_id`, `status` (`confirmed`, `not_found`, or `unknown`), `txid`, `block_height`, and `confidence` when a match was found, `possible_sends` when there were candidates but no single mined match, `idempotency_key` when the call had one, and a plain `note` saying why. `not_found` means proven never sent. `confirmed` and `not_found` are final; `unknown` is checked again on the next start. A later run writes a row only when the state moves forward, or stays `unknown`.
+
+## File safety
+
+At startup the audit dir and the fallback file are checked. A symlink or a file owned by another user stops the server. A folder looser than `700` or a file looser than `600` is tightened, with a note on stderr. Rows are appended with `O_NOFOLLOW`, and the open file's owner is checked before each write.
 
 ## Fields
 
@@ -36,7 +40,7 @@ The server rebuilds its view of past payments from these files (and the fallback
 | `code` | string? | Stable machine code on `rejected`, `error`, and `unknown` rows, such as `CAP_EXCEEDED`. See the README for the full list |
 | `error` | string? | Policy or runtime message |
 | `memo` | string? | Optional memo, at most 512 UTF-8 bytes |
-| `possible_sends` | object[]? | `unknown` rows only. Recent sent transactions in wallet history to the same recipient with the same amount, and the same memo when one was given, found right after the send failed. Each has `txid`, `confidence` (`high`, `medium`, `low`), `matched` (the fields that matched), and `status`. Possibly empty |
+| `possible_sends` | object[]? | `unknown` rows only. Sent transactions in the whole wallet history to the same recipient with the same amount, and the same memo when one was given, found right after the send failed. Each has `txid`, `confidence` (`high`, `medium`, `low`), `matched` (the fields that matched), and `status`. Possibly empty |
 | `possible_txids` | string[]? | `unknown` rows only. The txids from `possible_sends` |
 | `idempotency_key` | string? | The key the caller passed |
 | `params_sha256` | string? | `pending` rows with a key: the hash the key is bound to |
