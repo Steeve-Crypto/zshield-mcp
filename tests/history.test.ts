@@ -98,6 +98,9 @@ describe("history limit", () => {
       assert.throws(() => checkLimit(v), /limit must be a whole number/, String(v));
     }
   });
+  it("does not repeat the bad value", () => {
+    assert.throws(() => checkLimit("9".repeat(5000)), (e: Error) => !e.message.includes("999"));
+  });
 });
 
 describe("LiveChainAdapter.getHistory", () => {
