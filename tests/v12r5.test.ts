@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, rmSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,7 +9,11 @@ import { appendAuditEntry } from "../src/audit/log.ts";
 import { parseTransactions } from "../src/chain/live.ts";
 import type { ChainAdapter } from "../src/chain/types.ts";
 import { MockChainAdapter } from "../src/chain/mock.ts";
+import { defaultRunner, LiveChainAdapter, type CliRunner } from "../src/chain/live.ts";
 import * as filelock from "../src/payments/filelock.ts";
+import * as recovery from "../src/payments/recovery.ts";
+import { acquireWalletLock } from "../src/payments/lock.ts";
+import { readAuditRows } from "./helpers.ts";
 import { recoverPendingPayments } from "../src/payments/recovery.ts";
 import { resetPaymentStores, storeFor } from "../src/payments/store.ts";
 import { executePay, matchSend } from "../src/tools/pay.ts";
@@ -247,3 +251,127 @@ describe("F-21: leases", () => {
 });
 
 
+
+// F-14: every path where a holder could send while another process holds the wallet.
+
+function liveCfg(): Config {
+  const config = tempConfig({ chainMode: "live", chainNetwork: "testnet" });
+  writeFileSync(config.allowlistPath, JSON.stringify({ recipients: [{ address: R }] }));
+  return config;
+}
+
+type Req = import("../src/types.ts").PaymentRequest;
+
+/** A live-mode chain whose health check and send are scripted. `store` is filled in once the store exists. */
+function liveChain(hooks: { health?: () => void; pay?: (req: Req) => void }) {
+  const counts = { sent: 0 };
+  const chain = {
+    mode: "live",
+    async getViewingKey() { return "uviewtest1" + "q".repeat(80); },
+    async checkHealth() { hooks.health?.(); return { walletHeight: 1000, chainTip: 1000, spendableZats: 10_000_000n }; },
+    async pay(req: Req) {
+      hooks.pay?.(req);
+      counts.sent++;
+      return { txid: tx(77), amountZats: req.amountZats, recipient: req.recipient, mode: "live" };
+    },
+    async getBalance() { throw new Error("unused"); },
+    async getReceiveAddress() { throw new Error("unused"); },
+    async getHistory() { return []; },
+  } as unknown as ChainAdapter;
+  return { chain, counts };
+}
+
+describe("F-14: nothing sends without the lease", () => {
+  it("a lease lost at the last moment before the wallet process starts stops the send", async () => {
+    const config = liveCfg();
+    let dir = "";
+    const { chain, counts } = liveChain({
+      pay: (req) => {
+        // Another process takes over right here, after every earlier check passed.
+        rmSync(join(dir, "wallet.lock"));
+        req.fence?.();
+      },
+    });
+    dir = storeFor(config, chain).dir;
+    const r = await executePay({ amount_zec: "0.0001", recipient: R, idempotency_key: "k-fence" }, { config, chain });
+    assert.equal(counts.sent, 0, "the send must not go out");
+    assert.equal(r.code, "BUSY");
+    assert.equal(storeFor(config, chain).readCall(JSON.parse(r.text).call_id)?.state, "not_sent");
+  });
+
+  it("the live adapter runs the fence before it starts zingo-cli, and does not start it when the fence throws", async () => {
+    let started = 0;
+    const runner: CliRunner = async () => { started++; return '{ "txids": ["' + tx(5) + '"] }'; };
+    const a = new LiveChainAdapter({ network: "testnet", runner });
+    await assert.rejects(a.pay({ amountZats: 1000n, recipient: R, fence: () => { throw new Error("lost"); } }), /lost/);
+    assert.equal(started, 0);
+  });
+
+  it("a key bound by another call during the health check makes this call a replay that writes nothing", async () => {
+    const config = liveCfg();
+    let store: ReturnType<typeof storeFor> | undefined;
+    const { chain, counts } = liveChain({
+      health: () => {
+        // The other call took the key while this one sat in its health check.
+        store!.writeIntent({ call_id: "other", ts: new Date().toISOString(), amount_zec: "0.0001", amount_zats: "10000", recipient: R, allowlist_hit: true, cap_zec: config.spendingCapZec, view_key_fingerprint: "f", idempotency_key: "k-bound", params_sha256: "p".repeat(64) } as never);
+        store!.bindKey("k-bound", "other", "p".repeat(64));
+      },
+    });
+    store = storeFor(config, chain);
+    await executePay({ amount_zec: "0.0001", recipient: R, idempotency_key: "k-bound" }, { config, chain });
+    assert.equal(counts.sent, 0);
+    const mine = readAuditRows(config).filter((r) => r.call_id !== "other");
+    assert.deepEqual(mine.filter((r) => r.status === "pending"), [], "no pending row and no intent for a call that was not going to send");
+  });
+});
+
+describe("F-14: bounded work", () => {
+  it("a wallet process that ignores SIGTERM is killed after its timeout", async () => {
+    const d = mkdtempSync(join(tmpdir(), "zshield-kill-"));
+    const bin = join(d, "stubborn.mjs");
+    writeFileSync(bin, "#!/usr/bin/env node\nprocess.on('SIGTERM', () => {});\nsetTimeout(() => {}, 9000);\n");
+    chmodSync(bin, 0o700);
+    const t = Date.now();
+    await assert.rejects(defaultRunner(bin, [], { timeoutMs: 200, killGraceMs: 300 } as never));
+    assert.ok(Date.now() - t < 4000, `stopped after ${Date.now() - t} ms`);
+  });
+
+  it("startup recovery takes a bounded number of calls per run and gives up its bounded lock wait", async () => {
+    assert.ok(recovery.RECOVERY_MAX_CALLS <= 200);
+    assert.ok(recovery.RECOVERY_BUDGET_MS <= 300_000);
+    assert.ok(recovery.RECOVERY_LOCK_WAIT_MS * recovery.RECOVERY_LOCK_ATTEMPTS <= 600_000);
+    const config = tempConfig();
+    for (let i = 0; i < 130; i++) pending(config, `c${i}`, { idempotency_key: `k${i}`, recipient: R + (i % 7) });
+    const rows = await recoverPendingPayments(config, chainOf([]) as never, { now: T0 + 60_000, maxCalls: 20 } as never);
+    assert.equal(rows.length, 20);
+  });
+
+  it("recovery stops taking calls when its time budget is spent", async () => {
+    const config = tempConfig();
+    for (let i = 0; i < 10; i++) pending(config, `c${i}`, { idempotency_key: `k${i}`, recipient: R + i });
+    const rows = await recoverPendingPayments(config, chainOf([]) as never, { now: T0 + 60_000, budgetMs: 0 } as never);
+    assert.ok(rows.length <= 1, `handled ${rows.length}`);
+  });
+
+  it("recovery lets timers run between calls, so the lease heartbeat is not starved", async () => {
+    const config = tempConfig();
+    for (let i = 0; i < 60; i++) pending(config, `c${i}`, { idempotency_key: `k${i}`, recipient: R + i });
+    let ticks = 0;
+    const timer = setInterval(() => ticks++, 1);
+    await recoverPendingPayments(config, chainOf([]) as never, { now: T0 + 60_000 });
+    clearInterval(timer);
+    assert.ok(ticks > 0, "no timer fired while recovery ran");
+  });
+
+  it("recovery gives up on a wallet lock another process keeps", async () => {
+    const config = tempConfig();
+    pending(config, "c1");
+    const c = chainOf([]);
+    const held = await acquireWalletLock(storeFor(config, c), 0, "other");
+    const t = Date.now();
+    const rows = await recoverPendingPayments(config, c, { now: T0 + 60_000, lockWaitMs: 50, lockAttempts: 2, lockPauseMs: 10 } as never);
+    held.release();
+    assert.deepEqual(rows, []);
+    assert.ok(Date.now() - t < 5000);
+  });
+});
