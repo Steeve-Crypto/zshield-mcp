@@ -207,7 +207,7 @@ export const payInputSchema = z.object({
     .regex(IDEMPOTENCY_KEY_PATTERN, `INVALID_IDEMPOTENCY_KEY: use 1 to ${MAX_IDEMPOTENCY_KEY_LENGTH} letters, digits, dot, underscore, colon, or dash`)
     .optional()
     .describe(
-      `Optional key, 1 to ${MAX_IDEMPOTENCY_KEY_LENGTH} characters. A repeat call with the same key and parameters returns the first outcome and never pays again; different parameters return IDEMPOTENCY_CONFLICT`
+      `Required for live payments, optional in mock mode. 1 to ${MAX_IDEMPOTENCY_KEY_LENGTH} characters. A repeat call with the same key and parameters returns the first outcome and never pays again; different parameters return IDEMPOTENCY_CONFLICT`
     ),
 });
 
@@ -569,6 +569,11 @@ async function runPay(
 
     if (config.chainMode === "live" && chain.mode !== "live") {
       throw new Error("CHAIN_MODE=live but adapter is not live");
+    }
+    // A live send needs a key: it is what makes a retry, a second process, or a late holder
+    // unable to pay the same thing twice. Mock sends move no money and may go without one.
+    if (config.chainMode === "live" && !keyFields.idempotency_key) {
+      throw new PolicyError("IDEMPOTENCY_KEY_REQUIRED", "A live payment needs an idempotency_key (1 to 128 letters, digits, dot, underscore, colon, or dash). Nothing was sent.");
     }
     // Last, and only once everything above passed: read the viewing key.
     try {

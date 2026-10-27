@@ -73,8 +73,8 @@ describe("audit fingerprint comes from the wallet UFVK", () => {
   it("mock: every row carries the salted hash of the deterministic mock UFVK", async () => {
     const config = tempConfig();
     const chain = new MockChainAdapter();
-    const ok = await executePay({ amount_zec: "0.01", recipient: ALLOWED }, { config, chain });
-    const rejected = await executePay({ amount_zec: "5", recipient: ALLOWED }, { config, chain });
+    const ok = await executePay({ idempotency_key: "t-fingerprint-1", amount_zec: "0.01", recipient: ALLOWED }, { config, chain });
+    const rejected = await executePay({ idempotency_key: "t-fingerprint-2", amount_zec: "5", recipient: ALLOWED }, { config, chain });
     const want = fingerprintViewKey(MOCK_UFVK, config.viewKeyFingerprintSalt);
     assert.match(want, /^[0-9a-f]{16}$/);
     const rows = readAuditRows(config);
@@ -88,8 +88,8 @@ describe("audit fingerprint comes from the wallet UFVK", () => {
   it("a different salt gives a different fingerprint for the same wallet", async () => {
     const a = tempConfig({ viewKeyFingerprintSalt: "salt-a" });
     const b = tempConfig({ viewKeyFingerprintSalt: "salt-b" });
-    const ra = await executePay({ amount_zec: "0.01", recipient: ALLOWED }, { config: a, chain: new MockChainAdapter() });
-    const rb = await executePay({ amount_zec: "0.01", recipient: ALLOWED }, { config: b, chain: new MockChainAdapter() });
+    const ra = await executePay({ idempotency_key: "t-fingerprint-3", amount_zec: "0.01", recipient: ALLOWED }, { config: a, chain: new MockChainAdapter() });
+    const rb = await executePay({ idempotency_key: "t-fingerprint-4", amount_zec: "0.01", recipient: ALLOWED }, { config: b, chain: new MockChainAdapter() });
     assert.notEqual(ra.audit.view_key_fingerprint, rb.audit.view_key_fingerprint);
   });
 
@@ -101,7 +101,7 @@ describe("audit fingerprint comes from the wallet UFVK", () => {
       network: "testnet",
       runner: withUfvk(async () => JSON.stringify({ txids: [TXID] })),
     });
-    const r = await executePay({ amount_zec: "0.001", recipient: UTEST }, { config, chain });
+    const r = await executePay({ idempotency_key: "t-fingerprint-5", amount_zec: "0.001", recipient: UTEST }, { config, chain });
     assert.equal(r.ok, true);
     const want = fingerprintViewKey(TEST_UFVK, config.viewKeyFingerprintSalt);
     for (const row of readAuditRows(config)) assert.equal(row.view_key_fingerprint, want);
@@ -111,13 +111,13 @@ describe("audit fingerprint comes from the wallet UFVK", () => {
 
   it("receipts correlate with audit rows through call_id and txid", async () => {
     const config = tempConfig();
-    const r = await executePay({ amount_zec: "0.01", recipient: ALLOWED }, { config, chain: new MockChainAdapter() });
+    const r = await executePay({ idempotency_key: "t-fingerprint-6", amount_zec: "0.01", recipient: ALLOWED }, { config, chain: new MockChainAdapter() });
     const body = JSON.parse(r.text);
     const rows = readAuditRows(config);
     assert.ok(body.call_id);
     assert.ok(rows.every((row) => row.call_id === body.call_id));
     assert.equal(rows[1].mock_txid, body.txid);
-    const bad = await executePay({ amount_zec: "9", recipient: ALLOWED }, { config, chain: new MockChainAdapter() });
+    const bad = await executePay({ idempotency_key: "t-fingerprint-7", amount_zec: "9", recipient: ALLOWED }, { config, chain: new MockChainAdapter() });
     assert.equal(JSON.parse(bad.text).call_id, bad.audit.call_id);
   });
 });
@@ -138,7 +138,7 @@ describe("VIEWKEY_UNAVAILABLE", () => {
   it("refuses to send when the viewing key cannot be read", async () => {
     const config = tempConfig();
     const sent = { n: 0 };
-    const r = await executePay({ amount_zec: "0.01", recipient: ALLOWED }, { config, chain: brokenKey(sent) });
+    const r = await executePay({ idempotency_key: "t-fingerprint-8", amount_zec: "0.01", recipient: ALLOWED }, { config, chain: brokenKey(sent) });
     assert.equal(sent.n, 0);
     assert.equal(r.ok, false);
     assert.equal(r.code, "VIEWKEY_UNAVAILABLE");
@@ -152,7 +152,7 @@ describe("VIEWKEY_UNAVAILABLE", () => {
 
   it("a policy rejection still wins and is audited with a null fingerprint", async () => {
     const config = tempConfig();
-    const r = await executePay({ amount_zec: "1", recipient: ALLOWED }, { config, chain: brokenKey({ n: 0 }) });
+    const r = await executePay({ idempotency_key: "t-fingerprint-9", amount_zec: "1", recipient: ALLOWED }, { config, chain: brokenKey({ n: 0 }) });
     assert.equal(r.code, "CAP_EXCEEDED");
     assert.equal(readAuditRows(config)[0].view_key_fingerprint, null);
   });

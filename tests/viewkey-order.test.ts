@@ -51,7 +51,7 @@ describe("viewing key read order (V12 F-10)", () => {
     let t = 1_000_000;
     const { calls, chain } = counting(true, () => t);
     const config = liveConfig();
-    const pay = () => executePay({ amount_zec: "0.001", recipient: UTEST }, { config, chain });
+    const pay = () => executePay({ idempotency_key: "t-viewkey-order-1", amount_zec: "0.001", recipient: UTEST }, { config, chain });
     for (let i = 0; i < 5; i++) assert.equal((await pay()).code, "VIEWKEY_UNAVAILABLE");
     assert.equal(calls.exports, 1);
     t += 1_000;

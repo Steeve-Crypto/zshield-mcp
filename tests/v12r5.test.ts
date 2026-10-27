@@ -76,9 +76,9 @@ describe("F-8: a history match must be this call's send", () => {
 
   it("a memo with a line break is refused, since it could forge lines of the wallet listing", async () => {
     const config = tempConfig();
-    const r = await executePay({ amount_zec: 0.001, recipient: ALLOWED, memo: "hi\nrecipient: x" }, { config, chain: new MockChainAdapter() });
+    const r = await executePay({ idempotency_key: "t-v12r5-1", amount_zec: 0.001, recipient: ALLOWED, memo: "hi\nrecipient: x" }, { config, chain: new MockChainAdapter() });
     assert.equal(r.code, "INVALID_MEMO");
-    const tab = await executePay({ amount_zec: 0.001, recipient: ALLOWED, memo: "a\u0085b" }, { config, chain: new MockChainAdapter() });
+    const tab = await executePay({ idempotency_key: "t-v12r5-2", amount_zec: 0.001, recipient: ALLOWED, memo: "a\u0085b" }, { config, chain: new MockChainAdapter() });
     assert.equal(tab.code, "INVALID_MEMO");
   });
 
@@ -385,7 +385,7 @@ describe("F-22: the chain tip cannot be trusted low", () => {
   it("a server tip far below the wallet's own height refuses the send", async () => {
     const config = liveCfg();
     const { chain, counts } = liveChain({ reading: () => ({ walletHeight: 4_500_000, chainTip: 100, spendableZats: funds }) });
-    const r = await executePay({ amount_zec: "0.0001", recipient: R }, { config, chain });
+    const r = await executePay({ idempotency_key: "t-v12r5-3", amount_zec: "0.0001", recipient: R }, { config, chain });
     assert.equal(counts.sent, 0);
     assert.equal(r.code, "CHAIN_ERROR");
     assert.match(r.text, /below the wallet's own height/);
@@ -395,10 +395,10 @@ describe("F-22: the chain tip cannot be trusted low", () => {
     const config = liveCfg();
     let reading: ChainHealth = { walletHeight: 1000, chainTip: 1000, spendableZats: funds };
     const { chain, counts } = liveChain({ reading: () => reading });
-    assert.equal((await executePay({ amount_zec: "0.0001", recipient: R }, { config, chain })).ok, true);
+    assert.equal((await executePay({ idempotency_key: "t-v12r5-4", amount_zec: "0.0001", recipient: R }, { config, chain })).ok, true);
     assert.equal(storeFor(config, chain).readTipMark(), 1000);
     reading = { walletHeight: 480, chainTip: 480, spendableZats: funds };
-    const r = await executePay({ amount_zec: "0.0002", recipient: R }, { config, chain });
+    const r = await executePay({ idempotency_key: "t-v12r5-5", amount_zec: "0.0002", recipient: R }, { config, chain });
     assert.equal(r.code, "CHAIN_ERROR");
     assert.equal(counts.sent, 1, "only the first send went out");
     assert.equal(storeFor(config, chain).readTipMark(), 1000, "the mark never goes down");
@@ -408,14 +408,14 @@ describe("F-22: the chain tip cannot be trusted low", () => {
     const config = liveCfg();
     config.healthMaxLagBlocks = 10_000;
     const { chain } = liveChain({ reading: () => ({ walletHeight: 1000, chainTip: 9000, spendableZats: funds }) });
-    await executePay({ amount_zec: "0.0001", recipient: R }, { config, chain });
+    await executePay({ idempotency_key: "t-v12r5-6", amount_zec: "0.0001", recipient: R }, { config, chain });
     assert.equal(storeFor(config, chain).readTipMark(), 1010);
   });
 
   it("the recorded anchor is the highest of the server tip, the wallet height, and the mark", async () => {
     const config = liveCfg();
     const { chain } = liveChain({ reading: () => ({ walletHeight: 1005, chainTip: 1000, spendableZats: funds }) });
-    const r = await executePay({ amount_zec: "0.0001", recipient: R }, { config, chain });
+    const r = await executePay({ idempotency_key: "t-v12r5-7", amount_zec: "0.0001", recipient: R }, { config, chain });
     const intent = storeFor(config, chain).readCall(JSON.parse(r.text).call_id)?.intent;
     assert.equal(intent?.chain_tip, 1005);
     assert.equal(intent?.wallet_height, 1005);

@@ -125,7 +125,7 @@ describe("wallet lock file", () => {
     const allow = join(d, "allow.json");
     writeFileSync(allow, JSON.stringify({ recipients: [{ address: R }] }));
     const config = tempConfig({ chainMode: "live", allowlistPath: allow, sendQueueWaitMs: 200 });
-    const res = await executePay({ amount_zec: "0.0001", recipient: R }, { config, chain });
+    const res = await executePay({ idempotency_key: "t-filelock-1", amount_zec: "0.0001", recipient: R }, { config, chain });
     assert.equal(res.code, "BUSY");
     assert.match(res.text, /Another zshield-mcp process holds the wallet lock/);
     assert.equal(sends, 0);
