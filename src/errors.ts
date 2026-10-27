@@ -17,7 +17,7 @@ export const PAY_REJECTION_CODES = [
 ] as const;
 
 /** zcash_pay failed after policy passed, or the server is misconfigured. Audited with status `error`. */
-export const PAY_ERROR_CODES = ["AUDIT_WRITE_FAILED", "CHAIN_ERROR", "CONFIG_ERROR"] as const;
+export const PAY_ERROR_CODES = ["AUDIT_WRITE_FAILED", "VIEWKEY_UNAVAILABLE", "CHAIN_ERROR", "CONFIG_ERROR"] as const;
 
 /** Read-only tool failures. */
 export const READ_ERROR_CODES = ["INVALID_LIMIT", "MAINNET_REFUSED", "CHAIN_ERROR"] as const;

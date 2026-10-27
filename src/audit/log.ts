@@ -5,6 +5,10 @@ import { MAX_AUDIT_ROW_BYTES, MAX_RECIPIENT_LENGTH } from "../policy/limits.js";
 import { MAX_AMOUNT_LENGTH } from "../policy/amount.js";
 import type { AuditEntry, ReadAuditEntry } from "../types.js";
 
+/**
+ * Short salted fingerprint of a viewing key: the first 16 hex characters of
+ * sha256(salt | key). The key itself is never written anywhere.
+ */
 export function fingerprintViewKey(material: string, salt: string): string {
   return createHash("sha256").update(`${salt}|${material}`).digest("hex").slice(0, 16);
 }

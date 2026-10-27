@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../src/server.ts";
+import type { CliRunner } from "../src/chain/live.ts";
 import type { Config } from "../src/types.ts";
 
 export const ALLOWED = "u1mockrecipientaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -44,4 +45,13 @@ export async function connect(config: Config = tempConfig()) {
 export function textOf(res: unknown): string {
   const content = (res as { content: { type: string; text: string }[] }).content;
   return content[0].text;
+}
+
+/** A fake testnet UFVK for tests. Not a real key. */
+export const TEST_UFVK = "uviewtest1" + "q".repeat(80);
+
+/** Wraps a fake CLI runner so `export_ufvk` answers with TEST_UFVK and is not passed on. */
+export function withUfvk(runner: CliRunner): CliRunner {
+  return async (bin, args, opts) =>
+    args.includes("export_ufvk") ? JSON.stringify({ ufvk: TEST_UFVK, birthday: 1 }) : runner(bin, args, opts);
 }

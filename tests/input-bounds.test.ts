@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MockChainAdapter } from "../src/chain/mock.ts";
+import { MockChainAdapter, MOCK_UFVK } from "../src/chain/mock.ts";
 import type { ChainAdapter } from "../src/chain/types.ts";
 import { appendAuditEntry, boundAuditEntry } from "../src/audit/log.ts";
 import { MAX_AUDIT_ROW_BYTES, MAX_MEMO_BYTES, MAX_RECIPIENT_LENGTH } from "../src/policy/limits.ts";
@@ -39,6 +39,7 @@ function countingChain(calls: { n: number }): ChainAdapter {
   const mock = new MockChainAdapter();
   return {
     mode: "mock",
+    getViewingKey: async () => MOCK_UFVK,
     async pay(req) {
       calls.n++;
       return mock.pay(req);
@@ -186,6 +187,7 @@ describe("chain errors", () => {
     const config = tempConfig();
     const chain: ChainAdapter = {
       mode: "mock",
+      getViewingKey: async () => MOCK_UFVK,
       async pay(req) {
         throw new Error(`zingo-cli failed: could not send to ${req.recipient} (memo ${req.memo})`);
       },

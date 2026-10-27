@@ -7,16 +7,18 @@ import { LiveChainAdapter, parseTxid, type CliRunner } from "../src/chain/live.t
 import { addressNetwork, assertTestnetAddress } from "../src/chain/network.ts";
 import { executePay } from "../src/tools/pay.ts";
 import type { Config } from "../src/types.ts";
+import { withUfvk } from "./helpers.ts";
 
 const UTEST = "utest1" + "q".repeat(100);
 const ZTEST = "ztestsapling1" + "q".repeat(70);
 const TM = "tmBsTi2xWTjUdEXnuTceL7fecEQKeWaPDJd";
 const TXID = "ab".repeat(32);
 
-const okRunner = (calls: string[][]): CliRunner => async (_bin, args) => {
-  calls.push(args);
-  return JSON.stringify({ txids: [TXID] });
-};
+const okRunner = (calls: string[][]): CliRunner =>
+  withUfvk(async (_bin, args) => {
+    calls.push(args);
+    return JSON.stringify({ txids: [TXID] });
+  });
 
 describe("address network checks", () => {
   it("accepts testnet prefixes", () => {

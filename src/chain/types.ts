@@ -9,4 +9,9 @@ export interface ChainAdapter {
   getReceiveAddress(): Promise<string>;
   /** Read-only. Up to `limit` recent transactions, newest first. */
   getHistory(limit: number): Promise<TxSummary[]>;
+  /**
+   * Read-only. The wallet's unified full viewing key, used only to compute the salted
+   * audit fingerprint. Callers must never log, store, or return it.
+   */
+  getViewingKey(): Promise<string>;
 }

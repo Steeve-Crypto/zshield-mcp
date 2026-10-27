@@ -13,7 +13,7 @@ import { executeHistory } from "../src/tools/history.ts";
 import { executeReceiveAddress } from "../src/tools/address.ts";
 import { executeBalance } from "../src/tools/balance.ts";
 import type { Config } from "../src/types.ts";
-import { ALLOWED, connect, readAuditRows, tempConfig, textOf } from "./helpers.ts";
+import { ALLOWED, connect, readAuditRows, tempConfig, TEST_UFVK, textOf, withUfvk } from "./helpers.ts";
 
 const UTEST = "utest1" + "q".repeat(100);
 const TXID = "ab".repeat(32);
@@ -27,12 +27,13 @@ function liveConfig(recipients: string[]): Config {
 function liveChain(calls: string[][], runner?: CliRunner) {
   return new LiveChainAdapter({
     network: "testnet",
-    runner:
+    runner: withUfvk(
       runner ??
-      (async (_b, args) => {
-        calls.push(args);
-        return JSON.stringify({ txids: [TXID] });
-      }),
+        (async (_b, args) => {
+          calls.push(args);
+          return JSON.stringify({ txids: [TXID] });
+        })
+    ),
   });
 }
 
@@ -42,6 +43,9 @@ const failingChain = (calls: { n: number }): ChainAdapter =>
     async pay() {
       calls.n++;
       throw new Error("node unreachable");
+    },
+    async getViewingKey() {
+      return TEST_UFVK;
     },
   }) as unknown as ChainAdapter;
 

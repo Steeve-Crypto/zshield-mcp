@@ -23,12 +23,13 @@ describe("security model doc", () => {
     }
   });
 
-  it("stays honest about the live fingerprint while the code still derives it from txid and recipient", () => {
+  it("describes the fingerprint the code actually computes", () => {
     const live = read("src/chain/live.ts");
-    if (/update\(`\$\{txid\}\|\$\{req\.recipient\}`\)/.test(live)) {
-      assert.match(doc, /not derived from a real viewing key/);
-      assert.match(doc, /sha256\(txid \| recipient\)/);
-    }
+    assert.ok(live.includes('"export_ufvk"'), "live adapter reads the UFVK");
+    assert.ok(!/update\(`\$\{txid\}\|\$\{req\.recipient\}`\)/.test(live), "no txid fingerprint left in code");
+    assert.match(doc, /sha256\(salt \| UFVK\)/);
+    assert.ok(!/sha256\(txid \| recipient\)/.test(doc), "doc still describes the old txid hash");
+    assert.ok(!/comes from the txid and recipient/.test(read("README.md")));
   });
 
   it("is linked from the README", () => {

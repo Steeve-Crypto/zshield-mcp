@@ -6,6 +6,11 @@ import type { PaymentReceipt, PaymentRequest, TxSummary, WalletBalance } from ".
 export const MOCK_FEE_ZATS = 10_000n;
 /** Fixed, obviously fake unified address for the mock wallet. */
 export const MOCK_RECEIVE_ADDRESS = "u1mockwallet" + "0".repeat(60);
+/**
+ * Fixed, obviously fake viewing key for the mock wallet. Deterministic, so mock audit
+ * rows always carry the same fingerprint under a given salt. Not a valid UFVK.
+ */
+export const MOCK_UFVK = "uviewtest1mock" + createHash("sha256").update("zshield-mcp mock wallet").digest("hex");
 /** Default starting balance of the mock wallet: 10 ZEC. */
 export const MOCK_START_ZATS = 1_000_000_000n;
 
@@ -60,12 +65,6 @@ export class MockChainAdapter implements ChainAdapter {
       .update(`mock|${req.recipient}|${req.amountZats}|${nonce}`)
       .digest("hex");
 
-    // Synthetic viewing-key material: fingerprint only in audit; never a real key
-    const viewKeyMaterial = `vk_mock_${createHash("sha256")
-      .update(`${txid}|${req.recipient}`)
-      .digest("hex")
-      .slice(0, 32)}`;
-
     const mockTxid = `mock_${txid.slice(0, 32)}`;
     this.balanceZats -= needed;
     this.txs.push({
@@ -83,7 +82,6 @@ export class MockChainAdapter implements ChainAdapter {
       amountZats: req.amountZats,
       recipient: req.recipient,
       memo: req.memo,
-      viewKeyMaterial,
       mode: "mock",
     };
   }
@@ -98,6 +96,10 @@ export class MockChainAdapter implements ChainAdapter {
 
   async getReceiveAddress(): Promise<string> {
     return MOCK_RECEIVE_ADDRESS;
+  }
+
+  async getViewingKey(): Promise<string> {
+    return MOCK_UFVK;
   }
 
   async getHistory(limit: number): Promise<TxSummary[]> {

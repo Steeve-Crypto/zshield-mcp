@@ -1,5 +1,4 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
 import type { ChainAdapter } from "./types.js";
 import type { PaymentReceipt, PaymentRequest, TxSummary, WalletBalance } from "../types.js";
 import { assertTestnetAddress, NetworkError } from "./network.js";
@@ -51,6 +50,8 @@ export class LiveChainAdapter implements ChainAdapter {
   readonly dataDir: string;
   readonly server: string;
   private readonly runner: CliRunner;
+  /** Cached in memory only, for this process. Never logged or written. */
+  private viewingKey?: Promise<string>;
 
   constructor(opts: LiveOptions) {
     if (opts.network !== "testnet") {
@@ -95,6 +96,24 @@ export class LiveChainAdapter implements ChainAdapter {
     return address;
   }
 
+  /**
+   * Read-only: runs `export_ufvk` in an offline session, so it is fast and touches no
+   * network. Cached for the life of the process. The key never leaves this adapter
+   * except to be hashed by the caller.
+   */
+  async getViewingKey(): Promise<string> {
+    if (!this.viewingKey) {
+      const args = ["--chain", "testnet", "--data-dir", this.dataDir, "--offline", "export_ufvk"];
+      const p = this.runner(this.bin, args, { timeoutMs: readTimeoutMs() }).then(parseUfvk);
+      // Do not cache a failure; the next call tries again.
+      p.catch(() => {
+        if (this.viewingKey === p) this.viewingKey = undefined;
+      });
+      this.viewingKey = p;
+    }
+    return this.viewingKey;
+  }
+
   async pay(req: PaymentRequest): Promise<PaymentReceipt> {
     assertTestnetAddress(req.recipient);
     if (typeof req.amountZats !== "bigint" || req.amountZats <= 0n) {
@@ -104,13 +123,11 @@ export class LiveChainAdapter implements ChainAdapter {
     if (req.memo) args.push(req.memo);
     const out = await this.run(args, { timeoutMs: SEND_TIMEOUT_MS });
     const txid = parseTxid(out);
-    const viewKeyMaterial = `vk_testnet_${createHash("sha256").update(`${txid}|${req.recipient}`).digest("hex").slice(0, 32)}`;
     return {
       txid,
       amountZats: req.amountZats,
       recipient: req.recipient,
       memo: req.memo,
-      viewKeyMaterial,
       mode: "live",
     };
   }
@@ -121,6 +138,19 @@ export function parseTxid(out: string): string {
   if (m) return m[1].toLowerCase();
   if (/error/i.test(out)) throw new Error(`zingo-cli send error: ${out.trim().slice(0, 500)}`);
   throw new Error("zingo-cli returned no txid");
+}
+
+/**
+ * Parse `zingo-cli export_ufvk`, which prints `{ "ufvk": "uviewtest1...", "birthday": N }`.
+ * Only a testnet key is accepted. Error messages never echo the output, since it holds the key.
+ */
+export function parseUfvk(out: string): string {
+  const m = out.match(/"ufvk"\s*:\s*"(uview[a-z0-9]*1[02-9ac-hj-np-z]+)"/);
+  if (!m) throw new Error("zingo-cli export_ufvk returned no unified full viewing key");
+  if (!m[1].startsWith("uviewtest1")) {
+    throw new NetworkError("zingo-cli export_ufvk returned a key that is not for testnet", "mainnet");
+  }
+  return m[1];
 }
 
 /** Parse an integer that zingo-cli may print with underscores, like 12_390_000. */

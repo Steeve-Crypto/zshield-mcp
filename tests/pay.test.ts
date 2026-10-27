@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MockChainAdapter } from "../src/chain/mock.ts";
+import { MockChainAdapter, MOCK_UFVK } from "../src/chain/mock.ts";
 import { executePay } from "../src/tools/pay.ts";
 import type { ChainAdapter } from "../src/chain/types.ts";
 import type { AuditEntry, Config, PaymentRequest } from "../src/types.ts";
@@ -53,7 +53,7 @@ describe("executePay (mock)", () => {
     const day = result.audit.ts.slice(0, 10);
     const log = readFileSync(join(config.auditDir, `${day}.jsonl`), "utf8");
     assert.ok(log.includes(result.audit.mock_txid!));
-    assert.ok(!log.includes("vk_mock_")); // raw view-key material must not appear
+    assert.ok(!log.includes(MOCK_UFVK)); // the viewing key itself must never appear
   });
 
   it("rejects over-cap", async () => {
@@ -116,6 +116,7 @@ describe("audit row is written before the chain send", () => {
     let seenAtSend: AuditEntry[] = [];
     const chain: ChainAdapter = {
       mode: "mock",
+      getViewingKey: async () => MOCK_UFVK,
       async pay(_req: PaymentRequest) {
         seenAtSend = readAudit(config);
         throw new Error("broadcast failed");
@@ -157,6 +158,7 @@ describe("audit row is written before the chain send", () => {
     let calls = 0;
     const chain: ChainAdapter = {
       mode: "mock",
+      getViewingKey: async () => MOCK_UFVK,
       async pay() {
         calls++;
         throw new Error("should not be called");
@@ -177,6 +179,7 @@ describe("audit row is written before the chain send", () => {
     let calls = 0;
     const chain: ChainAdapter = {
       mode: "mock",
+      getViewingKey: async () => MOCK_UFVK,
       async pay() {
         calls++;
         throw new Error("should not be called");
@@ -194,6 +197,7 @@ describe("audit row is written before the chain send", () => {
     let calls = 0;
     const chain: ChainAdapter = {
       mode: "mock",
+      getViewingKey: async () => MOCK_UFVK,
       async pay(req: PaymentRequest) {
         calls++;
         // Break the audit log after the pending row: swap each day file for a directory.
