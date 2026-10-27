@@ -103,10 +103,12 @@ describe("wallet lock file", () => {
       ],
       { stdio: ["ignore", "pipe", "inherit"] }
     );
+    // Listen for exit now: under load the child can exit before the parent gets the lock.
+    const exited = new Promise((r) => child.on("exit", r));
     await new Promise<void>((res) => child.stdout.on("data", (b) => String(b).includes("held") && res()));
     await assert.rejects(acquireFileLock(d, { waitMs: 0, purpose: "parent" }), /pid \d+, child/);
     (await acquireFileLock(d, { waitMs: 10_000, purpose: "parent" })).release();
-    await new Promise((r) => child.on("exit", r));
+    await exited;
   });
 
   it("a send refused because another process holds the wallet sends nothing and writes no pending row", async () => {
