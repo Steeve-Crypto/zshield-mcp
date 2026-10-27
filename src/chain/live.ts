@@ -557,12 +557,21 @@ export function parseOutgoingNotes(body: string): OutgoingNote[] {
     for (const group of section[1].matchAll(/^\s+\{\s*$([\s\S]*?)^\s+\}\s*$/gm)) {
       const f = new Map<string, string>();
       for (const line of group[1].matchAll(/^\s+([a-z][a-z _]*?):[ \t]?(.*?)\s*$/gm)) {
-        if (!f.has(line[1])) f.set(line[1], line[2]);
+        // The address lines come after the memo, so the last one wins: a memo that carried
+        // a line of its own (a send made before memos were limited to one line) cannot
+        // stand in for the real recipient. Other fields come before the memo, first wins.
+        if (line[1] === "recipient" || line[1] === "recipient unified address" || !f.has(line[1])) f.set(line[1], line[2]);
       }
       const recipient = f.get("recipient");
       const value = f.get("value");
       if (!recipient || !value || !/^[\d_]+$/.test(value)) continue;
-      notes.push({ recipient, valueZats: BigInt(value.replace(/_/g, "")), memo: f.get("memo") ?? "" });
+      const unified = f.get("recipient unified address");
+      notes.push({
+        recipient,
+        valueZats: BigInt(value.replace(/_/g, "")),
+        memo: f.get("memo") ?? "",
+        ...(unified && unified !== recipient ? { unifiedAddress: unified } : {}),
+      });
     }
   }
   return notes;

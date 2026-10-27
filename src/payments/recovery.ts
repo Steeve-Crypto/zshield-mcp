@@ -1,6 +1,6 @@
 import type { ChainAdapter } from "../chain/types.js";
 import { writeAuditRow } from "../audit/log.js";
-import { matchHistory } from "../tools/pay.js";
+import { lookalikeSends, MATCH_AFTER_MS, MATCH_SKEW_MS, matchHistory, placedInTime } from "../tools/pay.js";
 import type { Config, MatchConfidence, PossibleSend } from "../types.js";
 import { acquireWalletLock, SEND_QUEUE_WAIT_MAX_MS, type WalletLock } from "./lock.js";
 import { isSettled, storeFor, type CallEvent, type CallRecord, type CallState, type PaymentStore } from "./store.js";
@@ -55,6 +55,29 @@ export interface ReconcileOptions {
   claimedBy?: (txid: string) => string | undefined;
   /** Live rules: expiry needs proof by height. False for mock chains, which use time. */
   live: boolean;
+  /**
+   * How many other unsettled calls could own the same transaction (same recipient,
+   * amount, and memo, started close in time). With any, a match is never confirmed: one
+   * transaction cannot be told apart between identical payments.
+   */
+  rivals?: number;
+}
+
+/** The other unsettled calls that a transaction matching `record` could equally belong to. */
+export function countRivals(store: PaymentStore, record: CallRecord): number {
+  const a = record.intent;
+  if (!a) return 0;
+  let n = 0;
+  for (const id of store.pendingCalls()) {
+    if (id === record.callId) continue;
+    const other = store.readCall(id);
+    const b = other?.intent;
+    if (!other || !b || isSettled(other.state)) continue;
+    if (b.recipient !== a.recipient || b.amount_zats !== a.amount_zats || (b.memo ?? "").trim() !== (a.memo ?? "").trim()) continue;
+    const gap = Math.abs(Date.parse(b.ts) - Date.parse(a.ts));
+    if (Number.isNaN(gap) || gap <= MATCH_AFTER_MS + MATCH_SKEW_MS) n++;
+  }
+  return n;
 }
 
 /**
@@ -79,18 +102,24 @@ export async function reconcile(record: CallRecord, chain: ChainAdapter, opts: R
     return { ...base, status: "unknown", note: "The call has no recorded amount in zatoshis; check by hand." };
   }
   const startedAt = Date.parse(intent.ts);
-  const target = { amountZats: BigInt(intent.amount_zats), recipient: intent.recipient, memo: intent.memo };
+  const target = { amountZats: BigInt(intent.amount_zats), recipient: intent.recipient, memo: intent.memo, notBeforeHeight: intent.chain_tip };
   let matches: PossibleSend[];
+  let lookalikes: PossibleSend[] = [];
   const heights = new Map<string, number | undefined>();
   try {
     const txs = await chain.getHistory(Infinity, { offline: opts.offline });
     for (const t of txs) heights.set(t.txid, t.blockHeight);
     matches = matchHistory(txs, target, startedAt, opts.claimedBy, record.callId);
+    if (matches.length === 0) {
+      lookalikes = lookalikeSends(txs, target, startedAt, opts.claimedBy, record.callId).map((t) => ({
+        txid: t.txid, confidence: "low" as const, matched: ["amount"], status: t.status,
+      }));
+    }
   } catch (e) {
     return { ...base, status: "unknown", note: `Wallet history could not be read: ${e instanceof Error ? e.message : String(e)}` };
   }
   const mined = matches.filter((m) => m.status === "confirmed");
-  if (mined.length === 1 && matches.length === 1) {
+  if (mined.length === 1 && matches.length === 1 && !opts.rivals && placedInTime(mined[0])) {
     const m = mined[0];
     return {
       ...base,
@@ -109,7 +138,19 @@ export async function reconcile(record: CallRecord, chain: ChainAdapter, opts: R
       note:
         matches.length > 1
           ? "More than one transaction matches; check by hand. Do not pay again."
-          : "A matching transaction was found but is not mined yet. Do not pay again.",
+          : opts.rivals
+            ? "Another unsettled payment is identical (same recipient, amount, and memo), so this transaction cannot be told apart. Check by hand. Do not pay again."
+            : mined.length === 1 && !placedInTime(mined[0])
+              ? "A matching mined transaction has no time and no height that places it after this call started. Check by hand. Do not pay again."
+              : "A matching transaction was found but is not mined yet. Do not pay again.",
+    };
+  }
+  if (lookalikes.length > 0) {
+    return {
+      ...base,
+      status: "unknown",
+      possible_sends: lookalikes,
+      note: "No transaction matches the recipient and memo, but a sent transaction of the same amount near this time belongs to no call. It could be this send, listed in a different form. Check by hand. Do not pay again.",
     };
   }
   if (!opts.live) {
@@ -233,6 +274,7 @@ async function recoverLocked(
       evidence,
       claimedBy: (txid) => store.txidOwner(txid),
       live: chain.checkHealth !== undefined,
+      rivals: countRivals(store, record),
     });
     const before = store.readCall(callId);
     const after = recordReconcile(store, row, "recovery");

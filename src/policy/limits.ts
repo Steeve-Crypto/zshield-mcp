@@ -23,10 +23,18 @@ export function recipientProblem(recipient: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * Control and line-break characters. zingo-cli prints a memo into a line-based listing, so
+ * a memo with a line break could forge fields of that listing (a recipient, even a whole
+ * transaction) and could not be matched back to its send. Memos are one line of text.
+ */
+const MEMO_FORBIDDEN = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+
 export function memoProblem(memo: unknown): string | undefined {
   if (memo === undefined) return undefined;
   if (typeof memo !== "string") return "Memo must be a string.";
   if (Buffer.byteLength(memo, "utf8") > MAX_MEMO_BYTES) return `Memo is longer than ${MAX_MEMO_BYTES} bytes.`;
+  if (MEMO_FORBIDDEN.test(memo)) return "Memo contains a control or line-break character. Use one line of text.";
   return undefined;
 }
 
