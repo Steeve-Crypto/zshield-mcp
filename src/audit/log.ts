@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { MAX_AUDIT_ROW_BYTES, MAX_RECIPIENT_LENGTH } from "../policy/limits.js";
 import { MAX_AMOUNT_LENGTH } from "../policy/amount.js";
 import type { AuditEntry, RateLimitAuditEntry, ReadAuditEntry } from "../types.js";
+import type { RecoveryAuditEntry } from "../payments/recovery.js";
 
 /**
  * Short salted fingerprint of a viewing key: the first 16 hex characters of
@@ -49,7 +50,7 @@ export function boundAuditEntry<T extends object>(entry: T): T {
     truncated = true;
   }
   if (size(row) > MAX_AUDIT_ROW_BYTES) {
-    const keep = ["ts", "tool", "call_id", "status", "code", "mock_txid", "recipient_sha256", "view_key_fingerprint", "possible_txids", "possible_sends"];
+    const keep = ["ts", "tool", "call_id", "status", "code", "mock_txid", "recipient_sha256", "view_key_fingerprint", "possible_txids", "possible_sends", "txid", "block_height", "idempotency_key"];
     row = Object.fromEntries(Object.entries(row).filter(([k]) => keep.includes(k)));
   }
   if (truncated) row.truncated = true;
@@ -101,7 +102,10 @@ export function appendDurable(file: string, line: string): void {
 }
 
 /** Appends one bounded row, flushed to disk, and returns the file it went to. */
-export function appendAuditEntry(auditDir: string, entry: AuditEntry | ReadAuditEntry | RateLimitAuditEntry): string {
+export function appendAuditEntry(
+  auditDir: string,
+  entry: AuditEntry | ReadAuditEntry | RateLimitAuditEntry | RecoveryAuditEntry
+): string {
   ensureDurableDir(auditDir);
   const day = entry.ts.slice(0, 10);
   const file = join(auditDir, `${day}.jsonl`);
@@ -123,7 +127,7 @@ export interface AuditWriteResult {
   warning?: string;
 }
 
-type AuditRow = AuditEntry | ReadAuditEntry | RateLimitAuditEntry;
+type AuditRow = AuditEntry | ReadAuditEntry | RateLimitAuditEntry | RecoveryAuditEntry;
 type StderrWrite = (line: string) => void;
 
 function msg(e: unknown): string {
