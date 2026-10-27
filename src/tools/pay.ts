@@ -734,7 +734,7 @@ function now(): string {
 }
 
 function lostLeaseMessage(e: unknown): string {
-  const detail = e instanceof LeaseLostError ? e.message : e instanceof Error ? e.message : String(e);
+  const detail = e instanceof LeaseLostError ? e.detail : e instanceof Error ? e.message : String(e);
   return `The wallet lock was lost before the send (${detail}). Nothing was sent. Try again.`;
 }
 

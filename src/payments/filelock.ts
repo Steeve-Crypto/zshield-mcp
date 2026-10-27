@@ -44,8 +44,8 @@ export interface LockInfo {
 
 /** The holder lost the lease: it stalled past the lease time, or the file was replaced. */
 export class LeaseLostError extends Error {
-  constructor(detail: string) {
-    super(`The wallet lock was lost (${detail}). Nothing more was done.`);
+  constructor(readonly detail: string) {
+    super(`The wallet lock was lost: ${detail}.`);
     this.name = "LeaseLostError";
   }
 }
