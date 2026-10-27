@@ -66,8 +66,23 @@ Or during development: `"command": "npx", "args": ["tsx", "src/index.ts"]` with 
 | `amount_zec` | string or number | yes | Decimal ZEC such as `"0.05"`, at most 8 decimals and 32 characters. Must be `> 0` and `<= SPENDING_CAP_ZEC`, compared as integer zatoshis. Never rounded |
 | `recipient` | string | yes | At most 256 characters, visible ASCII only. Must exactly match an allow-list `address` |
 | `memo` | string | no | Optional memo, at most 512 UTF-8 bytes (the Zcash memo size) |
+| `idempotency_key` | string | no | 1 to 128 characters: letters, digits, `.`, `_`, `:`, `-`. Makes a retry safe, see below |
 
 Oversized or malformed input is rejected before anything else runs. Error messages never repeat the amount text, recipient, or memo, and errors from `zingo-cli` have them replaced with `[recipient]` and `[memo]`. Each audit row is capped at 8 KiB, see [docs/AUDIT.md](docs/AUDIT.md).
+
+### Safe retries
+
+Pass an `idempotency_key` you choose, such as an order id. The server keeps it in the audit log, so it survives a restart.
+
+- Same key, same amount, recipient, and memo: nothing is sent again. You get the first call's result with `idempotent_replay: true` and the first `call_id`. If the first call has no result yet, you get `PAYMENT_PENDING`.
+- Same key, anything different: `IDEMPOTENCY_CONFLICT`. Nothing is sent.
+- A key only counts as used once the `pending` row is on disk. A call refused before that (cap, allow-list, `BUSY`, a health check) does not use it up.
+
+Other protections on every send:
+
+- **One send at a time per wallet.** A second call waits up to `SEND_QUEUE_WAIT_MS` for the first to finish, then gets `BUSY`.
+- **Health check first (testnet mode).** Before the `pending` row, the server checks that the lightwalletd server answers, the wallet is within `HEALTH_MAX_LAG_BLOCKS` of the chain tip, and spendable funds cover the amount plus a 0.0001 ZEC fee estimate. A failure returns `CHAIN_UNREACHABLE`, `WALLET_NOT_SYNCED`, or `INSUFFICIENT_FUNDS` and sends nothing.
+- **Recovery on startup.** If the server stopped between the `pending` row and the result row, the next start looks for the send in wallet history, matched on recipient, amount, and memo. It writes one `zcash_pay_recovery` row: `confirmed` with the txid, `not_found` once the wallet is synced and two hours have passed with no match, or `unknown`. It never sends again. `unknown` ones are checked again on the next start.
 
 ## Resource: `zshield://policy`
 
@@ -99,7 +114,7 @@ Read this before paying to see the rules the server will apply. It is JSON, read
   },
   "tools": {
     "payment": ["zcash_pay"],
-    "read_only": ["zcash_balance", "zcash_receive_address", "zcash_history"]
+    "read_only": ["zcash_balance", "zcash_receive_address", "zcash_history", "zcash_payment_status"]
   }
 }
 ```
@@ -155,8 +170,8 @@ Branch on `code`. It is stable. `message` is for people and may change. `error` 
 
 | Code | Meaning |
 |------|---------|
-| `SEND_UNCONFIRMED` | `zingo-cli` timed out, was killed, or finished without a txid or an error. The payment may have been broadcast. Do not retry yet: call `zcash_history` and look for a sent transaction with this amount. The response and the audit row list `possible_txids`, recent sent transactions of the same amount found in wallet history right after the failure. An empty list does not prove nothing went out, because the wallet may not have synced the send yet |
-| `PAYMENT_PENDING` | A repeat call with an `idempotency_key` whose first call has a `pending` row and no result yet. Nothing was sent again |
+| `SEND_UNCONFIRMED` | `zingo-cli` timed out, was killed, or finished without a txid or an error. The payment may have been broadcast. Do not retry with a new key: call `zcash_payment_status` with the `call_id`. The response and the audit row list `possible_sends`, recent sent transactions to the same recipient with the same amount (and memo, when one was given) found right after the failure, each with a `confidence`. `possible_txids` holds just their txids. Amount alone never counts as a match. An empty list does not prove nothing went out, because the wallet may not have synced the send yet |
+| `PAYMENT_PENDING` | A repeat call with an `idempotency_key` whose first call has a `pending` row and no result yet. Nothing was sent again. Call `zcash_payment_status` with the key |
 
 Checks run in this order, and the first failure decides the code: recipient and memo size, allow-list file, amount, cap, address network (testnet mode only), allow-list match.
 
@@ -241,6 +256,41 @@ Returns recent transactions, newest first. Ones that are not confirmed yet come 
 
 A limit outside `1` to `50`, or one that is not a whole number, is rejected before the wallet is asked, and the rejection is audited. Memos and counterparties are not returned. In testnet mode the list comes from `zingo-cli transactions`. In mock mode it lists the mock funding receive and every mock payment made in this server session.
 
+### `zcash_payment_status`
+
+| Arg | Type | Required | Description |
+|-----|------|----------|-------------|
+| `call_id` | string | one of the two | The `call_id` from a `zcash_pay` response |
+| `idempotency_key` | string | one of the two | The key passed to `zcash_pay` |
+
+Looks the call up in the audit log, then in wallet history. Never sends.
+
+```json
+{
+  "ok": true,
+  "mode": "live",
+  "call_id": "3f0c…",
+  "idempotency_key": "order-7",
+  "state": "mined",
+  "txid": "59d9cb1b5a47…",
+  "block_height": 4493943,
+  "confirmations": 12,
+  "wallet_height": 4493954,
+  "amount_zats": "10000",
+  "message": "Mined at height 4493943.",
+  "explorer_url": "https://blockexplorer.one/zcash/testnet/tx/59d9cb1b5a47…"
+}
+```
+
+| `state` | Meaning |
+|---------|---------|
+| `pending` | Started and no outcome yet: being sent now, or interrupted and not found in history so far |
+| `broadcast` | Sent, not mined yet |
+| `mined` | In a block. `confirmations` counts from the wallet's synced height |
+| `expired` | Never seen in a synced wallet two hours after it started. Safe to pay again with a new key |
+| `failed` | Not sent (refused or errored, `code` says why), or the wallet marks the transaction failed |
+| `unknown` | Cannot tell, for example two matching sends or history that could not be read. `possible_sends` lists candidates |
+
 ## Config: caps & allow-list
 
 Precedence: **environment variables** override `config/default.yaml`.
@@ -253,6 +303,9 @@ Precedence: **environment variables** override `config/default.yaml`.
 | `AUDIT_DIR` | `./audits` | JSONL audit directory |
 | `VIEW_KEY_FINGERPRINT_SALT` | from yaml | Salt for view-key fingerprints |
 | `RATE_LIMIT_PER_MIN` | `60` | Tool calls allowed per minute across all tools in one server process, 1 to 10000. Calls over it get `RATE_LIMITED` |
+| `AUDIT_FALLBACK_PATH` | `audit-fallback.jsonl` next to `AUDIT_DIR` | Where an audit row goes when the main log cannot be written |
+| `SEND_QUEUE_WAIT_MS` | `10000` | How long a send waits for another send from the same wallet, up to `600000`, before `BUSY` |
+| `HEALTH_MAX_LAG_BLOCKS` | `10` | Testnet mode: how far the wallet may trail the chain tip and still send, 0 to 10000 |
 
 Allow-list shape:
 
@@ -266,7 +319,7 @@ Allow-list shape:
 
 ## Audit log format
 
-JSONL per day: `audits/YYYY-MM-DD.jsonl`. A call that passes policy writes a `pending` row before the chain send and a result row after it, linked by `call_id`. A rejected call writes one `rejected` row. Example success line:
+JSONL per day: `audits/YYYY-MM-DD.jsonl`. A call that passes policy writes a `pending` row before the chain send and a result row after it, linked by `call_id`. Each row is flushed to disk (fsync) before the server moves on, so the `pending` row exists before anything is sent. If the main log cannot be written, the row goes to the fallback file; if neither works, the payment is refused with `AUDIT_WRITE_FAILED`. A rejected call writes one `rejected` row. A repeat with a used `idempotency_key` writes a `replayed` row, and startup recovery writes `zcash_pay_recovery` rows. Example success line:
 
 ```json
 {"ts":"2026-10-05T19:00:00.000Z","tool":"zcash_pay","call_id":"3f0c…","amount_zec":0.05,"amount_zats":"5000000","recipient":"u1…","allowlist_hit":true,"cap_zec":0.1,"status":"ok","mock_txid":"mock_…","view_key_fingerprint":"a1b2c3d4e5f60718","memo":"test"}
@@ -284,6 +337,7 @@ The viewing key itself is **never** written or returned, only a short fingerprin
 src/policy/   caps + allow-list
 src/chain/    mock adapter, testnet adapter, address checks
 src/audit/    JSONL writer + fingerprint
+src/payments/ idempotency index, send lock, startup recovery
 src/tools/    zcash_pay and the read-only tools
 src/server.ts MCP registration
 tests/        happy path + rejections
@@ -321,7 +375,15 @@ ZINGO_DATA_DIR=~/.zshield-testnet/wallet \
 ALLOWLIST_PATH=./allowlists/testnet.json npm start
 ```
 
-Optional variables: `ZINGO_BIN`, `ZINGO_DATA_DIR`, `LIGHTWALLETD_URL`, and `ZINGO_READ_TIMEOUT_MS` (default `120000`), which stops a read-only call that takes too long.
+Optional variables:
+
+- `ZINGO_BIN`: path to `zingo-cli`.
+- `ZINGO_DATA_DIR`: the wallet directory. It must be an absolute path. The default is `.zshield-testnet/wallet` in the home directory the OS reports, not `$HOME`, and the server will not start if that cannot be found.
+- `LIGHTWALLETD_URL`: the testnet server.
+- `ZINGO_READ_TIMEOUT_MS` (default `120000`): stops a read-only call that takes too long.
+- `ZINGO_HEALTH_TIMEOUT_MS` (default `30000`): stops each pre-send health check step.
+
+On Windows the server reads the wallet directory's ACL with `icacls` at startup and refuses to run if Everyone, Users, or another broad group can read it. Set `ZSHIELD_HARDEN_WINDOWS_ACL=1` to have it remove inherited entries and grant only your account, or `ZSHIELD_ALLOW_UNCHECKED_WINDOWS_ACL=1` to start anyway when the ACL cannot be read.
 
 Run the demo:
 
@@ -343,6 +405,7 @@ One real shielded 0.001 TAZ payment through `zcash_pay`, plus a blocked over-cap
 - ✅ Testnet shielded sends via zingo-cli
 - ✅ Read-only balance, receive address, and history tools
 - ✅ Stable rejection codes
+- ✅ Idempotency keys, one send at a time per wallet, pre-send health check, startup recovery, and `zcash_payment_status`
 - ❌ Daily or rolling spend limits (per call only for now)
 - ✅ Audit fingerprint from the wallet's real viewing key (UFVK)
 - ❌ Mainnet (refused by design)
