@@ -2,7 +2,9 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { parseZecToZats } from "./policy/amount.js";
-import { resolveWalletDir } from "./chain/live.js";
+import { resolveWalletDir, validateTimeouts } from "./chain/live.js";
+import { parseLockLease } from "./payments/filelock.js";
+import { urlHasCredentials } from "./redact.js";
 import { HEALTH_MAX_LAG_DEFAULT } from "./tools/pay.js";
 import { parseSendQueueWait, SEND_QUEUE_WAIT_DEFAULT_MS } from "./payments/lock.js";
 import { parseRateLimit, RATE_LIMIT_DEFAULT_PER_MIN } from "./policy/rate.js";
@@ -24,7 +26,42 @@ function parseMaxLag(value: unknown): number {
 
 const KNOWN_MODES = ["mock", "live", "testnet"];
 
+/** Shortest secret part allowed in a credentialed server URL, so redaction can find it safely. */
+export const MIN_URL_SECRET_LENGTH = 8;
+
+/**
+ * LIGHTWALLETD_URL must be an http or https URL. Credentials in it (a user, a password, a
+ * query string, or a fragment) are refused, because zingo-cli only takes the server on
+ * its command line, where other local users can read it. ZSHIELD_ALLOW_URL_CREDENTIALS=1
+ * accepts them anyway; each secret part must then be at least 8 characters. Messages
+ * never repeat the URL.
+ */
+export function checkServerUrl(url: string | undefined, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  if (url === undefined || url.trim() === "") return undefined;
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    throw new Error("LIGHTWALLETD_URL is not a valid URL.");
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("LIGHTWALLETD_URL must start with http:// or https://.");
+  if (!urlHasCredentials(url)) return url;
+  if (env.ZSHIELD_ALLOW_URL_CREDENTIALS !== "1") {
+    throw new Error(
+      "LIGHTWALLETD_URL carries credentials (a user, password, query string, or fragment). zingo-cli takes the server only on its command line, where other local users can read it. Use a URL without credentials, or set ZSHIELD_ALLOW_URL_CREDENTIALS=1 to accept that risk."
+    );
+  }
+  const parts = [u.username, u.password, u.hash.slice(1), ...[...u.searchParams.values()]].filter((p) => p !== "");
+  if (parts.some((p) => p.length < MIN_URL_SECRET_LENGTH)) {
+    throw new Error(`Each credential in LIGHTWALLETD_URL must be at least ${MIN_URL_SECRET_LENGTH} characters so it can be redacted.`);
+  }
+  return url;
+}
+
 export function loadConfig(cwd = process.cwd()): Config {
+  // Every timeout has a range; an out-of-range value stops the server here.
+  validateTimeouts(process.env);
+  if (process.env.ZSHIELD_LOCK_LEASE_MS) parseLockLease(process.env.ZSHIELD_LOCK_LEASE_MS);
   const yamlPath = resolve(cwd, "config/default.yaml");
   let fromFile: Partial<{
     spending_cap_zec: number | string;
@@ -79,7 +116,7 @@ export function loadConfig(cwd = process.cwd()): Config {
     zingoBin: process.env.ZINGO_BIN,
     // Live mode needs an absolute wallet path; loading fails here rather than fall back to a relative one.
     zingoDataDir: chainMode === "live" ? resolveWalletDir(process.env.ZINGO_DATA_DIR) : process.env.ZINGO_DATA_DIR,
-    lightwalletd: process.env.LIGHTWALLETD_URL,
+    lightwalletd: checkServerUrl(process.env.LIGHTWALLETD_URL),
     healthMaxLagBlocks: parseMaxLag(
       envOr<number | string>("HEALTH_MAX_LAG_BLOCKS", fromFile.health_max_lag_blocks ?? HEALTH_MAX_LAG_DEFAULT, (v) => v)
     ),

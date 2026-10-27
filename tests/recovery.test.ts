@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 import { appendAuditEntry } from "../src/audit/log.ts";
 import type { ChainAdapter } from "../src/chain/types.ts";
-import { paymentIndexFor, resetPaymentIndexes } from "../src/payments/index.ts";
+import { resetPaymentStores as resetPaymentIndexes, storeFor } from "../src/payments/store.ts";
 import { RECOVERY_EXPIRY_MS, recoverPendingPayments } from "../src/payments/recovery.ts";
 import type { AuditEntry, ChainHealth, Config, TxSummary } from "../src/types.ts";
 import { readAuditRows, tempConfig } from "./helpers.ts";
@@ -23,6 +23,7 @@ function pending(config: Config, callId: string, extra: Partial<AuditEntry> = {}
     status: "pending",
     view_key_fingerprint: "abc",
     memo: "rent",
+    chain_tip: 900,
     ...extra,
   };
   appendAuditEntry(config.auditDir, row);
@@ -94,7 +95,7 @@ describe("crash recovery on startup", () => {
 
   it("does not confirm on amount alone", async () => {
     const config = tempConfig();
-    pending(config, "c1");
+    pending(config, "c1", { chain_tip: 990 });
     const other = sent("bb".repeat(32), { outgoing: [{ recipient: "utest1other", valueZats: 10000n, memo: "rent" }] });
     const { c } = chain([other, sent("cc".repeat(32), {}, "different memo")], synced);
     const [row] = await recoverPendingPayments(config, c, { now: T0 + 60_000 });
@@ -102,10 +103,10 @@ describe("crash recovery on startup", () => {
     assert.equal(row.txid, undefined);
   });
 
-  it("not_found only after the expiry window in a synced wallet", async () => {
+  it("not_found only once a synced wallet has scanned past the expiry height", async () => {
     const config = tempConfig();
     pending(config, "c1");
-    const early = await recoverPendingPayments(config, chain([], synced).c, { now: T0 + 60_000 });
+    const early = await recoverPendingPayments(config, chain([], { walletHeight: 940, chainTip: 941, spendableZats: 0n }).c, { now: late });
     assert.equal(early[0].status, "unknown");
     assert.match(early[0].note, /expiry/);
 
@@ -142,12 +143,12 @@ describe("crash recovery on startup", () => {
 
   it("skips calls with a result row and settled recoveries, retries unknown ones after a restart", async () => {
     const config = tempConfig();
-    pending(config, "done");
+    pending(config, "done", { chain_tip: 990 });
     appendAuditEntry(config.auditDir, {
       ts: new Date(T0 + 1).toISOString(), tool: "zcash_pay", call_id: "done", amount_zec: "0.0001", recipient: R,
       allowlist_hit: true, cap_zec: "0.01", status: "ok", view_key_fingerprint: "abc",
     });
-    pending(config, "open");
+    pending(config, "open", { chain_tip: 990 });
     const first = chain([], synced);
     assert.deepEqual((await recoverPendingPayments(config, first.c, { now: T0 + 60_000 })).map((r) => [r.call_id, r.status]), [["open", "unknown"]]);
 
@@ -156,7 +157,7 @@ describe("crash recovery on startup", () => {
     const second = chain([sent("ee".repeat(32))], synced);
     const again = await recoverPendingPayments(config, second.c, { now: T0 + 60_000 });
     assert.deepEqual(again.map((r) => r.status), ["confirmed"]);
-    assert.equal(paymentIndexFor(config).byCallId("open")?.recovery?.status, "confirmed");
+    assert.equal(storeFor(config, second.c).readCall("open")?.state, "mined");
 
     resetPaymentIndexes();
     const third = chain([], synced);
@@ -174,6 +175,7 @@ describe("crash recovery on startup", () => {
 describe("recovery and sends", () => {
   it("holds the send lock, so a send waits until recovery is done", async () => {
     const { sendLockFor } = await import("../src/payments/lock.ts");
+    const { storeFor } = await import("../src/payments/store.ts");
     const config = tempConfig();
     pending(config, "c1");
     let finish!: () => void;
@@ -184,10 +186,10 @@ describe("recovery and sends", () => {
     }, synced);
     const run = recoverPendingPayments(config, c, { now: T0 + 60_000 });
     await new Promise((r) => setTimeout(r, 10));
-    await assert.rejects(sendLockFor(c).acquire(5), /BUSY|busy|another/i);
+    await assert.rejects(sendLockFor(storeFor(config, c).dir).acquire(5), /BUSY|busy|another/i);
     finish();
     await run;
-    const release = await sendLockFor(c).acquire(5);
+    const release = await sendLockFor(storeFor(config, c).dir).acquire(5);
     release();
   });
 });

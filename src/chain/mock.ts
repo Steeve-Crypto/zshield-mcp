@@ -26,6 +26,8 @@ export interface MockTx {
 
 export interface MockOptions {
   startingBalanceZats?: bigint;
+  /** Payment store folder, for mock servers that share one wallet directory. */
+  stateDir?: string;
 }
 
 /**
@@ -34,11 +36,13 @@ export interface MockOptions {
  */
 export class MockChainAdapter implements ChainAdapter {
   readonly mode = "mock" as const;
+  readonly stateDir?: string;
   private balanceZats: bigint;
   protected readonly txs: MockTx[] = [];
 
   constructor(opts: MockOptions = {}) {
     this.balanceZats = opts.startingBalanceZats ?? MOCK_START_ZATS;
+    this.stateDir = opts.stateDir;
     if (this.balanceZats > 0n) {
       this.txs.push({
         txid: `mock_${randomBytes(16).toString("hex")}`,

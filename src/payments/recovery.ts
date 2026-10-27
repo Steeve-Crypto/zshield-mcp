@@ -1,26 +1,29 @@
 import type { ChainAdapter } from "../chain/types.js";
 import { writeAuditRow } from "../audit/log.js";
-import { matchSend } from "../tools/pay.js";
-import type { AuditEntry, Config, MatchConfidence, PossibleSend } from "../types.js";
-import { paymentIndexFor, type PaymentRecord } from "./index.js";
-import { acquireWalletLock, SEND_QUEUE_WAIT_MAX_MS } from "./lock.js";
+import { matchHistory } from "../tools/pay.js";
+import type { Config, MatchConfidence, PossibleSend } from "../types.js";
+import { acquireWalletLock, SEND_QUEUE_WAIT_MAX_MS, type WalletLock } from "./lock.js";
+import { isSettled, storeFor, type CallEvent, type CallRecord, type CallState, type PaymentStore } from "./store.js";
 import { statusSyncTimeoutMs } from "../chain/live.js";
 import type { SyncResult } from "../chain/sync.js";
 
 /**
- * How long after its pending row a send that never showed up counts as not sent. zingo-cli
- * builds transactions that expire 40 blocks (about 50 minutes) after their target height;
- * two hours leaves room for a slow first broadcast.
+ * Mock mode only (no chain to ask): how long after its intent a send that never showed
+ * up counts as not sent. Live mode needs proof by block height instead.
  */
 export const RECOVERY_EXPIRY_MS = 2 * 60 * 60_000;
+/** zingo-cli builds transactions that expire this many blocks after the tip it saw. */
+export const TX_EXPIRY_BLOCKS = 40;
+/** Extra blocks past expiry before a missing send counts as proven not sent. */
+export const EXPIRY_MARGIN_BLOCKS = 10;
 
-/** Recovery outcome for a send that has a pending row and no result row. */
+/** Recovery outcome for a call with no settled result. */
 export type RecoveryStatus = "confirmed" | "not_found" | "unknown";
 
 export interface RecoveryAuditEntry {
   ts: string;
   tool: "zcash_pay_recovery";
-  /** The call_id of the pending row this resolves */
+  /** The call_id this resolves */
   call_id: string;
   status: RecoveryStatus;
   /** The matching transaction, when one was found */
@@ -35,47 +38,59 @@ export interface RecoveryAuditEntry {
   note: string;
 }
 
+/** What the wallet can prove about the chain right now. */
+export interface ChainEvidence {
+  /** The bounded sync finished and the wallet is within the lag limit of the tip */
+  synced: boolean;
+  /** The wallet's scanned height, when known */
+  walletHeight?: number;
+}
+
+export interface ReconcileOptions {
+  now?: number;
+  offline?: boolean;
+  /** Asked only when nothing matched, to decide whether "not sent" is proven */
+  evidence: () => Promise<ChainEvidence>;
+  /** Owner of a txid already credited to a call */
+  claimedBy?: (txid: string) => string | undefined;
+  /** Live rules: expiry needs proof by height. False for mock chains, which use time. */
+  live: boolean;
+}
+
 /**
- * Decide what happened to one interrupted send. Never sends anything.
- * - confirmed: a mined transaction matches on recipient, amount, and memo when given.
- * - not_found: nothing matches, the wallet is synced, and the expiry window has passed.
- * - unknown: anything else, including a match that is not mined yet.
+ * Decide what happened to one unsettled send. Never sends anything. Reads the whole
+ * wallet history, never a recent slice.
+ * - confirmed: exactly one mined transaction matches on recipient, amount, and memo when given.
+ * - not_found: nothing matches and the payment is proven never sent: live, the wallet is
+ *   synced, the whole history was read, and the wallet has scanned past the height where
+ *   the transaction would have expired. Mock: the expiry window has passed.
+ * - unknown: anything else. Without proof, the answer stays unknown.
  */
-export async function reconcile(
-  record: PaymentRecord,
-  chain: ChainAdapter,
-  opts: { now?: number; synced: boolean | (() => Promise<boolean>); offline?: boolean }
-): Promise<RecoveryAuditEntry> {
-  const intent = record.intent as AuditEntry;
+export async function reconcile(record: CallRecord, chain: ChainAdapter, opts: ReconcileOptions): Promise<RecoveryAuditEntry> {
+  const intent = record.intent;
   const now = opts.now ?? Date.now();
-  const startedAt = Date.parse(intent.ts);
   const base = {
     ts: new Date(now).toISOString(),
     tool: "zcash_pay_recovery" as const,
     call_id: record.callId,
-    idempotency_key: record.idempotencyKey ?? (record.intent as AuditEntry).idempotency_key,
+    idempotency_key: intent?.idempotency_key,
   };
-  if (intent.amount_zats === undefined) {
-    return { ...base, status: "unknown", note: "Pending row has no amount in zatoshis; check by hand." };
+  if (!intent || intent.amount_zats === undefined) {
+    return { ...base, status: "unknown", note: "The call has no recorded amount in zatoshis; check by hand." };
   }
+  const startedAt = Date.parse(intent.ts);
   const target = { amountZats: BigInt(intent.amount_zats), recipient: intent.recipient, memo: intent.memo };
   let matches: PossibleSend[];
-  let heights = new Map<string, number | undefined>();
+  const heights = new Map<string, number | undefined>();
   try {
-    const txs = await chain.getHistory(50, { offline: opts.offline });
-    matches = [];
-    for (const t of txs) {
-      const m = matchSend(t, target, startedAt);
-      if (m) {
-        matches.push(m);
-        heights.set(t.txid, t.blockHeight);
-      }
-    }
+    const txs = await chain.getHistory(Infinity, { offline: opts.offline });
+    for (const t of txs) heights.set(t.txid, t.blockHeight);
+    matches = matchHistory(txs, target, startedAt, opts.claimedBy, record.callId);
   } catch (e) {
     return { ...base, status: "unknown", note: `Wallet history could not be read: ${e instanceof Error ? e.message : String(e)}` };
   }
   const mined = matches.filter((m) => m.status === "confirmed");
-  if (mined.length === 1) {
+  if (mined.length === 1 && matches.length === 1) {
     const m = mined[0];
     return {
       ...base,
@@ -92,88 +107,154 @@ export async function reconcile(
       status: "unknown",
       possible_sends: matches,
       note:
-        mined.length > 1
-          ? "More than one mined transaction matches; check by hand."
-          : "A matching transaction was found but is not mined yet.",
+        matches.length > 1
+          ? "More than one transaction matches; check by hand. Do not pay again."
+          : "A matching transaction was found but is not mined yet. Do not pay again.",
     };
   }
-  if (now - startedAt >= RECOVERY_EXPIRY_MS && !(typeof opts.synced === "function" ? await opts.synced() : opts.synced)) {
-    return { ...base, status: "unknown", note: "No match, but the wallet is not synced to the chain tip." };
+  if (!opts.live) {
+    if (now - startedAt < RECOVERY_EXPIRY_MS) {
+      return { ...base, status: "unknown", note: "No match yet, and the send has not passed its expiry window." };
+    }
+    return { ...base, status: "not_found", note: NOT_SENT_NOTE };
   }
-  if (now - startedAt < RECOVERY_EXPIRY_MS) {
-    return { ...base, status: "unknown", note: "No match yet, and the send has not passed its expiry window." };
+  const ev = await opts.evidence();
+  if (!ev.synced) {
+    return { ...base, status: "unknown", note: "No match, but the wallet is not synced to the chain tip, so it cannot prove the payment was not sent." };
   }
+  if (intent.chain_tip === undefined) {
+    return { ...base, status: "unknown", note: "No match, but this call has no recorded chain height, so expiry cannot be proven. Check by hand." };
+  }
+  const provenAt = intent.chain_tip + TX_EXPIRY_BLOCKS + EXPIRY_MARGIN_BLOCKS;
+  if (ev.walletHeight === undefined || ev.walletHeight <= provenAt) {
+    return {
+      ...base,
+      status: "unknown",
+      note: `No match yet. The payment can only be proven not sent once the wallet has scanned past the expiry height plus margin, ${provenAt}${ev.walletHeight !== undefined ? ` (now ${ev.walletHeight})` : ""}.`,
+    };
+  }
+  return { ...base, status: "not_found", note: NOT_SENT_NOTE };
+}
+
+const NOT_SENT_NOTE =
+  "No matching transaction in the whole history of a synced wallet, scanned past the expiry height. It was not sent; a new payment needs a new idempotency key.";
+
+/** The store event a recovery result moves the call to. */
+export function eventFor(row: RecoveryAuditEntry, by: CallEvent["by"]): CallEvent {
+  const state: CallState = row.status === "confirmed" ? "mined" : row.status === "not_found" ? "expired" : "unknown";
   return {
-    ...base,
-    status: "not_found",
-    note: "No matching transaction in a synced wallet after the expiry window. It was not sent; a new payment needs a new idempotency key.",
+    ts: row.ts,
+    call_id: row.call_id,
+    state,
+    txid: row.txid,
+    block_height: row.block_height,
+    possible_sends: row.possible_sends,
+    note: row.note,
+    by,
   };
 }
 
+/** Record a reconcile result in the store: claim the txid and move the call forward. */
+export function recordReconcile(store: PaymentStore, row: RecoveryAuditEntry, by: CallEvent["by"]): CallRecord {
+  if (row.status === "confirmed" && row.txid && !store.claimTxid(row.txid, row.call_id)) {
+    // Credited to another call since the history was read: this call cannot have it.
+    return store.advance({ ...eventFor({ ...row, status: "unknown", txid: undefined, note: "The matching transaction belongs to another call." }, by) });
+  }
+  return store.advance(eventFor(row, by));
+}
+
 /**
- * On startup: find sends with a pending row and no result row (the process stopped
- * mid-send), reconcile each against wallet history, and write one recovery row each.
- * Rows already settled by an earlier recovery (confirmed or not_found) are skipped.
- * Holds the wallet's send lock while it runs, so no send overlaps it and two zingo-cli
- * runs never share the wallet. Never resends. Never throws.
+ * On startup: reconcile every call with a pending marker (the process stopped mid-send,
+ * or the outcome was unknown). Holds the wallet lease while it runs, so no send overlaps
+ * it, and re-reads each call fresh before deciding, so a call another process settled is
+ * skipped. Writes one recovery audit row per call it decides. Never resends. Never throws.
  */
 export async function recoverPendingPayments(
   config: Config,
   chain: ChainAdapter,
   opts: { now?: number; maxLagBlocks?: number } = {}
 ): Promise<RecoveryAuditEntry[]> {
-  const index = paymentIndexFor(config);
-  const todo = index.unresolved();
-  if (todo.length === 0) return [];
-  let release: () => void;
+  let store: PaymentStore;
+  let todo: string[];
   try {
-    release = await acquireWalletLock(chain, SEND_QUEUE_WAIT_MAX_MS, "recovery");
+    store = storeFor(config, chain);
+    todo = store.pendingCalls();
+  } catch {
+    return [];
+  }
+  if (todo.length === 0) return [];
+  let lock: WalletLock;
+  try {
+    lock = await acquireWalletLock(store, SEND_QUEUE_WAIT_MAX_MS, "recovery");
   } catch {
     return [];
   }
   try {
-    return await recoverLocked(config, chain, todo, opts);
+    return await recoverLocked(config, chain, store, lock, todo, opts);
+  } catch {
+    return [];
   } finally {
-    release();
+    lock.release();
   }
 }
 
 async function recoverLocked(
   config: Config,
   chain: ChainAdapter,
-  todo: PaymentRecord[],
+  store: PaymentStore,
+  lock: WalletLock,
+  todo: string[],
   opts: { now?: number; maxLagBlocks?: number }
 ): Promise<RecoveryAuditEntry[]> {
-  const index = paymentIndexFor(config);
   // Sync first, bounded, then read history offline so no read starts a sync of its own.
   const sync = await boundedSync(chain);
-  const lagOk = walletSynced(chain, opts.maxLagBlocks ?? config.healthMaxLagBlocks ?? 10);
-  const synced = async () => (sync === undefined || sync.complete) && (await lagOk());
+  const evidence = chainEvidence(chain, sync, opts.maxLagBlocks ?? config.healthMaxLagBlocks ?? 10);
   const rows: RecoveryAuditEntry[] = [];
-  for (const record of todo) {
-    const row = await reconcile(record, chain, { now: opts.now, synced, offline: sync !== undefined });
-    writeAuditRow(config, row);
-    index.recordRecovery(row);
+  for (const callId of todo) {
+    try {
+      lock.assertHeld();
+    } catch {
+      break;
+    }
+    const record = store.readCall(callId);
+    if (!record || isSettled(record.state)) {
+      store.clearPending(callId);
+      continue;
+    }
+    const row = await reconcile(record, chain, {
+      now: opts.now,
+      offline: sync !== undefined,
+      evidence,
+      claimedBy: (txid) => store.txidOwner(txid),
+      live: chain.checkHealth !== undefined,
+    });
+    const before = store.readCall(callId);
+    const after = recordReconcile(store, row, "recovery");
+    // One audit row per decision that moved the call, so repeated runs stay quiet.
+    if (!before || after.state !== before.state || after.blockHeight !== before.blockHeight || row.status === "unknown") {
+      writeAuditRow(config, row);
+    }
     rows.push(row);
   }
   return rows;
 }
 
 /**
- * A once-only check that the wallet is within `maxLag` blocks of the chain tip. Asks the
- * server only when first called. A chain with no health check (mock) counts as synced.
+ * A once-only read of what the wallet can prove: synced (the bounded sync finished, or
+ * the chain has none, and the wallet is within `maxLag` blocks of the tip) and its height.
  */
-export function walletSynced(chain: ChainAdapter, maxLag: number): () => Promise<boolean> {
-  let answer: Promise<boolean> | undefined;
+export function chainEvidence(chain: ChainAdapter, sync: SyncResult | undefined, maxLag: number): () => Promise<ChainEvidence> {
+  let answer: Promise<ChainEvidence> | undefined;
   return () =>
     (answer ??= (async () => {
-      if (!chain.checkHealth) return true;
+      if (!chain.checkHealth) return { synced: true };
+      if (sync !== undefined && !sync.complete) return { synced: false };
       try {
         // No sync here: callers run the bounded sync first.
         const h = await chain.checkHealth({ sync: false });
-        return h.chainTip - h.walletHeight <= maxLag;
+        return { synced: h.chainTip - h.walletHeight <= maxLag, walletHeight: h.walletHeight };
       } catch {
-        return false;
+        return { synced: false };
       }
     })());
 }

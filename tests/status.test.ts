@@ -3,7 +3,7 @@ import { beforeEach, describe, it } from "node:test";
 import { appendAuditEntry } from "../src/audit/log.ts";
 import { MockChainAdapter } from "../src/chain/mock.ts";
 import type { ChainAdapter } from "../src/chain/types.ts";
-import { resetPaymentIndexes } from "../src/payments/index.ts";
+import { resetPaymentStores as resetPaymentIndexes } from "../src/payments/store.ts";
 import { RECOVERY_EXPIRY_MS, recoverPendingPayments } from "../src/payments/recovery.ts";
 import { executePay } from "../src/tools/pay.ts";
 import { executePaymentStatus, paymentStatus } from "../src/tools/status.ts";
@@ -80,18 +80,36 @@ describe("zcash_payment_status", () => {
     assert.equal(s.code, "INSUFFICIENT_FUNDS");
   });
 
-  it("an interrupted send: pending, then mined once it shows up, expired after recovery finds nothing", async () => {
+  it("an interrupted send: pending, then mined once it shows up, and mined stays mined (V12 F-20)", async () => {
     const config = tempConfig();
-    pending(config, "c1", { idempotency_key: "k1", params_sha256: "p" });
+    pending(config, "c1", { idempotency_key: "k1", params_sha256: "p", chain_tip: 480 });
     assert.equal((await paymentStatus(config, chain([]).c, { idempotency_key: "k1" }, T0 + 60_000)).state, "pending");
     const mined = await paymentStatus(config, chain([tx()]).c, { idempotency_key: "k1" }, T0 + 60_000);
     assert.equal(mined.state, "mined");
     assert.equal(mined.txid, TX);
-    assert.equal((await paymentStatus(config, chain([]).c, { call_id: "c1" }, T0 + RECOVERY_EXPIRY_MS + 1)).state, "expired");
-
+    // History that no longer shows it (a reorg, a truncated read) never moves it back.
+    const later = await paymentStatus(config, chain([]).c, { call_id: "c1" }, T0 + RECOVERY_EXPIRY_MS + 1);
+    assert.notEqual(later.state, "expired");
     await recoverPendingPayments(config, chain([]).c, { now: T0 + RECOVERY_EXPIRY_MS + 1 });
-    const after = await paymentStatus(config, chain([tx()]).c, { call_id: "c1" });
-    assert.equal(after.state, "expired");
+    assert.notEqual((await paymentStatus(config, chain([]).c, { call_id: "c1" })).state, "expired");
+  });
+
+  it("expired only with proof: synced, whole history, past the expiry height (V12 F-18)", async () => {
+    const config = tempConfig();
+    pending(config, "c2", { chain_tip: 400 });
+    // Wallet at 445: not yet past 400 + 40 + 10.
+    assert.equal((await paymentStatus(config, chain([], 445).c, { call_id: "c2" }, T0 + RECOVERY_EXPIRY_MS + 1)).state, "unknown");
+    const s = await paymentStatus(config, chain([], 505).c, { call_id: "c2" }, T0 + 60_000);
+    assert.equal(s.state, "expired");
+    await recoverPendingPayments(config, chain([]).c, { now: T0 + RECOVERY_EXPIRY_MS + 1 });
+    assert.equal((await paymentStatus(config, chain([tx()]).c, { call_id: "c2" })).state, "expired");
+  });
+
+  it("no recorded chain height means no proof: unknown, never expired", async () => {
+    const config = tempConfig();
+    pending(config, "c3");
+    const s = await paymentStatus(config, chain([], 10_000).c, { call_id: "c3" }, T0 + 10 * RECOVERY_EXPIRY_MS);
+    assert.equal(s.state, "unknown");
   });
 
   it("SEND_UNCONFIRMED with one unmined candidate is broadcast", async () => {

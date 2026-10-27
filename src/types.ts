@@ -68,6 +68,8 @@ export interface AuditEntry {
   params_sha256?: string;
   /** Replay rows only: the call whose outcome was returned. Nothing was sent */
   replay_of?: string;
+  /** Testnet pending rows: the chain tip the pre-send check saw, used to prove expiry */
+  chain_tip?: number;
 }
 
 /** Read-only tools. They never move funds. */

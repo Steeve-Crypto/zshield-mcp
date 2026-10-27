@@ -111,10 +111,10 @@ export function findOpenWindowsWalletPaths(dataDir: string, icacls: IcaclsRunner
 }
 
 export class WindowsAclError extends Error {
-  constructor(readonly problems: AclProblem[], dataDir: string) {
+  constructor(readonly problems: AclProblem[], dataDir: string, what = "The wallet holds spending keys") {
     super(
       [
-        "zshield-mcp: refusing to start. The wallet holds spending keys and broad groups can read it:",
+        `zshield-mcp: refusing to start. ${what} and broad groups can read it:`,
         ...problems.map((p) => `  ${p.path}: ${p.principal} ${p.rights}`),
         "Fix it so only your account has access, for example:",
         `  icacls "${dataDir}" /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F" /T`,
@@ -136,7 +136,8 @@ export function assertWindowsWalletPrivate(
   dataDir: string,
   icacls: IcaclsRunner = defaultIcacls,
   env: NodeJS.ProcessEnv = process.env,
-  harden: AclHardener = defaultHardener
+  harden: AclHardener = defaultHardener,
+  what = "The wallet holds spending keys"
 ): string[] {
   let problems: AclProblem[];
   try {
@@ -144,7 +145,7 @@ export function assertWindowsWalletPrivate(
   } catch (e) {
     if (!(e instanceof AclCheckError)) throw e;
     if (env[WINDOWS_ACL_OPT_IN] === "1") {
-      return [`zshield-mcp: warning: wallet ACL not checked (${e.message}). Starting because ${WINDOWS_ACL_OPT_IN}=1.`];
+      return [`zshield-mcp: warning: ACL of ${dataDir} not checked (${e.message}). Starting because ${WINDOWS_ACL_OPT_IN}=1.`];
     }
     throw new AclCheckError(
       `zshield-mcp: refusing to start. ${e.message}. Fix icacls access, or set ${WINDOWS_ACL_OPT_IN}=1 to start without the check.`
@@ -155,12 +156,12 @@ export function assertWindowsWalletPrivate(
     try {
       harden(dataDir);
     } catch {
-      throw new WindowsAclError(problems, dataDir);
+      throw new WindowsAclError(problems, dataDir, what);
     }
     const after = findOpenWindowsWalletPaths(dataDir, icacls);
-    if (after.length > 0) throw new WindowsAclError(after, dataDir);
+    if (after.length > 0) throw new WindowsAclError(after, dataDir, what);
     return [`zshield-mcp: removed broad access from ${dataDir} (${WINDOWS_ACL_HARDEN}=1).`];
   }
-  if (problems.length > 0) throw new WindowsAclError(problems, dataDir);
+  if (problems.length > 0) throw new WindowsAclError(problems, dataDir, what);
   return [];
 }

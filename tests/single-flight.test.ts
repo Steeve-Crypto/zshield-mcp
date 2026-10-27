@@ -3,7 +3,7 @@ import { beforeEach, describe, it } from "node:test";
 import { MockChainAdapter } from "../src/chain/mock.ts";
 import { LiveChainAdapter } from "../src/chain/live.ts";
 import { SendLock, BusyError, parseSendQueueWait, sendLockFor } from "../src/payments/lock.ts";
-import { resetPaymentIndexes } from "../src/payments/index.ts";
+import { resetPaymentStores as resetPaymentIndexes } from "../src/payments/store.ts";
 import { executePay } from "../src/tools/pay.ts";
 import type { PaymentReceipt, PaymentRequest } from "../src/types.ts";
 import { ALLOWED, readAuditRows, tempConfig } from "./helpers.ts";
@@ -78,8 +78,8 @@ describe("single-flight sends", () => {
     const one = new LiveChainAdapter({ network: "testnet", dataDir: "/tmp/w1" });
     const two = new LiveChainAdapter({ network: "testnet", dataDir: "/tmp/w1" });
     const other = new LiveChainAdapter({ network: "testnet", dataDir: "/tmp/w2" });
-    assert.equal(sendLockFor(one), sendLockFor(two));
-    assert.notEqual(sendLockFor(one), sendLockFor(other));
+    assert.equal(sendLockFor(one.stateDir!), sendLockFor(two.stateDir!));
+    assert.notEqual(sendLockFor(one.stateDir!), sendLockFor(other.stateDir!));
   });
 
   it("SendLock hands over in order and frees on release", async () => {

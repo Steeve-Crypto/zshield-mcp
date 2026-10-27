@@ -1,5 +1,4 @@
-import type { ChainAdapter } from "../chain/types.js";
-import { acquireFileLock } from "./filelock.js";
+import { acquireFileLock, type Lease } from "./filelock.js";
 
 /** How long a send waits for another send on the same wallet before BUSY, by default. */
 export const SEND_QUEUE_WAIT_DEFAULT_MS = 10_000;
@@ -65,19 +64,12 @@ function once(fn: () => void): () => void {
   };
 }
 
-const byWallet = new Map<string, SendLock>();
-const byAdapter = new WeakMap<ChainAdapter, SendLock>();
+const byDir = new Map<string, SendLock>();
 
-/** The lock for the adapter's wallet. Live adapters share one per wallet directory. */
-export function sendLockFor(chain: ChainAdapter): SendLock {
-  const id = chain.walletId;
-  if (id !== undefined) {
-    let lock = byWallet.get(id);
-    if (!lock) byWallet.set(id, (lock = new SendLock()));
-    return lock;
-  }
-  let lock = byAdapter.get(chain);
-  if (!lock) byAdapter.set(chain, (lock = new SendLock()));
+/** The in-process lock for one payment store. */
+export function sendLockFor(stateDir: string): SendLock {
+  let lock = byDir.get(stateDir);
+  if (!lock) byDir.set(stateDir, (lock = new SendLock()));
   return lock;
 }
 
@@ -90,26 +82,29 @@ export function parseSendQueueWait(value: unknown): number {
   return n;
 }
 
+/** The full wallet lock: this process's lock for the store, then the shared lease. */
+export interface WalletLock extends Lease {}
+
 /**
- * The full wallet lock: this process's lock for the wallet, then the lock file in the
- * wallet directory, which other zshield-mcp processes on the same wallet also take.
- * Mock adapters have no directory and use only the in-process lock. Throws BusyError
- * after `waitMs` in total.
+ * Take this process's lock for the payment store, then the lease file in it, which every
+ * zshield-mcp process on the same wallet also takes. Throws BusyError after `waitMs` in total.
  */
 export async function acquireWalletLock(
-  chain: ChainAdapter,
+  store: { dir: string },
   waitMs: number,
   purpose: string,
   now: () => number = Date.now
-): Promise<() => void> {
+): Promise<WalletLock> {
   const start = now();
-  const releaseLocal = await sendLockFor(chain).acquire(waitMs);
-  if (!chain.lockDir) return releaseLocal;
+  const releaseLocal = await sendLockFor(store.dir).acquire(waitMs);
   try {
-    const releaseFile = await acquireFileLock(chain.lockDir, { waitMs: Math.max(0, waitMs - (now() - start)), purpose });
-    return () => {
-      releaseFile();
-      releaseLocal();
+    const lease = await acquireFileLock(store.dir, { waitMs: Math.max(0, waitMs - (now() - start)), purpose });
+    return {
+      assertHeld: () => lease.assertHeld(),
+      release: () => {
+        lease.release();
+        releaseLocal();
+      },
     };
   } catch (e) {
     releaseLocal();
@@ -123,10 +118,10 @@ export async function acquireWalletLock(
  * send or sync holds the lock, the call reads the wallet file offline instead, as last
  * synced. `fn` gets `offline` set accordingly.
  */
-export async function withWalletRead<T>(chain: ChainAdapter, purpose: string, fn: (offline: boolean) => Promise<T>): Promise<T> {
-  let release: (() => void) | undefined;
+export async function withWalletRead<T>(store: { dir: string }, purpose: string, fn: (offline: boolean) => Promise<T>): Promise<T> {
+  let lock: WalletLock | undefined;
   try {
-    release = await acquireWalletLock(chain, 0, purpose);
+    lock = await acquireWalletLock(store, 0, purpose);
   } catch (e) {
     if (e instanceof BusyError) return fn(true);
     throw e;
@@ -134,6 +129,6 @@ export async function withWalletRead<T>(chain: ChainAdapter, purpose: string, fn
   try {
     return await fn(false);
   } finally {
-    release();
+    lock.release();
   }
 }
