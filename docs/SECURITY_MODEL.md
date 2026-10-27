@@ -101,7 +101,8 @@ What it does not give: it is not a signature. Anyone who knows the UFVK and the 
 | Prompt injection makes the agent pay an attacker | Recipient must be on the allow-list, an exact string match | An attacker can still steer payments to any allow-listed address |
 | Agent pays too much in one go | Hard per-call cap, compared in integer zatoshis | None for a single call |
 | Agent drains the wallet with many small payments | The tool call rate limit slows this down, but it is not a spending limit | There is no daily or rolling cap and no human approval step. At the default rate limit an agent can still make up to 60 payments a minute. Total loss is bounded only by the wallet balance. Fund the wallet with only what you can lose |
-| Concurrent calls race each other | One send at a time per wallet. A second send waits up to `SEND_QUEUE_WAIT_MS`, then gets `BUSY`. Two calls with the same `idempotency_key` cannot both send | Concurrent calls can each pass the per-call cap. There is no shared budget. The lock is per process, so two server processes on one wallet are not serialized |
+| Concurrent calls race each other | One send at a time per wallet. A second send waits up to `SEND_QUEUE_WAIT_MS`, then gets `BUSY`. In testnet mode the lock is also a file in the wallet directory (`.zshield-wallet.lock`, created with `O_EXCL` and mode 0600), so server processes on one wallet are serialized too. Sends, syncs, and recovery all take it. A lock whose process is gone, or older than 30 minutes, is broken; one from another host is only broken by age. Two calls with the same `idempotency_key` cannot both send, also across processes, because the log is re-read under the lock | Concurrent calls can each pass the per-call cap. There is no shared budget. Two processes on different hosts sharing one wallet over a network file system rely on that file system honoring `O_EXCL` |
+| A partial sync reports funds as gone | Before the funds check and before `zcash_payment_status`, a bounded sync runs through `zingo-cli`'s prompt and quits cleanly, so the wallet file is saved. Reads after it are offline, so they cannot start a second partial sync. Low funds after an unfinished sync are `WALLET_NOT_SYNCED`. Read tools never wait for the lock; while a send holds it they read offline | A slow server can make each sync use its full timeout. `zcash_payment_status` then answers with `stale: true` |
 | Float rounding slips past the cap | Amounts parsed as decimal strings into integer zatoshis; more than 8 decimals is rejected, not rounded | None known |
 | Payment lands on mainnet | Seven layers listed under "Mainnet refusal" | Prefix checks only, no checksum decode |
 | Payment with no audit trail | `pending` row is written before the send; the send is refused if that write fails | Rows can be edited afterwards by anyone with file access |
@@ -113,7 +114,7 @@ What it does not give: it is not a signature. Anyone who knows the UFVK and the 
 | Key theft from disk | Keys stay in the `zingo-cli` wallet file, outside the repo. Testnet mode refuses to start if the wallet directory is open to group or other users, warns about loose file modes, and runs with umask `077` | The file is not encrypted by zshield-mcp. Root and the server's OS user can read it. Permissions are checked only at startup |
 | Lying or stale lightwalletd | None in the server | Balances and history are only as good as the server `zingo-cli` talks to |
 | Hostile allow-list or config edit | None in the server | Whoever can write those files sets policy. The allow-list is re-read on every call, so an edit takes effect at once |
-| Slow or stuck `zingo-cli` | Read tools time out after `ZINGO_READ_TIMEOUT_MS`, default 120 seconds. Health checks time out after `ZINGO_HEALTH_TIMEOUT_MS`, default 30 seconds. Sends time out after 15 minutes. A failing `export_ufvk` backs off from 1 second to 1 minute, and it is only tried after the cheap policy checks pass, so refused calls never start `zingo-cli` | A stuck send blocks that tool call, and other sends from the wallet get `BUSY`, until the timeout |
+| Slow or stuck `zingo-cli` | Read tools time out after `ZINGO_READ_TIMEOUT_MS`, default 120 seconds. Syncs stop after `HEALTH_SYNC_TIMEOUT_MS` or `STATUS_SYNC_TIMEOUT_MS`, default 90 seconds, with a clean quit and then a kill after 15 seconds. Health checks time out after `ZINGO_HEALTH_TIMEOUT_MS`, default 30 seconds. Sends time out after 15 minutes. A failing `export_ufvk` backs off from 1 second to 1 minute, and it is only tried after the cheap policy checks pass, so refused calls never start `zingo-cli` | A stuck send blocks that tool call, and other sends from the wallet get `BUSY`, until the timeout |
 
 ## Review findings F-6 to F-11
 
@@ -143,7 +144,8 @@ All six are addressed on this branch, each with a regression test that fails on 
 
 - Policy checks: `src/policy/caps.ts`, `src/policy/amount.ts`, `src/policy/allowlist.ts`
 - Payment flow and audit ordering: `src/tools/pay.ts`
-- Idempotency index, send lock, and startup recovery: `src/payments/`
+- Idempotency index, send lock, wallet lock file, and startup recovery: `src/payments/`
+- Bounded wallet sync: `src/chain/sync.ts`
 - Payment status: `src/tools/status.ts`
 - Read-only tools: `src/tools/read.ts`, `src/tools/balance.ts`, `src/tools/address.ts`, `src/tools/history.ts`
 - Network checks: `src/chain/network.ts`

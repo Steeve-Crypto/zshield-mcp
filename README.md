@@ -80,9 +80,9 @@ Pass an `idempotency_key` you choose, such as an order id. The server keeps it i
 
 Other protections on every send:
 
-- **One send at a time per wallet.** A second call waits up to `SEND_QUEUE_WAIT_MS` for the first to finish, then gets `BUSY`.
-- **Health check first (testnet mode).** Before the `pending` row, the server checks that the lightwalletd server answers, the wallet is within `HEALTH_MAX_LAG_BLOCKS` of the chain tip, and spendable funds cover the amount plus a 0.0001 ZEC fee estimate. A failure returns `CHAIN_UNREACHABLE`, `WALLET_NOT_SYNCED`, or `INSUFFICIENT_FUNDS` and sends nothing.
-- **Recovery on startup.** If the server stopped between the `pending` row and the result row, the next start looks for the send in wallet history, matched on recipient, amount, and memo. It writes one `zcash_pay_recovery` row: `confirmed` with the txid, `not_found` once the wallet is synced and two hours have passed with no match, or `unknown`. It never sends again, and it holds the send lock while it runs, so a payment made right after startup waits for it. `unknown` ones are checked again on the next start.
+- **One send at a time per wallet, across processes.** A second call waits up to `SEND_QUEUE_WAIT_MS` for the first to finish, then gets `BUSY`. In testnet mode the lock is also a file, `.zshield-wallet.lock` in the wallet directory, so two server processes on one wallet take turns too. It is created with mode 0600 and holds the owner's pid, host, start time, and purpose. A lock left by a process that died, or older than 30 minutes, is removed by the next caller. Under the lock the server also re-reads the audit log, so a key used by another process is replayed instead of paid again.
+- **Health check first (testnet mode).** Before the `pending` row, the server syncs the wallet for at most `HEALTH_SYNC_TIMEOUT_MS`, then checks that the lightwalletd server answers, the wallet is within `HEALTH_MAX_LAG_BLOCKS` of the chain tip, and spendable funds cover the amount plus a 0.0001 ZEC fee estimate. A failure returns `CHAIN_UNREACHABLE`, `WALLET_NOT_SYNCED`, or `INSUFFICIENT_FUNDS` and sends nothing. A wallet whose sync has not finished can report a spendable balance of 0, so low funds after an unfinished sync are `WALLET_NOT_SYNCED`, not `INSUFFICIENT_FUNDS`.
+- **Recovery on startup.** If the server stopped between the `pending` row and the result row, the next start looks for the send in wallet history, matched on recipient, amount, and memo. It writes one `zcash_pay_recovery` row: `confirmed` with the txid, `not_found` once the wallet is synced and two hours have passed with no match, or `unknown`. It never sends again. It holds the wallet lock while it runs and syncs first, for at most `STATUS_SYNC_TIMEOUT_MS`, so a payment made right after startup waits for it and may get `BUSY`. `unknown` ones are checked again on the next start.
 
 ## Resource: `zshield://policy`
 
@@ -160,8 +160,8 @@ Branch on `code`. It is stable. `message` is for people and may change. `error` 
 | `AUDIT_WRITE_FAILED` | The `pending` audit row could not be written, so the payment was not sent |
 | `VIEWKEY_UNAVAILABLE` | The wallet's viewing key could not be read for the audit fingerprint, so the payment was not sent |
 | `CHAIN_ERROR` | Policy passed and the send was attempted, but `zingo-cli` reported an error, so nothing was broadcast. A `pending` row exists |
-| `BUSY` | Another payment from the same wallet was still running after `SEND_QUEUE_WAIT_MS`. Nothing was sent and there is no `pending` row. Try again shortly |
-| `WALLET_NOT_SYNCED` | Testnet mode: the wallet is more than `HEALTH_MAX_LAG_BLOCKS` blocks behind the chain tip. Nothing was sent. Sync the wallet first |
+| `BUSY` | Another payment, sync, or recovery on the same wallet, in this process or another one, was still running after `SEND_QUEUE_WAIT_MS`. The message names the other process's pid when it is another process. Nothing was sent and there is no `pending` row. Try again shortly |
+| `WALLET_NOT_SYNCED` | Testnet mode: the wallet is more than `HEALTH_MAX_LAG_BLOCKS` blocks behind the chain tip, or the pre-send sync did not finish and the spendable balance reads below the amount. Nothing was sent. Try again once the wallet has synced, or raise `HEALTH_SYNC_TIMEOUT_MS` |
 | `INSUFFICIENT_FUNDS` | Testnet mode: spendable balance is below the amount plus the estimated fee. Nothing was sent |
 | `CHAIN_UNREACHABLE` | Testnet mode: the lightwalletd server did not report the chain tip within `ZINGO_HEALTH_TIMEOUT_MS`. Nothing was sent |
 | `CONFIG_ERROR` | The server is misconfigured, for example testnet mode without the testnet adapter. Nothing was sent |
@@ -263,7 +263,7 @@ A limit outside `1` to `50`, or one that is not a whole number, is rejected befo
 | `call_id` | string | one of the two | The `call_id` from a `zcash_pay` response |
 | `idempotency_key` | string | one of the two | The key passed to `zcash_pay` |
 
-Looks the call up in the audit log, then in wallet history. Never sends.
+Looks the call up in the audit log, then in wallet history. Never sends. In testnet mode it first syncs the wallet for at most `STATUS_SYNC_TIMEOUT_MS`, so a payment mined since the last sync shows as `mined` without any manual step. If the sync does not finish, or a send holds the wallet, it does not wait: it answers from what the wallet last knew, with `stale: true`, `wallet_height`, and a `sync_note` saying why.
 
 ```json
 {
@@ -306,6 +306,8 @@ Precedence: **environment variables** override `config/default.yaml`.
 | `AUDIT_FALLBACK_PATH` | `audit-fallback.jsonl` next to `AUDIT_DIR` | Where an audit row goes when the main log cannot be written |
 | `SEND_QUEUE_WAIT_MS` | `10000` | How long a send waits for another send from the same wallet, up to `600000`, before `BUSY` |
 | `HEALTH_MAX_LAG_BLOCKS` | `10` | Testnet mode: how far the wallet may trail the chain tip and still send, 0 to 10000 |
+| `HEALTH_SYNC_TIMEOUT_MS` | `90000` | Testnet mode: the longest the pre-send wallet sync may run. `0` skips it |
+| `STATUS_SYNC_TIMEOUT_MS` | `90000` | Testnet mode: the longest the wallet sync before `zcash_payment_status` and startup recovery may run. `0` skips it |
 
 Allow-list shape:
 
@@ -337,7 +339,8 @@ The viewing key itself is **never** written or returned, only a short fingerprin
 src/policy/   caps + allow-list
 src/chain/    mock adapter, testnet adapter, address checks
 src/audit/    JSONL writer + fingerprint
-src/payments/ idempotency index, send lock, startup recovery
+src/payments/ idempotency index, send lock and wallet lock file, startup recovery
+src/chain/sync.ts bounded wallet sync through the zingo-cli prompt
 src/tools/    zcash_pay and the read-only tools
 src/server.ts MCP registration
 tests/        happy path + rejections
@@ -381,7 +384,9 @@ Optional variables:
 - `ZINGO_DATA_DIR`: the wallet directory. It must be an absolute path. The default is `.zshield-testnet/wallet` in the home directory the OS reports, not `$HOME`, and the server will not start if that cannot be found.
 - `LIGHTWALLETD_URL`: the testnet server.
 - `ZINGO_READ_TIMEOUT_MS` (default `120000`): stops a read-only call that takes too long.
-- `ZINGO_HEALTH_TIMEOUT_MS` (default `30000`): stops each pre-send health check step.
+- `ZINGO_HEALTH_TIMEOUT_MS` (default `30000`): stops each pre-send health check step after the sync.
+
+The read-only tools never wait for the wallet. When a send or sync holds it, `zcash_balance`, `zcash_history`, and `zcash_receive_address` read the wallet file offline, as last synced, instead of starting a sync that would race the send.
 
 On Windows the server reads the wallet directory's ACL with `icacls` at startup and refuses to run if Everyone, Users, or another broad group can read it. Set `ZSHIELD_HARDEN_WINDOWS_ACL=1` to have it remove inherited entries and grant only your account, or `ZSHIELD_ALLOW_UNCHECKED_WINDOWS_ACL=1` to start anyway when the ACL cannot be read.
 
