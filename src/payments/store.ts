@@ -24,8 +24,13 @@ const MAX_EVENTS_PER_CALL = 64;
  * Where a call stands. Ordered: a call's state is the highest of its events, so it only
  * ever moves forward. `not_sent` and `expired` both mean proven not sent.
  */
-export type CallState = "pending" | "unknown" | "not_sent" | "expired" | "sent" | "mined";
-export const STATE_RANK: Record<CallState, number> = { pending: 0, unknown: 1, not_sent: 2, expired: 2, sent: 3, mined: 4 };
+export type CallState = "pending" | "unknown" | "not_sent" | "expired" | "sent" | "failed" | "mined";
+/**
+ * Forward order. `failed` is above `sent`: a send that returned a txid and was later
+ * marked failed by the wallet. It is below `mined`, so a transaction seen in a block is
+ * never reported failed, and a later mined sighting still wins over a wrong failed one.
+ */
+export const STATE_RANK: Record<CallState, number> = { pending: 0, unknown: 1, not_sent: 2, expired: 2, sent: 3, failed: 4, mined: 5 };
 
 /** A state at or above this rank is settled: recovery leaves it alone. */
 export function isSettled(state: CallState): boolean {

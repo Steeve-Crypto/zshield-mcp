@@ -29,6 +29,7 @@ export const PAY_ERROR_CODES = [
   "CHAIN_UNREACHABLE",
   "STATE_WRITE_FAILED",
   "PAYMENT_EXPIRED",
+  "PAYMENT_FAILED",
 ] as const;
 
 /**

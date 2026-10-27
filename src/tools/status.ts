@@ -166,6 +166,12 @@ export async function paymentStatus(
   }
 }
 
+const FAILED_NOTE = "The wallet marked this transaction failed.";
+
+function failedStatus(base: { call_id: string; idempotency_key?: string }, amount: string | undefined, txid: string | undefined, message: string): PaymentStatus {
+  return { ...base, state: "failed", txid, amount_zats: amount, code: "PAYMENT_FAILED", message };
+}
+
 /** The answer for a call whose state needs no chain read: not sent, or proven expired. */
 function settledStatus(record: CallRecord, base: { call_id: string; idempotency_key?: string }): PaymentStatus | undefined {
   const amount = record.intent?.amount_zats;
@@ -195,8 +201,17 @@ async function fromChain(
   const started = intent ? Date.parse(intent.ts) : now;
   const common = { ...base, amount_zats: amount, code: record.top?.code };
 
-  if (record.txid && (record.state === "sent" || record.state === "mined")) {
+  if (record.txid && (record.state === "sent" || record.state === "mined" || record.state === "failed")) {
     const s = await byTxid(chain, record.txid, started, now, offline);
+    if (s.state === "failed" && record.state === "sent") {
+      // The wallet now marks a transaction this server reported as sent as failed. Record
+      // it, so a replay of the same key reports it too instead of a success.
+      safely(() => store.advance({ ts: new Date(now).toISOString(), call_id: record.callId, state: "failed", txid: record.txid, code: "PAYMENT_FAILED", note: s.message, by: "status" }));
+    }
+    if (record.state === "failed" && s.state !== "failed" && s.state !== "mined") {
+      return failedStatus(base, amount, record.txid, `${record.top?.note ?? FAILED_NOTE} The wallet now reports it as ${s.state}; the failed record stays. Check the explorer. Do not pay again with this key.`);
+    }
+    if (s.state === "failed" && record.state !== "mined") return failedStatus(base, amount, record.txid, s.message);
     if (s.state === "mined") safely(() => store.advance({ ts: new Date(now).toISOString(), call_id: record.callId, state: "mined", txid: record.txid, block_height: s.block_height, by: "status" }));
     if (record.state === "mined" && s.state !== "mined") {
       // Seen mined before. A read that no longer shows it (a reorg, or a wallet rescan)
