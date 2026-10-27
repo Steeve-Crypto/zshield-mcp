@@ -115,6 +115,9 @@ export class LiveChainAdapter implements ChainAdapter {
   readonly mode = "live" as const;
   readonly bin: string;
   readonly dataDir: string;
+  get walletId(): string {
+    return `live:${this.dataDir}`;
+  }
   readonly server: string;
   private readonly runner: CliRunner;
   /** Cached in memory only, for this process. Never logged or written. */

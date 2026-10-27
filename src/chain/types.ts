@@ -2,6 +2,8 @@ import type { PaymentReceipt, PaymentRequest, TxSummary, WalletBalance } from ".
 
 export interface ChainAdapter {
   readonly mode: "mock" | "live";
+  /** Identifies the wallet, so sends from two adapters on one wallet share a lock. */
+  readonly walletId?: string;
   pay(req: PaymentRequest): Promise<PaymentReceipt>;
   /** Read-only. Never moves funds. */
   getBalance(): Promise<WalletBalance>;

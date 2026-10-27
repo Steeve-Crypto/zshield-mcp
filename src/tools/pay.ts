@@ -9,6 +9,7 @@ import { boundAuditEntry } from "../audit/log.js";
 import { MAX_AMOUNT_LENGTH } from "../policy/amount.js";
 import { addressNetwork } from "../chain/network.js";
 import type { PayCode } from "../errors.js";
+import { BusyError, sendLockFor, SEND_QUEUE_WAIT_DEFAULT_MS } from "../payments/lock.js";
 import { paymentIndexFor, paymentParamsHash, type PaymentRecord } from "../payments/index.js";
 import { SendOutcomeUnknownError } from "../chain/outcome.js";
 import type { AuditEntry, Config, MatchConfidence, PayStatus, PossibleSend, TxSummary } from "../types.js";
@@ -390,57 +391,77 @@ async function runPay(
     error = e instanceof Error ? e.message : String(e);
   }
 
+  // One send at a time per wallet. Later calls queue for a bounded time, then get BUSY.
+  let release: (() => void) | undefined;
   if (policyPassed && amountZats !== undefined) {
-    // Record intent before broadcast, fsynced to the main log or the fallback file.
-    // If it cannot be made durable anywhere, nothing is sent.
-    status = "pending";
-    const intentRow = boundAuditEntry(entry());
-    const intent = writeAuditRow(config, intentRow);
-    // Bind the idempotency key only to an intent that reached disk.
-    if (intent.durable) index.record(intentRow as unknown as Record<string, unknown>);
-    if (intent.warning) warnings.push(intent.warning);
-    if (!intent.durable) {
-      intentWriteFailed = true;
+    try {
+      release = await sendLockFor(chain).acquire(config.sendQueueWaitMs ?? SEND_QUEUE_WAIT_DEFAULT_MS);
+    } catch (e) {
+      if (!(e instanceof BusyError)) throw e;
+      policyPassed = false;
       status = "error";
-      code = "AUDIT_WRITE_FAILED";
-      error = `Audit write failed before send; payment not sent: ${intent.warning}`;
-    }
-
-    if (!intentWriteFailed) {
-      try {
-        const receipt = await chain.pay({
-          amountZats,
-          recipient: input.recipient,
-          memo: input.memo,
-        });
-
-        mockTxid = receipt.txid;
-        status = "ok";
-      } catch (e) {
-        if (e instanceof SendOutcomeUnknownError) {
-          status = "unknown";
-          code = "SEND_UNCONFIRMED";
-          error = `${SEND_UNCONFIRMED_GUIDANCE} Detail: ${redactInput(e.message, input)}`;
-          possibleSends = await findPossibleSends(
-            chain,
-            { amountZats, recipient: input.recipient, memo: input.memo },
-            startedAt
-          );
-        } else {
-          status = "error";
-          code = "CHAIN_ERROR";
-          error = redactInput(e instanceof Error ? e.message : String(e), input);
-        }
-      }
+      code = "BUSY";
+      error = e.message;
     }
   }
 
-  // The response carries the same bounded row that goes to disk.
-  const audit = boundAuditEntry(entry());
-  // writeAuditRow never throws. A send may already have happened, and throwing would hide
-  // the txid and invite a retry that pays twice. A failed write is reported with the result.
-  const final = writeAuditRow(config, audit);
-  index.record(audit as unknown as Record<string, unknown>);
+  let audit: AuditEntry;
+  let final: ReturnType<typeof writeAuditRow>;
+  try {
+    if (policyPassed && amountZats !== undefined) {
+      // Record intent before broadcast, fsynced to the main log or the fallback file.
+      // If it cannot be made durable anywhere, nothing is sent.
+      status = "pending";
+      const intentRow = boundAuditEntry(entry());
+      const intent = writeAuditRow(config, intentRow);
+      // Bind the idempotency key only to an intent that reached disk.
+      if (intent.durable) index.record(intentRow as unknown as Record<string, unknown>);
+      if (intent.warning) warnings.push(intent.warning);
+      if (!intent.durable) {
+        intentWriteFailed = true;
+        status = "error";
+        code = "AUDIT_WRITE_FAILED";
+        error = `Audit write failed before send; payment not sent: ${intent.warning}`;
+      }
+
+      if (!intentWriteFailed) {
+        try {
+          const receipt = await chain.pay({
+            amountZats,
+            recipient: input.recipient,
+            memo: input.memo,
+          });
+
+          mockTxid = receipt.txid;
+          status = "ok";
+        } catch (e) {
+          if (e instanceof SendOutcomeUnknownError) {
+            status = "unknown";
+            code = "SEND_UNCONFIRMED";
+            error = `${SEND_UNCONFIRMED_GUIDANCE} Detail: ${redactInput(e.message, input)}`;
+            possibleSends = await findPossibleSends(
+              chain,
+              { amountZats, recipient: input.recipient, memo: input.memo },
+              startedAt
+            );
+          } else {
+            status = "error";
+            code = "CHAIN_ERROR";
+            error = redactInput(e instanceof Error ? e.message : String(e), input);
+          }
+        }
+      }
+    }
+
+    // The response carries the same bounded row that goes to disk.
+    audit = boundAuditEntry(entry());
+    // writeAuditRow never throws. A send may already have happened, and throwing would hide
+    // the txid and invite a retry that pays twice. A failed write is reported with the result.
+    final = writeAuditRow(config, audit);
+    index.record(audit as unknown as Record<string, unknown>);
+  } finally {
+    release?.();
+  }
   if (final.warning) warnings.push(final.warning);
   const auditWarning = warnings.length > 0 ? warnings.join(" ") : undefined;
 
