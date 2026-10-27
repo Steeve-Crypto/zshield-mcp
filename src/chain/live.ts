@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import type { ChainAdapter } from "./types.js";
 import type { PaymentReceipt, PaymentRequest, TxSummary, WalletBalance } from "../types.js";
 import { assertTestnetAddress, NetworkError } from "./network.js";
+import { CliTimeoutError, SendOutcomeUnknownError } from "./outcome.js";
 
 export const TESTNET_EXPLORER = "https://blockexplorer.one/zcash/testnet/tx/";
 
@@ -33,7 +34,15 @@ export const defaultRunner: CliRunner = (bin, args, opts = {}) =>
   new Promise((resolve, reject) => {
     const timeout = opts.timeoutMs ?? SEND_TIMEOUT_MS;
     const child = execFile(bin, args, { maxBuffer: 16 * 1024 * 1024, timeout }, (err, stdout, stderr) => {
-      if (err) reject(new Error(`zingo-cli failed: ${(stderr || err.message).toString().slice(0, 500)}`));
+      if (err) {
+        const detail = (stderr || err.message).toString().slice(0, 500);
+        // execFile sets killed and signal when the timeout fires or the process is killed.
+        if (err.killed || err.signal) {
+          reject(new CliTimeoutError(`zingo-cli was stopped (${err.signal ?? "killed"}) after ${timeout} ms: ${detail}`));
+        } else {
+          reject(new Error(`zingo-cli failed: ${detail}`));
+        }
+      }
       else resolve(opts.input === undefined ? stdout.toString() : `${stdout}\n${stderr}`);
     });
     if (opts.input !== undefined) {
@@ -138,10 +147,15 @@ export class LiveChainAdapter implements ChainAdapter {
     }
     // The recipient, amount, and memo go over stdin to zingo-cli's prompt, never in argv,
     // so they do not show up in the process list. argv holds only the fixed base options.
-    const out = await this.runner(this.bin, this.baseArgs(), {
-      timeoutMs: SEND_TIMEOUT_MS,
-      input: buildSendInput(req),
-    });
+    const input = buildSendInput(req);
+    let out: string;
+    try {
+      out = await this.runner(this.bin, this.baseArgs(), { timeoutMs: SEND_TIMEOUT_MS, input });
+    } catch (e) {
+      // A send that was cut off may still have been broadcast.
+      if (e instanceof CliTimeoutError) throw new SendOutcomeUnknownError(e.message);
+      throw e;
+    }
     const txid = parseTxid(out);
     return {
       txid,
@@ -175,7 +189,8 @@ export function parseTxid(out: string): string {
   const m = out.match(/"txids"\s*:\s*\[\s*"([0-9a-f]{64})"/i);
   if (m) return m[1].toLowerCase();
   if (/error/i.test(out)) throw new Error(`zingo-cli send error: ${out.trim().slice(0, 500)}`);
-  throw new Error("zingo-cli returned no txid");
+  // No error and no txid: the send may or may not have gone out.
+  throw new SendOutcomeUnknownError(`zingo-cli finished without a txid or an error: ${out.trim().slice(0, 300)}`);
 }
 
 /**

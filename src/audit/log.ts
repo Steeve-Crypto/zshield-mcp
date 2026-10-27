@@ -49,7 +49,7 @@ export function boundAuditEntry<T extends object>(entry: T): T {
     truncated = true;
   }
   if (size(row) > MAX_AUDIT_ROW_BYTES) {
-    const keep = ["ts", "tool", "call_id", "status", "code", "mock_txid", "recipient_sha256", "view_key_fingerprint"];
+    const keep = ["ts", "tool", "call_id", "status", "code", "mock_txid", "recipient_sha256", "view_key_fingerprint", "possible_txids"];
     row = Object.fromEntries(Object.entries(row).filter(([k]) => keep.includes(k)));
   }
   if (truncated) row.truncated = true;

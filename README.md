@@ -139,8 +139,14 @@ Branch on `code`. It is stable. `message` is for people and may change. `error` 
 |------|---------|
 | `AUDIT_WRITE_FAILED` | The `pending` audit row could not be written, so the payment was not sent |
 | `VIEWKEY_UNAVAILABLE` | The wallet's viewing key could not be read for the audit fingerprint, so the payment was not sent |
-| `CHAIN_ERROR` | Policy passed and the send was attempted, but the chain or `zingo-cli` failed. A `pending` row exists. Check `zcash_history` before retrying, because a timeout can hide a send that did go out |
+| `CHAIN_ERROR` | Policy passed and the send was attempted, but `zingo-cli` reported an error, so nothing was broadcast. A `pending` row exists |
 | `CONFIG_ERROR` | The server is misconfigured, for example testnet mode without the testnet adapter. Nothing was sent |
+
+`status` is `unknown` when the send was started but its result is not known:
+
+| Code | Meaning |
+|------|---------|
+| `SEND_UNCONFIRMED` | `zingo-cli` timed out, was killed, or finished without a txid or an error. The payment may have been broadcast. Do not retry yet: call `zcash_history` and look for a sent transaction with this amount. The response and the audit row list `possible_txids`, recent sent transactions of the same amount found in wallet history right after the failure. An empty list does not prove nothing went out, because the wallet may not have synced the send yet |
 
 Checks run in this order, and the first failure decides the code: recipient and memo size, allow-list file, amount, cap, address network (testnet mode only), allow-list match.
 

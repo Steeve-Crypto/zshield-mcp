@@ -5,6 +5,7 @@ import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MockChainAdapter, MOCK_UFVK } from "../src/chain/mock.ts";
+import { SendOutcomeUnknownError } from "../src/chain/outcome.ts";
 import type { ChainAdapter } from "../src/chain/types.ts";
 import { appendAuditEntry, boundAuditEntry } from "../src/audit/log.ts";
 import { MAX_AUDIT_ROW_BYTES, MAX_MEMO_BYTES, MAX_RECIPIENT_LENGTH } from "../src/policy/limits.ts";
@@ -196,6 +197,22 @@ describe("chain errors", () => {
     assert.equal(r.audit.status, "error");
     assert.equal(r.audit.error, "zingo-cli failed: could not send to [recipient] (memo [memo])");
     // The memo is kept on purpose in the row's memo field, and nowhere else in the response.
+    assert.equal(r.text.split("private memo text").length, 2);
+  });
+
+  it("an unknown send outcome does not repeat the recipient or memo either", async () => {
+    const config = tempConfig();
+    const chain = {
+      mode: "mock",
+      getViewingKey: async () => MOCK_UFVK,
+      getHistory: async () => [],
+      async pay(req: { recipient: string; memo?: string }) {
+        throw new SendOutcomeUnknownError(`no txid after sending to ${req.recipient} with memo ${req.memo}`);
+      },
+    } as unknown as ChainAdapter;
+    const r = await executePay({ amount_zec: 0.01, recipient: ALLOWED, memo: "private memo text" }, { config, chain });
+    assert.equal(r.audit.status, "unknown");
+    assert.match(r.audit.error ?? "", /Detail: no txid after sending to \[recipient\] with memo \[memo\]$/);
     assert.equal(r.text.split("private memo text").length, 2);
   });
 });

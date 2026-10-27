@@ -9,6 +9,7 @@ import { boundAuditEntry } from "../audit/log.js";
 import { MAX_AMOUNT_LENGTH } from "../policy/amount.js";
 import { addressNetwork } from "../chain/network.js";
 import type { PayCode } from "../errors.js";
+import { SendOutcomeUnknownError } from "../chain/outcome.js";
 import type { AuditEntry, Config, PayStatus } from "../types.js";
 
 /**
@@ -27,6 +28,34 @@ function assertNetworkAllowed(recipient: string, config: Config): void {
 }
 
 class ViewKeyUnavailable extends Error {}
+
+/** Shown with SEND_UNCONFIRMED so a client does not retry blindly. */
+export const SEND_UNCONFIRMED_GUIDANCE =
+  "The payment may have been broadcast. Do not retry yet. Call zcash_history and look for a sent transaction with this amount; retry only if none appears after the wallet has synced.";
+
+/** How far back a history entry may be and still count as a match for an unknown send. */
+const MATCH_WINDOW_MS = 30 * 60_000;
+
+/**
+ * After an unknown send, look in recent wallet history for a sent transaction of the same
+ * amount that is newer than the call (or has no time yet). Best effort: a failed lookup
+ * returns an empty list and never changes the outcome.
+ */
+export async function findPossibleSends(chain: ChainAdapter, amountZats: bigint, startedAt: number): Promise<string[]> {
+  try {
+    const txs = await chain.getHistory(20);
+    return txs
+      .filter((t) => /sent/i.test(t.kind) && t.valueZats === amountZats)
+      .filter((t) => {
+        if (!t.time) return true;
+        const ms = Date.parse(t.time);
+        return Number.isNaN(ms) || ms >= startedAt - MATCH_WINDOW_MS;
+      })
+      .map((t) => t.txid);
+  } catch {
+    return [];
+  }
+}
 
 export const payInputSchema = z.object({
   amount_zec: z
@@ -72,7 +101,9 @@ export async function executePay(
 ): Promise<{ ok: boolean; code?: PayCode; text: string; audit: AuditEntry; auditWarning?: string }> {
   const { config, chain } = deps;
   const callId = randomUUID();
+  const startedAt = Date.now();
   let allowlistHit = false;
+  let possibleTxids: string[] | undefined;
 
   let status: PayStatus = "ok";
   let error: string | undefined;
@@ -103,6 +134,7 @@ export async function executePay(
     code,
     error,
     memo: input.memo,
+    possible_txids: possibleTxids,
   });
 
   let policyPassed = false;
@@ -162,9 +194,16 @@ export async function executePay(
         mockTxid = receipt.txid;
         status = "ok";
       } catch (e) {
-        status = "error";
-        code = "CHAIN_ERROR";
-        error = redactInput(e instanceof Error ? e.message : String(e), input);
+        if (e instanceof SendOutcomeUnknownError) {
+          status = "unknown";
+          code = "SEND_UNCONFIRMED";
+          error = `${SEND_UNCONFIRMED_GUIDANCE} Detail: ${redactInput(e.message, input)}`;
+          possibleTxids = await findPossibleSends(chain, amountZats, startedAt);
+        } else {
+          status = "error";
+          code = "CHAIN_ERROR";
+          error = redactInput(e instanceof Error ? e.message : String(e), input);
+        }
       }
     }
   }
@@ -188,7 +227,17 @@ export async function executePay(
       ok: false,
       code,
       text: JSON.stringify(
-        { ok: false, status, code, message: error, error, call_id: callId, audit, audit_warning: auditWarning },
+        {
+          ok: false,
+          status,
+          code,
+          message: error,
+          error,
+          call_id: callId,
+          possible_txids: possibleTxids,
+          audit,
+          audit_warning: auditWarning,
+        },
         null,
         2
       ),
