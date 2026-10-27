@@ -135,6 +135,8 @@ Branch on `code`. It is stable. `message` is for people and may change. `error` 
 | `INVALID_ADDRESS` | Testnet mode got an address from no known Zcash network |
 | `NOT_ALLOWLISTED` | Recipient is not an exact match for an allow-list entry |
 | `ALLOWLIST_UNAVAILABLE` | The allow-list file is missing or malformed, so every payment is refused |
+| `INVALID_IDEMPOTENCY_KEY` | `idempotency_key` is empty, longer than 128 characters, or has characters other than letters, digits, `.`, `_`, `:`, `-` |
+| `IDEMPOTENCY_CONFLICT` | `idempotency_key` was already used for a payment with a different amount, recipient, or memo |
 
 `status` is `error` when something failed outside policy:
 
@@ -150,6 +152,7 @@ Branch on `code`. It is stable. `message` is for people and may change. `error` 
 | Code | Meaning |
 |------|---------|
 | `SEND_UNCONFIRMED` | `zingo-cli` timed out, was killed, or finished without a txid or an error. The payment may have been broadcast. Do not retry yet: call `zcash_history` and look for a sent transaction with this amount. The response and the audit row list `possible_txids`, recent sent transactions of the same amount found in wallet history right after the failure. An empty list does not prove nothing went out, because the wallet may not have synced the send yet |
+| `PAYMENT_PENDING` | A repeat call with an `idempotency_key` whose first call has a `pending` row and no result yet. Nothing was sent again |
 
 Checks run in this order, and the first failure decides the code: recipient and memo size, allow-list file, amount, cap, address network (testnet mode only), allow-list match.
 
