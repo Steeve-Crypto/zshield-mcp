@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, it } from "node:test";
 import { MockChainAdapter } from "../src/chain/mock.ts";
-import { resetPaymentStores, walletStateDir } from "../src/payments/store.ts";
+import { paymentParamsHash, resetPaymentStores, walletStateDir } from "../src/payments/store.ts";
+import { appendAuditEntry } from "../src/audit/log.ts";
 import { executePay } from "../src/tools/pay.ts";
 import { paymentStatus } from "../src/tools/status.ts";
 import type { PaymentReceipt, PaymentRequest } from "../src/types.ts";
@@ -64,6 +65,26 @@ describe("idempotency keys across server processes on one wallet (V12 F-12)", ()
     assert.equal(s.call_id, first.call_id);
     const byCall = await paymentStatus(tempConfig(), walletChain(w).chain, { call_id: first.call_id });
     assert.equal(byCall.txid, first.txid);
+  });
+});
+
+describe("legacy audit logs on a shared wallet", () => {
+  it("each server's own older audit log is imported, not only the first one's", async () => {
+    const w = wallet();
+    const a = walletChain(w);
+    await executePay({ amount_zec: "0.001", recipient: ALLOWED, idempotency_key: "a-new" }, { config: tempConfig(), chain: a.chain });
+    // Server B ran before the store existed and has its own audit log with a paid key.
+    const configB = tempConfig();
+    const input = { amount_zec: "0.001", recipient: ALLOWED, idempotency_key: "b-legacy" };
+    const base = { tool: "zcash_pay" as const, call_id: "legacy-b-1", amount_zec: "0.001", amount_zats: "100000", recipient: ALLOWED, allowlist_hit: true, cap_zec: 0.1, view_key_fingerprint: "f", idempotency_key: "b-legacy", params_sha256: paymentParamsHash(input) };
+    appendAuditEntry(configB.auditDir, { ...base, ts: new Date().toISOString(), status: "pending" });
+    appendAuditEntry(configB.auditDir, { ...base, ts: new Date().toISOString(), status: "ok", mock_txid: "cd".repeat(32) });
+    resetPaymentStores();
+    const b = walletChain(w);
+    const r = JSON.parse((await executePay(input, { config: configB, chain: b.chain })).text);
+    assert.equal(b.sent.length, 0);
+    assert.equal(r.idempotent_replay, true);
+    assert.equal(r.call_id, "legacy-b-1");
   });
 });
 

@@ -47,7 +47,7 @@ export function checkRecordPaths(config: Config, stateDir: string, platform: str
     if (name.endsWith(".jsonl")) note(checkPrivateFile(join(config.auditDir, name)));
   }
   note(checkPrivateFile(fallbackAuditPath(config.auditDir, config.auditFallbackPath)));
-  for (const sub of ["keys", "calls", "pending", "txids"]) note(ensurePrivateDir(join(stateDir, sub)));
+  for (const sub of ["keys", "calls", "pending", "txids", "imports"]) note(ensurePrivateDir(join(stateDir, sub)));
   note(checkPrivateFile(join(stateDir, "wallet.lock")));
   note(checkPrivateFile(join(stateDir, "meta.json")));
   return notes;
