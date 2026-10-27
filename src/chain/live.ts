@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import type { ChainAdapter } from "./types.js";
-import type { PaymentReceipt, PaymentRequest, WalletBalance } from "../types.js";
+import type { PaymentReceipt, PaymentRequest, TxSummary, WalletBalance } from "../types.js";
 import { assertTestnetAddress, NetworkError } from "./network.js";
 
 export const TESTNET_EXPLORER = "https://blockexplorer.one/zcash/testnet/tx/";
@@ -80,6 +80,12 @@ export class LiveChainAdapter implements ChainAdapter {
     const pools = parseBalance(await this.run(["balance"], { timeoutMs }));
     const spendableZats = parseSpendable(await this.run(["spendable_balance"], { timeoutMs }));
     return { ...pools, spendableZats };
+  }
+
+  /** Read-only: runs `transactions` and returns the newest `limit` entries. */
+  async getHistory(limit: number): Promise<TxSummary[]> {
+    const all = parseTransactions(await this.run(["transactions"], { timeoutMs: readTimeoutMs() }));
+    return all.slice(0, limit);
   }
 
   /** Read-only: runs `addresses` and returns the newest unified address. Refuses a mainnet one. */
@@ -174,4 +180,45 @@ export function parseReceiveAddress(out: string): string {
     .sort((a, b) => (b.address_index ?? 0) - (a.address_index ?? 0));
   if (entries.length === 0) throw new Error("zingo-cli addresses returned no unified address");
   return entries[0].encoded_address;
+}
+
+/**
+ * Parse `zingo-cli transactions`. It prints one `{ ... }` block per transaction with
+ * top-level fields indented by four spaces (txid, datetime, status, blockheight, kind,
+ * value, fee) and nested note lists indented deeper, which are ignored here.
+ * Returns newest first: pending entries without a height, then by height descending.
+ */
+export function parseTransactions(out: string): TxSummary[] {
+  const txs: TxSummary[] = [];
+  for (const block of out.matchAll(/^\{\s*$([\s\S]*?)^\}\s*$/gm)) {
+    const fields = new Map<string, string>();
+    for (const line of block[1].matchAll(/^ {4}([a-z][a-z _]*?):[ \t]*(.*?)\s*$/gm)) {
+      if (!fields.has(line[1])) fields.set(line[1], line[2]);
+    }
+    const txid = fields.get("txid");
+    if (!txid || !/^[0-9a-f]{64}$/i.test(txid)) continue;
+    const value = fields.get("value");
+    if (!value || !/^[\d_]+$/.test(value)) continue;
+    const height = fields.get("blockheight");
+    const fee = fields.get("fee") ?? fields.get("transaction fee");
+    txs.push({
+      txid: txid.toLowerCase(),
+      time: toIso(fields.get("datetime")),
+      status: fields.get("status") || "unknown",
+      blockHeight: height && /^\d+$/.test(height) ? Number(height) : undefined,
+      kind: fields.get("kind") || "unknown",
+      valueZats: BigInt(value.replace(/_/g, "")),
+      feeZats: fee && /^[\d_]+$/.test(fee) ? BigInt(fee.replace(/_/g, "")) : undefined,
+    });
+  }
+  return txs.sort((a, b) => (b.blockHeight ?? Infinity) - (a.blockHeight ?? Infinity) || 0);
+}
+
+/** "2026-10-12 14:23:01 UTC" becomes "2026-10-12T14:23:01.000Z". */
+function toIso(dt: string | undefined): string | undefined {
+  if (!dt) return undefined;
+  const m = dt.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s*UTC$/);
+  if (!m) return dt;
+  const d = new Date(`${m[1]}T${m[2]}Z`);
+  return Number.isNaN(d.getTime()) ? dt : d.toISOString();
 }

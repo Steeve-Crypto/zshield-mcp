@@ -33,7 +33,8 @@ export async function runReadTool<T>(
   tool: ReadTool,
   config: Config,
   fn: () => Promise<T>,
-  toJson: (data: T) => Record<string, unknown>
+  toJson: (data: T) => Record<string, unknown>,
+  extra: Pick<ReadAuditEntry, "limit"> = {}
 ): Promise<ReadResult<T>> {
   let data: T | undefined;
   let status: ReadAuditEntry["status"] = "ok";
@@ -52,6 +53,7 @@ export async function runReadTool<T>(
     mode: config.chainMode,
     status,
     error,
+    ...extra,
   };
   let auditWarning: string | undefined;
   try {

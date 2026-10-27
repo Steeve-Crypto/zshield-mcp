@@ -110,6 +110,37 @@ No arguments. Returns the wallet's current unified address, which is the newest 
 
 In testnet mode it comes from `zingo-cli addresses`, and a mainnet address is refused. In mock mode it is a fixed fake address that starts with `u1mockwallet`.
 
+### `zcash_history`
+
+| Arg | Type | Required | Description |
+|-----|------|----------|-------------|
+| `limit` | integer | no | How many recent transactions to return. Default `10`, allowed `1` to `50` |
+
+Returns recent transactions, newest first. Pending ones with no block height come first.
+
+```json
+{
+  "ok": true,
+  "mode": "live",
+  "count": 1,
+  "transactions": [
+    {
+      "txid": "59d9cb1b5a47…",
+      "time": "2026-10-13T00:51:59.000Z",
+      "status": "transmitted",
+      "block_height": 4493939,
+      "kind": "sent",
+      "value_zats": "100000",
+      "value_zec": "0.001",
+      "fee_zats": "10000",
+      "explorer_url": "https://blockexplorer.one/zcash/testnet/tx/59d9cb1b5a47…"
+    }
+  ]
+}
+```
+
+A limit outside `1` to `50`, or one that is not a whole number, is rejected before the wallet is asked, and the rejection is audited. Memos and counterparties are not returned. In testnet mode the list comes from `zingo-cli transactions`. In mock mode it lists the mock funding receive and every mock payment made in this server session.
+
 ## Config: caps & allow-list
 
 Precedence: **environment variables** override `config/default.yaml`.

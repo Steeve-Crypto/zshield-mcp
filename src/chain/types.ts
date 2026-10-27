@@ -1,4 +1,4 @@
-import type { PaymentReceipt, PaymentRequest, WalletBalance } from "../types.js";
+import type { PaymentReceipt, PaymentRequest, TxSummary, WalletBalance } from "../types.js";
 
 export interface ChainAdapter {
   readonly mode: "mock" | "live";
@@ -7,4 +7,6 @@ export interface ChainAdapter {
   getBalance(): Promise<WalletBalance>;
   /** Read-only. The wallet's current unified address. */
   getReceiveAddress(): Promise<string>;
+  /** Read-only. Up to `limit` recent transactions, newest first. */
+  getHistory(limit: number): Promise<TxSummary[]>;
 }
