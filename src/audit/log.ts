@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { appendFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import fs from "node:fs";
+import { dirname, join } from "node:path";
 import { MAX_AUDIT_ROW_BYTES, MAX_RECIPIENT_LENGTH } from "../policy/limits.js";
 import { MAX_AMOUNT_LENGTH } from "../policy/amount.js";
 import type { AuditEntry, RateLimitAuditEntry, ReadAuditEntry } from "../types.js";
@@ -56,11 +56,55 @@ export function boundAuditEntry<T extends object>(entry: T): T {
   return row as unknown as T;
 }
 
-/** Appends one bounded row and returns the file it went to. */
+/**
+ * Flush a directory entry to disk, so a newly created file or folder survives a crash.
+ * Windows cannot open a directory for fsync; NTFS journals the entry, so it is skipped there.
+ */
+export function fsyncDir(dir: string): void {
+  if (process.platform === "win32") return;
+  const fd = fs.openSync(dir, "r");
+  try {
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** Create `dir` if needed, fsyncing the parent of each folder that was created. */
+export function ensureDurableDir(dir: string): void {
+  const missing: string[] = [];
+  for (let d = dir; !fs.existsSync(d); d = dirname(d)) {
+    missing.unshift(d);
+    if (dirname(d) === d) break;
+  }
+  if (missing.length === 0) return;
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  for (const d of missing) fsyncDir(dirname(d));
+}
+
+/**
+ * Append `line` to `file` and fsync it before returning: open, write, fsync, close. A new
+ * file is created with mode 0600 and its directory entry is fsynced too.
+ */
+export function appendDurable(file: string, line: string): void {
+  const isNew = !fs.existsSync(file);
+  const buf = Buffer.from(line, "utf8");
+  const fd = fs.openSync(file, "a", 0o600);
+  try {
+    let off = 0;
+    while (off < buf.length) off += fs.writeSync(fd, buf, off, buf.length - off);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  if (isNew) fsyncDir(dirname(file));
+}
+
+/** Appends one bounded row, flushed to disk, and returns the file it went to. */
 export function appendAuditEntry(auditDir: string, entry: AuditEntry | ReadAuditEntry | RateLimitAuditEntry): string {
-  mkdirSync(auditDir, { recursive: true });
+  ensureDurableDir(auditDir);
   const day = entry.ts.slice(0, 10);
   const file = join(auditDir, `${day}.jsonl`);
-  appendFileSync(file, `${JSON.stringify(boundAuditEntry(entry))}\n`, "utf8");
+  appendDurable(file, `${JSON.stringify(boundAuditEntry(entry))}\n`);
   return file;
 }
