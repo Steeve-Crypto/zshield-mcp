@@ -13,7 +13,8 @@ Each row is written with `fsync` on the file, and on a new file also on its dire
 The server rebuilds its view of past payments from these files (and the fallback file) at startup. That is how an `idempotency_key` survives a restart and how interrupted sends are found.
 
 - The `pending` row of a call with a key carries `idempotency_key` and `params_sha256`, the hash of the amount in zatoshis, recipient, and memo.
-- A repeat call with the same key writes its own row with status `replayed`, its own `call_id`, and `replay_of` set to the first call's `call_id`. It sends nothing.
+- A repeat call with the same key writes its own row with status `replayed`, its own `call_id`, and `replay_of` set to the first call's `call_id`. It sends nothing. It copies `allowlist_hit` and `view_key_fingerprint` from the first call, so the row says which wallet and which allow-list decision it repeats.
+- Before sending, a call with a key re-reads the log under the wallet lock. If another server process bound the key in the meantime, the call is a replay (or `IDEMPOTENCY_CONFLICT`) and sends nothing.
 - At startup, every `pending` row with no result row gets a recovery row: `tool` `zcash_pay_recovery`, the original `call_id`, `status` (`confirmed`, `not_found`, or `unknown`), `txid`, `block_height`, and `confidence` when a match was found, `possible_sends` when there were candidates but no single mined match, `idempotency_key` when the call had one, and a plain `note` saying why. `confirmed` and `not_found` are final; `unknown` is checked again on the next start.
 
 ## Fields
