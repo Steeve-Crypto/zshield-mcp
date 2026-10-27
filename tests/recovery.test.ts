@@ -93,6 +93,16 @@ describe("crash recovery on startup", () => {
     assert.equal(recoveryRows(config).length, 1);
   });
 
+  it("reads the wallet history once for many pending calls", async () => {
+    const config = tempConfig();
+    for (let i = 0; i < 5; i++) pending(config, `m${i}`, { memo: `m${i}` });
+    const { c, calls } = chain([sent("aa".repeat(32), {}, "m3")], synced);
+    const rows = await recoverPendingPayments(config, c, { now: T0 + 60_000 });
+    assert.equal(rows.length, 5);
+    assert.equal(rows.filter((r) => r.status === "confirmed").length, 1);
+    assert.equal(calls.history, 1);
+  });
+
   it("does not confirm on amount alone", async () => {
     const config = tempConfig();
     pending(config, "c1", { chain_tip: 990 });
