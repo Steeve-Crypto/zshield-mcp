@@ -29,7 +29,7 @@ function run(aclFor: (p: string) => string[], env: NodeJS.ProcessEnv = {}, harde
     return icaclsOut(p, aclFor(p));
   };
   const deps = { icacls, env, harden } as Parameters<typeof startupChecks>[2];
-  return { dir, calls, check: () => startupChecks(config, "win32", deps) };
+  return { dir, calls, config, check: () => startupChecks(config, "win32", deps) };
 }
 
 describe("Windows wallet ACL check (V12 F-11)", () => {
@@ -45,10 +45,11 @@ describe("Windows wallet ACL check (V12 F-11)", () => {
     }
   });
 
-  it("checks the directory and the files in it", () => {
-    const { check, calls, dir } = run(() => PRIVATE);
+  it("checks the wallet directory and its files, the audit dir, and the payment store", () => {
+    const { check, calls, dir, config } = run(() => PRIVATE);
     assert.deepEqual(check(), []);
-    assert.deepEqual(calls.sort(), [dir, join(dir, "zingo-wallet.dat")].sort());
+    const state = join(dir, ".zshield-state");
+    assert.deepEqual([...new Set(calls)].sort(), [dir, join(dir, "zingo-wallet.dat"), state, config.auditDir].sort());
   });
 
   it("ignores deny entries and write-only grants", () => {
@@ -61,8 +62,8 @@ describe("Windows wallet ACL check (V12 F-11)", () => {
     assert.throws(failing.check, /ZSHIELD_ALLOW_UNCHECKED_WINDOWS_ACL/);
     const optedIn = run(() => [], { ZSHIELD_ALLOW_UNCHECKED_WINDOWS_ACL: "1" });
     const warnings = optedIn.check();
-    assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /not checked/);
+    assert.equal(warnings.length, 3); // the wallet, the audit dir, the payment store
+    for (const w of warnings) assert.match(w, /not checked/);
   });
 
   it("hardens the directory when asked, then checks again", () => {
