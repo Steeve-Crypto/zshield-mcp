@@ -76,7 +76,7 @@ describe("LiveChainAdapter", () => {
   });
   it("parseTxid errors on missing or error output", () => {
     assert.throws(() => parseTxid("Error: proposal failed"), /send error/);
-    assert.throws(() => parseTxid("{}"), /no txid/);
+    assert.throws(() => parseTxid("{}"), /without a txid/);
   });
 });
 

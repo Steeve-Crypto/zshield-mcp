@@ -22,7 +22,8 @@ export interface Config {
   lightwalletd?: string;
 }
 
-export type PayStatus = "pending" | "ok" | "rejected" | "error";
+/** `unknown`: the send was attempted and may have been broadcast, but no txid came back */
+export type PayStatus = "pending" | "ok" | "rejected" | "error" | "unknown";
 
 export interface AuditEntry {
   ts: string;
@@ -41,7 +42,7 @@ export interface AuditEntry {
   mock_txid?: string;
   /** Salted hash of the wallet UFVK, the same on every row from one wallet. Null when the key could not be read */
   view_key_fingerprint: string | null;
-  /** Stable machine code on rejected and error rows, see README */
+  /** Stable machine code on rejected, error, and unknown rows, see README */
   code?: string;
   error?: string;
   memo?: string;
@@ -49,6 +50,8 @@ export interface AuditEntry {
   recipient_sha256?: string;
   /** Set when the row was shortened to fit the size limit */
   truncated?: boolean;
+  /** Unknown rows only: recent sent transactions in wallet history that match this amount */
+  possible_txids?: string[];
 }
 
 /** Read-only tools. They never move funds. */

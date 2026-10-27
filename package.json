@@ -10,7 +10,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "test": "node --import tsx --test tests/policy.test.ts tests/pay.test.ts tests/config.test.ts tests/live.test.ts tests/balance.test.ts tests/address.test.ts tests/history.test.ts tests/server.test.ts tests/policy-resource.test.ts tests/rejections.test.ts tests/docs.test.ts tests/fingerprint.test.ts tests/memo-argv.test.ts tests/perms.test.ts tests/input-bounds.test.ts",
+    "test": "node --import tsx --test tests/policy.test.ts tests/pay.test.ts tests/config.test.ts tests/live.test.ts tests/balance.test.ts tests/address.test.ts tests/history.test.ts tests/server.test.ts tests/policy-resource.test.ts tests/rejections.test.ts tests/docs.test.ts tests/fingerprint.test.ts tests/memo-argv.test.ts tests/perms.test.ts tests/send-unknown.test.ts tests/input-bounds.test.ts",
     "demo:testnet": "tsx scripts/demo-testnet.ts",
     "demo:mock": "tsx scripts/demo-mock.ts"
   },

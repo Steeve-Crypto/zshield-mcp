@@ -2,7 +2,7 @@
 
 Append-only JSON Lines under `AUDIT_DIR` (default `./audits/`), one file per UTC day: `YYYY-MM-DD.jsonl`.
 
-Every call writes at least one row. A call that passes policy writes a `pending` row before the chain send, then a result row (`ok` with the txid, or `error`) after it. Both rows share a `call_id`. A call rejected by policy writes a single `rejected` row and never reaches the chain. If the `pending` row cannot be written, the payment is not sent. If the result row cannot be written after a send, the tool still returns the txid and adds an `audit_warning` so the caller does not retry and pay twice. The `pending` row stays in the log as the record of that send.
+Every call writes at least one row. A call that passes policy writes a `pending` row before the chain send, then a result row (`ok` with the txid, `error`, or `unknown`) after it. `unknown` means the send was started and may have been broadcast, but no txid came back, for example because `zingo-cli` timed out. Both rows share a `call_id`. A call rejected by policy writes a single `rejected` row and never reaches the chain. If the `pending` row cannot be written, the payment is not sent. If the result row cannot be written after a send, the tool still returns the txid and adds an `audit_warning` so the caller does not retry and pay twice. The `pending` row stays in the log as the record of that send.
 
 ## Fields
 
@@ -17,15 +17,16 @@ Every call writes at least one row. A call that passes policy writes a `pending`
 | `recipient_sha256` | string? | Only on rows with an oversized recipient |
 | `allowlist_hit` | boolean | Whether recipient was on the allow-list |
 | `cap_zec` | string or number | Active hard per-call cap |
-| `status` | `pending` \| `ok` \| `rejected` \| `error` | `pending` is written before the send; the others are outcomes |
+| `status` | `pending` \| `ok` \| `rejected` \| `error` \| `unknown` | `pending` is written before the send; the others are outcomes |
 | `mock_txid` | string? | Present on success in mock mode |
 | `view_key_fingerprint` | string or null | `sha256(salt \| UFVK)[0:16]`, the same on every row from one wallet. **Never** the key itself. `null` when the key could not be read, in which case nothing is sent |
-| `code` | string? | Stable machine code on `rejected` and `error` rows, such as `CAP_EXCEEDED`. See the README for the full list |
+| `code` | string? | Stable machine code on `rejected`, `error`, and `unknown` rows, such as `CAP_EXCEEDED`. See the README for the full list |
 | `error` | string? | Policy or runtime message |
 | `memo` | string? | Optional memo, at most 512 UTF-8 bytes |
+| `possible_txids` | string[]? | `unknown` rows only. Recent sent transactions in wallet history with the same amount, found right after the send failed. Possibly empty |
 | `truncated` | boolean? | Present when the row was shortened to fit the size limit |
 
-Each row is capped at 8 KiB (8192 bytes of UTF-8 JSON). If a row would be larger, string fields over 1024 characters are cut and marked `...[truncated]`. If it is still too large, only the identifying fields are kept (`ts`, `tool`, `call_id`, `status`, `mock_txid`, `recipient_sha256`, `view_key_fingerprint`, and the `code` once codes exist). The tool response carries the same bounded row.
+Each row is capped at 8 KiB (8192 bytes of UTF-8 JSON). If a row would be larger, string fields over 1024 characters are cut and marked `...[truncated]`. If it is still too large, only the identifying fields are kept (`ts`, `tool`, `call_id`, `status`, `mock_txid`, `recipient_sha256`, `view_key_fingerprint`, `code`, and `possible_txids`). The tool response carries the same bounded row.
 
 ## Read-only tool rows
 
