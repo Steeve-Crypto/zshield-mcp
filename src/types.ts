@@ -48,6 +48,29 @@ export interface AuditEntry {
   truncated?: boolean;
 }
 
+/** Read-only tools. They never move funds. */
+export type ReadTool = "zcash_balance";
+
+/** One audit row per read-only tool call. Holds no balances, addresses, or keys. */
+export interface ReadAuditEntry {
+  ts: string;
+  tool: ReadTool;
+  call_id: string;
+  mode: ChainMode;
+  status: "ok" | "rejected" | "error";
+  error?: string;
+}
+
+/** Wallet balance in integer zatoshis. */
+export interface WalletBalance {
+  /** Sum of confirmed funds across all pools */
+  confirmedZats: bigint;
+  /** Funds the wallet can spend right now */
+  spendableZats: bigint;
+  /** Seen but not yet confirmed */
+  unconfirmedZats: bigint;
+}
+
 export interface PaymentRequest {
   /** Integer zatoshis */
   amountZats: bigint;

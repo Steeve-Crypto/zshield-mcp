@@ -26,6 +26,10 @@ Every call writes at least one row. A call that passes policy writes a `pending`
 
 Each row is capped at 8 KiB (8192 bytes of UTF-8 JSON). If a row would be larger, string fields over 1024 characters are cut and marked `...[truncated]`. If it is still too large, only the identifying fields are kept (`ts`, `tool`, `call_id`, `status`, `mock_txid`, `recipient_sha256`, `view_key_fingerprint`, and the `code` once codes exist). The tool response carries the same bounded row.
 
+## Read-only tool rows
+
+Read-only tools such as `zcash_balance` write one row per call with these fields: `ts`, `tool`, `call_id`, `mode` (`mock` or `live`), `status` (`ok`, `rejected`, or `error`), and `error` when the call failed. They never record balances, addresses, or transaction details.
+
 ## Retention
 
 Rotate or archive `audits/*.jsonl` as your compliance needs require. Do not commit live audit files (gitignored).

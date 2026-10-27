@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { MAX_AUDIT_ROW_BYTES, MAX_RECIPIENT_LENGTH } from "../policy/limits.js";
 import { MAX_AMOUNT_LENGTH } from "../policy/amount.js";
-import type { AuditEntry } from "../types.js";
+import type { AuditEntry, ReadAuditEntry } from "../types.js";
 
 export function fingerprintViewKey(material: string, salt: string): string {
   return createHash("sha256").update(`${salt}|${material}`).digest("hex").slice(0, 16);
@@ -53,7 +53,7 @@ export function boundAuditEntry<T extends object>(entry: T): T {
 }
 
 /** Appends one bounded row and returns the file it went to. */
-export function appendAuditEntry(auditDir: string, entry: AuditEntry): string {
+export function appendAuditEntry(auditDir: string, entry: AuditEntry | ReadAuditEntry): string {
   mkdirSync(auditDir, { recursive: true });
   const day = entry.ts.slice(0, 10);
   const file = join(auditDir, `${day}.jsonl`);

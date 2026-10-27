@@ -4,6 +4,7 @@ import { LiveChainAdapter } from "./chain/live.js";
 import type { ChainAdapter } from "./chain/types.js";
 import { loadConfig } from "./config.js";
 import { executePay, payInputSchema } from "./tools/pay.js";
+import { balanceInputSchema, executeBalance } from "./tools/balance.js";
 import type { Config } from "./types.js";
 
 export function createChain(config: Config): ChainAdapter {
@@ -31,6 +32,19 @@ export function createServer(config: Config = loadConfig()): McpServer {
     async (args) => {
       const parsed = payInputSchema.parse(args);
       const result = await executePay(parsed, { config, chain });
+      return {
+        content: [{ type: "text" as const, text: result.text }],
+        isError: !result.ok,
+      };
+    }
+  );
+
+  server.tool(
+    "zcash_balance",
+    "Read-only. Returns the wallet's confirmed and spendable balance in zatoshis and as a ZEC string. Never moves funds. Writes an audit row.",
+    balanceInputSchema.shape,
+    async () => {
+      const result = await executeBalance({ config, chain });
       return {
         content: [{ type: "text" as const, text: result.text }],
         isError: !result.ok,
