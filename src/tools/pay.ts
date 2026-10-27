@@ -420,6 +420,9 @@ const PENDING_MESSAGE =
 const EXPIRED_MESSAGE =
   "The first payment with this idempotency key was proven never sent: the wallet scanned past its expiry height and found no matching transaction. Use a new idempotency key to pay.";
 
+const FAILED_MESSAGE =
+  "The first payment with this idempotency key returned a txid, but the wallet has since marked that transaction failed. It was not sent again, and this key will not send again. Check the explorer; if it did not go through, use a new idempotency key to pay.";
+
 /** Same key, same parameters: report the first call's outcome from the store. Nothing is sent. */
 function replay(input: PayInput, deps: PayDeps, callId: string, originalCallId: string, record?: CallRecord): PayResult {
   const { config } = deps;
@@ -458,6 +461,13 @@ function replay(input: PayInput, deps: PayDeps, callId: string, originalCallId: 
   if (state === "not_sent") {
     const code = (top?.code as PayCode | undefined) ?? "CHAIN_ERROR";
     return respond(false, { status: top?.code && isRejectCode(top.code) ? "rejected" : "error", code, message: top?.error, error: top?.error }, code);
+  }
+  if (state === "failed") {
+    return respond(
+      false,
+      { status: "error", code: "PAYMENT_FAILED", txid: record?.txid, message: FAILED_MESSAGE, error: FAILED_MESSAGE },
+      "PAYMENT_FAILED"
+    );
   }
   if (state === "expired") {
     return respond(false, { status: "expired", code: "PAYMENT_EXPIRED", message: EXPIRED_MESSAGE, error: EXPIRED_MESSAGE }, "PAYMENT_EXPIRED");

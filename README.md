@@ -167,6 +167,7 @@ Branch on `code`. It is stable. `message` is for people and may change. `error` 
 | `CONFIG_ERROR` | The server is misconfigured, for example testnet mode without the testnet adapter. Nothing was sent |
 | `STATE_WRITE_FAILED` | The payment store in the wallet dir could not be opened or written before the send, so the payment was not sent |
 | `PAYMENT_EXPIRED` | A repeat call whose first call was proven never sent: the synced wallet scanned its whole history past the expiry height and found no match. Pay with a new idempotency key |
+| `PAYMENT_FAILED` | A repeat call whose first call returned a txid that the wallet has since marked failed. Nothing is sent again, and the key stays bound to that failed send. Check the explorer, then pay with a new idempotency key |
 
 `status` is `unknown` when the send was started but its result is not known:
 

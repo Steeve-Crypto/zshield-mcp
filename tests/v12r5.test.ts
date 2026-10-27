@@ -17,6 +17,7 @@ import { readAuditRows } from "./helpers.ts";
 import { recoverPendingPayments } from "../src/payments/recovery.ts";
 import { resetPaymentStores, storeFor } from "../src/payments/store.ts";
 import { executePay, matchSend } from "../src/tools/pay.ts";
+import { paymentStatus } from "../src/tools/status.ts";
 import type { AuditEntry, ChainHealth, Config, TxSummary } from "../src/types.ts";
 import { ALLOWED, tempConfig } from "./helpers.ts";
 
@@ -263,7 +264,7 @@ function liveCfg(): Config {
 type Req = import("../src/types.ts").PaymentRequest;
 
 /** A live-mode chain whose health check and send are scripted. `store` is filled in once the store exists. */
-function liveChain(hooks: { health?: () => void; pay?: (req: Req) => void; reading?: () => ChainHealth }) {
+function liveChain(hooks: { health?: () => void; pay?: (req: Req) => void; reading?: () => ChainHealth; history?: () => TxSummary[] }) {
   const counts = { sent: 0 };
   const chain = {
     mode: "live",
@@ -276,7 +277,7 @@ function liveChain(hooks: { health?: () => void; pay?: (req: Req) => void; readi
     },
     async getBalance() { throw new Error("unused"); },
     async getReceiveAddress() { throw new Error("unused"); },
-    async getHistory() { return []; },
+    async getHistory() { return hooks.history?.() ?? []; },
   } as unknown as ChainAdapter;
   return { chain, counts };
 }
@@ -446,5 +447,76 @@ describe("F-22: the chain tip cannot be trusted low", () => {
     pending(config, "c1", { chain_tip: 900, wallet_height: 900 } as Partial<AuditEntry>);
     const rows = await recoverPendingPayments(config, chainOf([], { walletHeight: 5000, chainTip: 5001, spendableZats: 0n }), { now: T0 + 60_000 });
     assert.equal(rows[0].status, "unknown");
+  });
+});
+
+// F-23: a transaction the wallet marks failed must not replay as a payment.
+
+describe("F-23: failed sends", () => {
+  const key = "k-failed";
+  function setup() {
+    const config = liveCfg();
+    let history: TxSummary[] = [];
+    const { chain, counts } = liveChain({ history: () => history });
+    const asTx = (status: string, extra: Partial<TxSummary> = {}) =>
+      ({ txid: tx(77), time: new Date().toISOString(), status, kind: "sent", valueZats: 10000n, outgoing: [{ recipient: R, valueZats: 10000n, memo: "" }], ...extra }) as TxSummary;
+    return { config, chain, counts, setHistory: (h: TxSummary[]) => (history = h), asTx };
+  }
+  const pay = (config: Config, chain: ChainAdapter) => executePay({ amount_zec: "0.0001", recipient: R, idempotency_key: key }, { config, chain });
+
+  it("status records failed, and a replay of the same key reports the failure and sends nothing", async () => {
+    const { config, chain, counts, setHistory, asTx } = setup();
+    assert.equal((await pay(config, chain)).ok, true);
+    setHistory([asTx("failed")]);
+    const s = await paymentStatus(config, chain, { idempotency_key: key });
+    assert.equal(s.state, "failed");
+    assert.equal(s.code, "PAYMENT_FAILED");
+    const callId = s.call_id;
+    assert.equal(storeFor(config, chain).readCall(callId)?.state, "failed");
+    const again = await pay(config, chain);
+    assert.equal(again.ok, false);
+    assert.equal(again.code, "PAYMENT_FAILED");
+    assert.equal(JSON.parse(again.text).txid, tx(77));
+    assert.equal(counts.sent, 1, "the key does not send again");
+  });
+
+  it("a replay stays failed after the wallet stops listing the transaction", async () => {
+    const { config, chain, counts, setHistory, asTx } = setup();
+    await pay(config, chain);
+    setHistory([asTx("failed")]);
+    await paymentStatus(config, chain, { idempotency_key: key });
+    setHistory([]);
+    const s = await paymentStatus(config, chain, { idempotency_key: key });
+    assert.equal(s.state, "failed");
+    assert.match(s.message, /failed record stays/);
+    assert.equal((await pay(config, chain)).code, "PAYMENT_FAILED");
+    assert.equal(counts.sent, 1);
+  });
+
+  it("a transaction seen mined later wins over a failed record, and mined is never moved back to failed", async () => {
+    const { config, chain, setHistory, asTx } = setup();
+    await pay(config, chain);
+    setHistory([asTx("failed")]);
+    await paymentStatus(config, chain, { idempotency_key: key });
+    setHistory([asTx("confirmed", { blockHeight: 1001 })]);
+    assert.equal((await paymentStatus(config, chain, { idempotency_key: key })).state, "mined");
+    const callId = (await paymentStatus(config, chain, { idempotency_key: key })).call_id;
+    assert.equal(storeFor(config, chain).readCall(callId)?.state, "mined");
+    setHistory([asTx("failed")]);
+    const s = await paymentStatus(config, chain, { idempotency_key: key });
+    assert.equal(s.state, "mined");
+    assert.equal(storeFor(config, chain).readCall(callId)?.state, "mined");
+    const replay = await pay(config, chain);
+    assert.equal(replay.ok, true);
+  });
+
+  it("a wallet that has not marked it failed leaves the replay as the original success", async () => {
+    const { config, chain, counts, setHistory, asTx } = setup();
+    await pay(config, chain);
+    setHistory([asTx("mempool")]);
+    assert.equal((await paymentStatus(config, chain, { idempotency_key: key })).state, "broadcast");
+    const r = await pay(config, chain);
+    assert.equal(r.ok, true);
+    assert.equal(counts.sent, 1);
   });
 });
