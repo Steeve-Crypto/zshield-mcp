@@ -4,15 +4,40 @@ import type { ChainAdapter } from "../chain/types.js";
 import { appendAuditEntry, fingerprintViewKey } from "../audit/log.js";
 import { assertWithinCap, PolicyError } from "../policy/caps.js";
 import { assertRecipientAllowed, isRecipientAllowed, loadAllowlist } from "../policy/allowlist.js";
+import { assertPayInputBounded, MAX_MEMO_BYTES, MAX_RECIPIENT_LENGTH, memoProblem } from "../policy/limits.js";
+import { boundAuditEntry } from "../audit/log.js";
 import type { AuditEntry, Config, PayStatus } from "../types.js";
 
 export const payInputSchema = z.object({
   amount_zec: z.number().describe("Amount of ZEC to pay (must be <= spending cap)"),
-  recipient: z.string().describe("Recipient address; must be on the allow-list"),
-  memo: z.string().max(512).optional().describe("Optional memo (mock only)"),
+  recipient: z
+    .string()
+    .max(MAX_RECIPIENT_LENGTH, `INVALID_RECIPIENT: recipient is longer than ${MAX_RECIPIENT_LENGTH} characters`)
+    .describe(`Recipient address, at most ${MAX_RECIPIENT_LENGTH} characters; must be on the allow-list`),
+  memo: z
+    .string()
+    .max(MAX_MEMO_BYTES)
+    .refine((m) => memoProblem(m) === undefined, `INVALID_MEMO: memo is longer than ${MAX_MEMO_BYTES} bytes`)
+    .optional()
+    .describe(`Optional memo, at most ${MAX_MEMO_BYTES} UTF-8 bytes (the Zcash memo size)`),
 });
 
 export type PayInput = z.infer<typeof payInputSchema>;
+
+/**
+ * Chain errors can quote zingo-cli output, which may repeat the recipient or memo.
+ * Replace them so caller strings never come back inside an error message.
+ */
+export function redactInput(message: string, input: { recipient: string; memo?: string }): string {
+  let out = message;
+  for (const [value, label] of [
+    [input.recipient, "[recipient]"],
+    [input.memo, "[memo]"],
+  ] as const) {
+    if (value && value.length >= 4) out = out.split(value).join(label);
+  }
+  return out;
+}
 
 export interface PayDeps {
   config: Config;
@@ -50,6 +75,9 @@ export async function executePay(
   let policyPassed = false;
   let intentWriteFailed = false;
   try {
+    // Bound caller strings first. The schema enforces the same limits for MCP calls; this
+    // covers direct callers and keeps oversized values out of errors and audit rows.
+    assertPayInputBounded(input.recipient, input.memo);
     const allowlist = loadAllowlist(config.allowlistPath);
     allowlistHit = isRecipientAllowed(input.recipient, allowlist);
     assertWithinCap(input.amount_zec, config.spendingCapZec);
@@ -91,12 +119,13 @@ export async function executePay(
         status = "ok";
       } catch (e) {
         status = "error";
-        error = e instanceof Error ? e.message : String(e);
+        error = redactInput(e instanceof Error ? e.message : String(e), input);
       }
     }
   }
 
-  const audit = entry();
+  // The response carries the same bounded row that goes to disk.
+  const audit = boundAuditEntry(entry());
   let auditWarning: string | undefined;
   try {
     appendAuditEntry(config.auditDir, audit);

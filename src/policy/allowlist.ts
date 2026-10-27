@@ -22,9 +22,8 @@ export function assertRecipientAllowed(
 ): RecipientEntry {
   const hit = allowlist.find((r) => r.address === recipient);
   if (!hit) {
-    throw new PolicyError(
-      `Recipient not on allow-list: ${recipient}. Add it to the allow-list file and restart.`
-    );
+    // The recipient is not repeated here; it is already in the audit row's recipient field.
+    throw new PolicyError("Recipient is not on the allow-list. Add it to the allow-list file and restart.");
   }
   return hit;
 }
