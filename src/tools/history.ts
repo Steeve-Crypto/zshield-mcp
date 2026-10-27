@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { withWalletRead } from "../payments/lock.js";
 import { TESTNET_EXPLORER } from "../chain/live.js";
 import { formatZats } from "../policy/amount.js";
 import type { TxSummary } from "../types.js";
@@ -31,7 +32,10 @@ export async function executeHistory(input: HistoryInput, deps: ReadDeps) {
   return runReadTool<TxSummary[]>(
     "zcash_history",
     deps.config,
-    async () => deps.chain.getHistory(checkLimit(input.limit)),
+    async () => {
+      const limit = checkLimit(input.limit);
+      return withWalletRead(deps.chain, "zcash_history", (offline) => deps.chain.getHistory(limit, { offline }));
+    },
     (txs) => ({
       count: txs.length,
       transactions: txs.map((t) => ({
