@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MockChainAdapter } from "../src/chain/mock.ts";
@@ -103,9 +103,11 @@ describe("executePay with a broken allow-list", () => {
 const ALLOWED = "u1mockrecipientaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 function readAudit(config: Config): AuditEntry[] {
-  const day = new Date().toISOString().slice(0, 10);
-  const file = join(config.auditDir, `${day}.jsonl`);
-  return readFileSync(file, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  // Read every day file so a call that crosses UTC midnight still shows both rows.
+  return readdirSync(config.auditDir)
+    .sort()
+    .flatMap((f) => readFileSync(join(config.auditDir, f), "utf8").trim().split("\n"))
+    .map((l) => JSON.parse(l));
 }
 
 describe("audit row is written before the chain send", () => {
@@ -185,5 +187,34 @@ describe("audit row is written before the chain send", () => {
     assert.equal(result.ok, false);
     assert.equal(result.audit.status, "error");
     assert.match(result.audit.error ?? "", /payment not sent/);
+  });
+
+  it("returns the txid instead of throwing when the result row cannot be written", async () => {
+    const config = tempConfig();
+    let calls = 0;
+    const chain: ChainAdapter = {
+      mode: "mock",
+      async pay(req: PaymentRequest) {
+        calls++;
+        // Break the audit log after the pending row: swap each day file for a directory.
+        for (const f of readdirSync(config.auditDir)) {
+          rmSync(join(config.auditDir, f));
+          mkdirSync(join(config.auditDir, f));
+        }
+        for (let d = -1; d <= 1; d++) {
+          const day = new Date(Date.now() + d * 86_400_000).toISOString().slice(0, 10);
+          mkdirSync(join(config.auditDir, `${day}.jsonl`), { recursive: true });
+        }
+        return new MockChainAdapter().pay(req);
+      },
+    };
+    const result = await executePay({ amount_zec: 0.05, recipient: ALLOWED }, { config, chain });
+    assert.equal(calls, 1);
+    assert.equal(result.ok, true);
+    assert.ok(result.audit.mock_txid);
+    assert.match(result.auditWarning ?? "", /could not be written/);
+    const body = JSON.parse(result.text);
+    assert.equal(body.txid, result.audit.mock_txid);
+    assert.match(body.audit_warning, /could not be written/);
   });
 });

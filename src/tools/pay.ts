@@ -22,7 +22,7 @@ export interface PayDeps {
 export async function executePay(
   input: PayInput,
   deps: PayDeps
-): Promise<{ ok: boolean; text: string; audit: AuditEntry }> {
+): Promise<{ ok: boolean; text: string; audit: AuditEntry; auditWarning?: string }> {
   const { config, chain } = deps;
   const callId = randomUUID();
   let allowlistHit = false;
@@ -97,18 +97,24 @@ export async function executePay(
   }
 
   const audit = entry();
+  let auditWarning: string | undefined;
   try {
     appendAuditEntry(config.auditDir, audit);
   } catch (e) {
-    // The intent write already failed and nothing was sent, so report that error instead.
-    if (!intentWriteFailed) throw e;
+    // Never throw here. A send may already have happened, and throwing would hide the txid
+    // and invite a retry that pays twice. Report the failed write alongside the result instead.
+    // When the intent write already failed, nothing was sent and that error is already reported.
+    if (!intentWriteFailed) {
+      auditWarning = `Result audit row could not be written: ${e instanceof Error ? e.message : String(e)}`;
+    }
   }
 
   if (status !== "ok") {
     return {
       ok: false,
-      text: JSON.stringify({ ok: false, status, error, audit }, null, 2),
+      text: JSON.stringify({ ok: false, status, error, audit, audit_warning: auditWarning }, null, 2),
       audit,
+      auditWarning,
     };
   }
 
@@ -123,10 +129,12 @@ export async function executePay(
         recipient: input.recipient,
         mode: config.chainMode,
         view_key_fingerprint: viewKeyFingerprint,
+        audit_warning: auditWarning,
       },
       null,
       2
     ),
     audit,
+    auditWarning,
   };
 }
