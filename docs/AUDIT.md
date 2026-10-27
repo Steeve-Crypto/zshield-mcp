@@ -20,6 +20,7 @@ Every call writes at least one row. A call that passes policy writes a `pending`
 | `status` | `pending` \| `ok` \| `rejected` \| `error` | `pending` is written before the send; the others are outcomes |
 | `mock_txid` | string? | Present on success in mock mode |
 | `view_key_fingerprint` | string | `sha256(salt \| viewKeyMaterial)[0:16]`, **never** the raw key |
+| `code` | string? | Stable machine code on `rejected` and `error` rows, such as `CAP_EXCEEDED`. See the README for the full list |
 | `error` | string? | Policy or runtime message |
 | `memo` | string? | Optional memo, at most 512 UTF-8 bytes |
 | `truncated` | boolean? | Present when the row was shortened to fit the size limit |
@@ -28,7 +29,7 @@ Each row is capped at 8 KiB (8192 bytes of UTF-8 JSON). If a row would be larger
 
 ## Read-only tool rows
 
-Read-only tools (`zcash_balance`, `zcash_receive_address`, `zcash_history`) write one row per call with these fields: `ts`, `tool`, `call_id`, `mode` (`mock` or `live`), `status` (`ok`, `rejected`, or `error`), `error` when the call failed, and for `zcash_history` the `limit` that was asked for. They never record balances, addresses, or transaction details.
+Read-only tools (`zcash_balance`, `zcash_receive_address`, `zcash_history`) write one row per call with these fields: `ts`, `tool`, `call_id`, `mode` (`mock` or `live`), `status` (`ok`, `rejected`, or `error`), `code` and `error` when the call failed, and for `zcash_history` the `limit` that was asked for. They never record balances, addresses, or transaction details.
 
 ## Retention
 

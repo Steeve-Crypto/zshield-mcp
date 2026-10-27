@@ -7,7 +7,24 @@ import { assertRecipientAllowed, isRecipientAllowed, loadAllowlist } from "../po
 import { assertPayInputBounded, MAX_MEMO_BYTES, MAX_RECIPIENT_LENGTH, memoProblem } from "../policy/limits.js";
 import { boundAuditEntry } from "../audit/log.js";
 import { MAX_AMOUNT_LENGTH } from "../policy/amount.js";
+import { addressNetwork } from "../chain/network.js";
+import type { PayCode } from "../errors.js";
 import type { AuditEntry, Config, PayStatus } from "../types.js";
+
+/**
+ * Live mode is testnet only, so a mainnet or unrecognized recipient is refused by policy
+ * before any audit intent row or CLI call. The live adapter checks again as a backstop.
+ */
+function assertNetworkAllowed(recipient: string, config: Config): void {
+  if (config.chainMode !== "live") return;
+  const net = addressNetwork(recipient);
+  if (net === "mainnet") {
+    throw new PolicyError("MAINNET_REFUSED", "Mainnet address refused; this server only pays on testnet.");
+  }
+  if (net !== "testnet") {
+    throw new PolicyError("INVALID_ADDRESS", "Unrecognized address network.");
+  }
+}
 
 export const payInputSchema = z.object({
   amount_zec: z
@@ -50,13 +67,14 @@ export interface PayDeps {
 export async function executePay(
   input: PayInput,
   deps: PayDeps
-): Promise<{ ok: boolean; text: string; audit: AuditEntry; auditWarning?: string }> {
+): Promise<{ ok: boolean; code?: PayCode; text: string; audit: AuditEntry; auditWarning?: string }> {
   const { config, chain } = deps;
   const callId = randomUUID();
   let allowlistHit = false;
 
   let status: PayStatus = "ok";
   let error: string | undefined;
+  let code: PayCode | undefined;
   let mockTxid: string | undefined;
   let amountZats: bigint | undefined;
   let viewKeyFingerprint = fingerprintViewKey("none", config.viewKeyFingerprintSalt);
@@ -73,6 +91,7 @@ export async function executePay(
     status,
     mock_txid: mockTxid,
     view_key_fingerprint: viewKeyFingerprint,
+    code,
     error,
     memo: input.memo,
   });
@@ -85,7 +104,9 @@ export async function executePay(
     assertPayInputBounded(input.recipient, input.memo);
     const allowlist = loadAllowlist(config.allowlistPath);
     allowlistHit = isRecipientAllowed(input.recipient, allowlist);
+    // Order decides which code wins when several rules fail.
     amountZats = assertWithinCap(input.amount_zec, config.spendingCapZec);
+    assertNetworkAllowed(input.recipient, config);
     assertRecipientAllowed(input.recipient, allowlist);
 
     if (config.chainMode === "live" && chain.mode !== "live") {
@@ -93,7 +114,13 @@ export async function executePay(
     }
     policyPassed = true;
   } catch (e) {
-    status = e instanceof PolicyError ? "rejected" : "error";
+    if (e instanceof PolicyError) {
+      status = "rejected";
+      code = e.code;
+    } else {
+      status = "error";
+      code = "CONFIG_ERROR";
+    }
     error = e instanceof Error ? e.message : String(e);
   }
 
@@ -105,6 +132,7 @@ export async function executePay(
     } catch (e) {
       intentWriteFailed = true;
       status = "error";
+      code = "AUDIT_WRITE_FAILED";
       error = `Audit write failed before send; payment not sent: ${e instanceof Error ? e.message : String(e)}`;
     }
 
@@ -124,6 +152,7 @@ export async function executePay(
         status = "ok";
       } catch (e) {
         status = "error";
+        code = "CHAIN_ERROR";
         error = redactInput(e instanceof Error ? e.message : String(e), input);
       }
     }
@@ -146,7 +175,12 @@ export async function executePay(
   if (status !== "ok") {
     return {
       ok: false,
-      text: JSON.stringify({ ok: false, status, error, audit, audit_warning: auditWarning }, null, 2),
+      code,
+      text: JSON.stringify(
+        { ok: false, status, code, message: error, error, audit, audit_warning: auditWarning },
+        null,
+        2
+      ),
       audit,
       auditWarning,
     };

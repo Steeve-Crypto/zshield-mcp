@@ -10,6 +10,7 @@ import { appendAuditEntry, boundAuditEntry } from "../src/audit/log.ts";
 import { MAX_AUDIT_ROW_BYTES, MAX_MEMO_BYTES, MAX_RECIPIENT_LENGTH } from "../src/policy/limits.ts";
 import { executePay, payInputSchema, redactInput } from "../src/tools/pay.ts";
 import type { AuditEntry, Config } from "../src/types.ts";
+import { connect, textOf } from "./helpers.ts";
 
 const ALLOWED = "u1mockrecipientaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -223,5 +224,36 @@ describe("oversized amount string", () => {
       assert.equal(r.audit.status, "rejected", amount);
       assert.ok(!(r.audit.error ?? "").includes(amount), `${amount} echoed in: ${r.audit.error}`);
     }
+  });
+});
+
+describe("stable codes for oversized input", () => {
+  it("INVALID_RECIPIENT, INVALID_MEMO, and INVALID_AMOUNT", async () => {
+    const config = tempConfig();
+    const chain = new MockChainAdapter();
+    const rec = await executePay({ amount_zec: 0.01, recipient: "u1" + "x".repeat(300) }, { config, chain });
+    assert.equal(rec.code, "INVALID_RECIPIENT");
+    assert.equal(rec.audit.code, "INVALID_RECIPIENT");
+    const memo = await executePay({ amount_zec: 0.01, recipient: ALLOWED, memo: "m".repeat(513) }, { config, chain });
+    assert.equal(memo.code, "INVALID_MEMO");
+    const amt = await executePay({ amount_zec: "9".repeat(40), recipient: ALLOWED }, { config, chain });
+    assert.equal(amt.code, "INVALID_AMOUNT");
+  });
+
+  it("an MCP call with an oversized recipient is refused before the tool runs", async () => {
+    const { client, config } = await connect(tempConfig());
+    const recipient = "u1" + "x".repeat(10_000);
+    let text = "";
+    try {
+      const res = await client.callTool({ name: "zcash_pay", arguments: { amount_zec: "0.01", recipient } });
+      text = textOf(res);
+    } catch (e) {
+      text = e instanceof Error ? e.message : String(e);
+    }
+    assert.match(text, /INVALID_RECIPIENT/);
+    assert.ok(!text.includes("xxxxxxxxxx"), "the recipient must not be echoed");
+    assert.ok(bytes(text) < 2048);
+    // Refused at the schema, so nothing was audited and nothing was sent.
+    assert.throws(() => readdirSync(config.auditDir));
   });
 });
