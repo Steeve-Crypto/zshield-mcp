@@ -98,7 +98,14 @@ export interface LiveOptions {
   dataDir?: string;
   server?: string;
   runner?: CliRunner;
+  /** Clock for the export_ufvk backoff. Tests pass a fake one. */
+  now?: () => number;
 }
+
+/** First wait after a failed export_ufvk; doubles on each failure in a row. */
+export const VIEWKEY_BACKOFF_BASE_MS = 1_000;
+/** Longest wait between export_ufvk attempts. */
+export const VIEWKEY_BACKOFF_MAX_MS = 60_000;
 
 /**
  * Testnet adapter backed by zingo-cli and a public lightwalletd.
@@ -112,6 +119,10 @@ export class LiveChainAdapter implements ChainAdapter {
   private readonly runner: CliRunner;
   /** Cached in memory only, for this process. Never logged or written. */
   private viewingKey?: Promise<string>;
+  private viewKeyFailures = 0;
+  private viewKeyRetryAt = 0;
+  private viewKeyLastError = "";
+  private readonly now: () => number;
 
   constructor(opts: LiveOptions) {
     if (opts.network !== "testnet") {
@@ -121,6 +132,7 @@ export class LiveChainAdapter implements ChainAdapter {
     this.dataDir = resolveWalletDir(opts.dataDir);
     this.server = opts.server ?? "https://testnet.zec.rocks:443";
     this.runner = opts.runner ?? defaultRunner;
+    this.now = opts.now ?? Date.now;
   }
 
   baseArgs(): string[] {
@@ -159,16 +171,34 @@ export class LiveChainAdapter implements ChainAdapter {
   /**
    * Read-only: runs `export_ufvk` in an offline session, so it is fast and touches no
    * network. Cached for the life of the process. The key never leaves this adapter
-   * except to be hashed by the caller.
+   * except to be hashed by the caller. After a failure, calls fail fast until the backoff
+   * passes (VIEWKEY_BACKOFF_BASE_MS doubling up to VIEWKEY_BACKOFF_MAX_MS).
    */
   async getViewingKey(): Promise<string> {
     if (!this.viewingKey) {
+      const wait = this.viewKeyRetryAt - this.now();
+      if (wait > 0) {
+        // Negative cache: a failing export is not re-run on every call.
+        throw new Error(
+          `export_ufvk failed ${this.viewKeyFailures} time(s) in a row (${this.viewKeyLastError}); next try in ${Math.ceil(wait / 1000)}s`
+        );
+      }
       const args = ["--chain", "testnet", "--data-dir", this.dataDir, "--offline", "export_ufvk"];
       const p = this.runner(this.bin, args, { timeoutMs: readTimeoutMs() }).then(parseUfvk);
-      // Do not cache a failure; the next call tries again.
-      p.catch(() => {
-        if (this.viewingKey === p) this.viewingKey = undefined;
-      });
+      // Do not cache a failure. Back off instead: 1s, 2s, 4s, and so on, up to 60s.
+      p.then(
+        () => {
+          this.viewKeyFailures = 0;
+          this.viewKeyRetryAt = 0;
+        },
+        (e: unknown) => {
+          if (this.viewingKey === p) this.viewingKey = undefined;
+          this.viewKeyFailures++;
+          this.viewKeyLastError = e instanceof Error ? e.message : String(e);
+          const delay = Math.min(VIEWKEY_BACKOFF_MAX_MS, VIEWKEY_BACKOFF_BASE_MS * 2 ** (this.viewKeyFailures - 1));
+          this.viewKeyRetryAt = this.now() + delay;
+        }
+      );
       this.viewingKey = p;
     }
     return this.viewingKey;

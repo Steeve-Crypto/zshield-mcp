@@ -120,6 +120,9 @@ export function redactInput(message: string, input: { recipient: string; memo?: 
   return out;
 }
 
+/** Fingerprint of each adapter's wallet once read, so refused calls can carry it without running zingo-cli. */
+const knownFingerprints = new WeakMap<ChainAdapter, string>();
+
 export interface PayDeps {
   config: Config;
   chain: ChainAdapter;
@@ -141,13 +144,10 @@ export async function executePay(
   let mockTxid: string | undefined;
   let amountZats: bigint | undefined;
   // One fingerprint per wallet: a salted hash of its UFVK, written on every row of the call.
-  let viewKeyFingerprint: string | null = null;
+  // Reading the key can run zingo-cli, so it waits until every cheap check has passed.
+  // Rows for calls refused before that use the fingerprint from an earlier call, if any.
+  let viewKeyFingerprint: string | null = knownFingerprints.get(chain) ?? null;
   let viewKeyError: string | undefined;
-  try {
-    viewKeyFingerprint = fingerprintViewKey(await chain.getViewingKey(), config.viewKeyFingerprintSalt);
-  } catch (e) {
-    viewKeyError = e instanceof Error ? e.message : String(e);
-  }
 
   const entry = (): AuditEntry => ({
     ts: new Date().toISOString(),
@@ -184,6 +184,14 @@ export async function executePay(
 
     if (config.chainMode === "live" && chain.mode !== "live") {
       throw new Error("CHAIN_MODE=live but adapter is not live");
+    }
+    // Last, and only once everything above passed: read the viewing key.
+    try {
+      viewKeyFingerprint = fingerprintViewKey(await chain.getViewingKey(), config.viewKeyFingerprintSalt);
+      knownFingerprints.set(chain, viewKeyFingerprint);
+    } catch (e) {
+      viewKeyFingerprint = null;
+      viewKeyError = e instanceof Error ? e.message : String(e);
     }
     if (viewKeyFingerprint === null) {
       throw new ViewKeyUnavailable(`Wallet viewing key could not be read, so the payment was not sent: ${viewKeyError}`);
