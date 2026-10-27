@@ -166,7 +166,7 @@ Any tool call over the rate limit is refused before the tool runs:
 |------|---------|
 | `RATE_LIMITED` | More than `RATE_LIMIT_PER_MIN` tool calls this minute in this server process. Nothing was sent or read. Wait and try again. These calls get no audit row each; their count goes into one summary row per minute |
 
-Read-only tools use the same shape. `zcash_history` returns `INVALID_LIMIT` with status `rejected` for a bad `limit`. A wallet read failure is `CHAIN_ERROR`, and a wallet that reports a mainnet address is `MAINNET_REFUSED`.
+Read-only tools use the same shape. `zcash_history` returns `INVALID_LIMIT` with status `rejected` for a bad `limit`. A wallet read failure is `CHAIN_ERROR`, and a wallet that reports a mainnet address is `MAINNET_REFUSED`. `zcash_payment_status` returns `INVALID_LOOKUP` unless exactly one of `call_id` or `idempotency_key` is given, and `PAYMENT_NOT_FOUND` when the audit log has no such call.
 
 ## Read-only tools
 

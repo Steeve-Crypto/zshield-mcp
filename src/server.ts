@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { MockChainAdapter } from "./chain/mock.js";
+import { executePaymentStatus, paymentStatusInputSchema } from "./tools/status.js";
 import { LiveChainAdapter } from "./chain/live.js";
 import type { ChainAdapter } from "./chain/types.js";
 import { loadConfig } from "./config.js";
@@ -102,6 +103,19 @@ export function createServer(config: Config = loadConfig(), chain: ChainAdapter 
     historyInputSchema.shape,
     limited("zcash_history", async (args: Record<string, unknown>) => {
       const result = await executeHistory(historyInputSchema.parse(args), { config, chain });
+      return {
+        content: [{ type: "text" as const, text: result.text }],
+        isError: !result.ok,
+      };
+    })
+  );
+
+  server.tool(
+    "zcash_payment_status",
+    "Read-only. Where a zcash_pay call stands, by call_id or idempotency_key: pending, broadcast, mined (with height and confirmations), expired, failed, or unknown. Never sends. Writes an audit row.",
+    paymentStatusInputSchema.shape,
+    limited("zcash_payment_status", async (args: Record<string, unknown>) => {
+      const result = await executePaymentStatus(paymentStatusInputSchema.parse(args), { config, chain });
       return {
         content: [{ type: "text" as const, text: result.text }],
         isError: !result.ok,

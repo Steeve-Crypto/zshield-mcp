@@ -36,7 +36,7 @@ export const PAY_ERROR_CODES = [
 export const PAY_UNKNOWN_CODES = ["SEND_UNCONFIRMED", "PAYMENT_PENDING"] as const;
 
 /** Read-only tool failures. */
-export const READ_ERROR_CODES = ["INVALID_LIMIT", "MAINNET_REFUSED", "CHAIN_ERROR"] as const;
+export const READ_ERROR_CODES = ["INVALID_LIMIT", "MAINNET_REFUSED", "CHAIN_ERROR", "INVALID_LOOKUP", "PAYMENT_NOT_FOUND"] as const;
 
 /** Any tool: too many calls this minute. Refused before the tool runs. Counted in one summary audit row per window. */
 export const RATE_LIMIT_CODES = ["RATE_LIMITED"] as const;
