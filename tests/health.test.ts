@@ -3,7 +3,7 @@ import { beforeEach, describe, it } from "node:test";
 import { writeFileSync } from "node:fs";
 import { LiveChainAdapter, parseLatestBlockHeight, parseWalletHeight, type CliRunner } from "../src/chain/live.ts";
 import { CliTimeoutError } from "../src/chain/outcome.ts";
-import { resetPaymentIndexes } from "../src/payments/index.ts";
+import { resetPaymentStores as resetPaymentIndexes } from "../src/payments/store.ts";
 import { executePay } from "../src/tools/pay.ts";
 import { MockChainAdapter } from "../src/chain/mock.ts";
 import { ALLOWED, readAuditRows, tempConfig, withUfvk, withEnv } from "./helpers.ts";

@@ -3,18 +3,19 @@ import type { ChainHealth, PaymentReceipt, PaymentRequest, TxSummary, WalletBala
 
 export interface ChainAdapter {
   readonly mode: "mock" | "live";
-  /** Identifies the wallet, so sends from two adapters on one wallet share a lock. */
-  readonly walletId?: string;
-  /** Directory for the wallet lock file shared across processes. Mock adapters have none. */
-  readonly lockDir?: string;
+  /**
+   * The payment store folder for this wallet, absolute, shared by every process on it.
+   * Undefined for a chain with no wallet directory; the store then sits beside the audit dir.
+   */
+  readonly stateDir?: string;
   pay(req: PaymentRequest): Promise<PaymentReceipt>;
   /** Read-only. Never moves funds. */
   getBalance(opts?: { offline?: boolean }): Promise<WalletBalance>;
   /** Read-only. The wallet's current unified address. */
   getReceiveAddress(opts?: { offline?: boolean }): Promise<string>;
   /**
-   * Read-only. Up to `limit` recent transactions, newest first. `offline` reads the
-   * wallet as last synced, without starting a sync.
+   * Read-only. Up to `limit` recent transactions, newest first; `Infinity` for the whole
+   * history. `offline` reads the wallet as last synced, without starting a sync.
    */
   getHistory(limit: number, opts?: { offline?: boolean }): Promise<TxSummary[]>;
   /**

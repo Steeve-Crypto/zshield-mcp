@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, describe, it } from "node:test";
-import { appendAuditEntry } from "../src/audit/log.ts";
 import { MockChainAdapter } from "../src/chain/mock.ts";
-import { paymentIndexFor, paymentParamsHash, resetPaymentIndexes } from "../src/payments/index.ts";
+import { resetPaymentStores, walletStateDir } from "../src/payments/store.ts";
 import { executePay } from "../src/tools/pay.ts";
 import { paymentStatus } from "../src/tools/status.ts";
-import type { Config, PaymentReceipt, PaymentRequest } from "../src/types.ts";
+import type { PaymentReceipt, PaymentRequest } from "../src/types.ts";
 import { ALLOWED, readAuditRows, tempConfig } from "./helpers.ts";
 
-function countingChain() {
-  const chain = new MockChainAdapter();
+/** A mock chain bound to a wallet dir, so two of them share one payment store. */
+function walletChain(walletDir: string) {
+  const chain = new MockChainAdapter({ stateDir: walletStateDir(walletDir) });
   const real = chain.pay.bind(chain);
   const sent: PaymentRequest[] = [];
   chain.pay = async (req: PaymentRequest): Promise<PaymentReceipt> => {
@@ -19,59 +22,58 @@ function countingChain() {
   return { chain, sent };
 }
 
-/** Rows another server process on the same audit log would write for a paid call. */
-function paidElsewhere(config: Config, callId: string, input: { amount_zec: string; recipient: string; memo?: string; idempotency_key: string }) {
-  const base = {
-    tool: "zcash_pay" as const, call_id: callId, amount_zec: input.amount_zec, amount_zats: "100000", recipient: input.recipient,
-    allowlist_hit: true, cap_zec: 0.1, view_key_fingerprint: "fp-other", memo: input.memo, idempotency_key: input.idempotency_key,
-  };
-  appendAuditEntry(config.auditDir, { ...base, ts: new Date().toISOString(), status: "pending", params_sha256: paymentParamsHash(input) });
-  appendAuditEntry(config.auditDir, { ...base, ts: new Date().toISOString(), status: "ok", mock_txid: "mock_other" });
-}
+const wallet = () => mkdtempSync(join(tmpdir(), "zshield-wallet-"));
 
-beforeEach(() => resetPaymentIndexes());
+beforeEach(() => resetPaymentStores());
 
-describe("idempotency keys across server processes on one audit log", () => {
-  it("a key bound by another process after this one loaded its index is replayed, not paid again", async () => {
-    const config = tempConfig();
-    const { chain, sent } = countingChain();
-    paymentIndexFor(config); // This process loaded the log before the other process wrote.
+describe("idempotency keys across server processes on one wallet (V12 F-12)", () => {
+  it("a key bound by a process with a different audit dir is replayed, not paid again", async () => {
+    const w = wallet();
+    const a = walletChain(w);
+    const b = walletChain(w);
     const input = { amount_zec: "0.001", recipient: ALLOWED, idempotency_key: "shared-1" };
-    paidElsewhere(config, "other-call", input);
-    const r = JSON.parse((await executePay(input, { config, chain })).text);
-    assert.equal(sent.length, 0);
+    const first = JSON.parse((await executePay(input, { config: tempConfig(), chain: a.chain })).text);
+    resetPaymentStores(); // the second process starts fresh
+    const configB = tempConfig();
+    const r = JSON.parse((await executePay(input, { config: configB, chain: b.chain })).text);
+    assert.equal(a.sent.length + b.sent.length, 1);
     assert.equal(r.idempotent_replay, true);
-    assert.equal(r.call_id, "other-call");
-    assert.equal(r.txid, "mock_other");
-    assert.equal(readAuditRows(config).at(-1)!.status, "replayed");
+    assert.equal(r.call_id, first.call_id);
+    assert.equal(r.txid, first.txid);
+    assert.equal(readAuditRows(configB).at(-1)!.status, "replayed");
   });
 
   it("different parameters under a key bound elsewhere are IDEMPOTENCY_CONFLICT and send nothing", async () => {
-    const config = tempConfig();
-    const { chain, sent } = countingChain();
-    paymentIndexFor(config);
-    paidElsewhere(config, "other-call", { amount_zec: "0.001", recipient: ALLOWED, idempotency_key: "shared-2" });
-    const r = await executePay({ amount_zec: "0.002", recipient: ALLOWED, idempotency_key: "shared-2" }, { config, chain });
+    const w = wallet();
+    const a = walletChain(w);
+    const b = walletChain(w);
+    await executePay({ amount_zec: "0.001", recipient: ALLOWED, idempotency_key: "shared-2" }, { config: tempConfig(), chain: a.chain });
+    resetPaymentStores();
+    const r = await executePay({ amount_zec: "0.002", recipient: ALLOWED, idempotency_key: "shared-2" }, { config: tempConfig(), chain: b.chain });
     assert.equal(r.code, "IDEMPOTENCY_CONFLICT");
-    assert.equal(sent.length, 0);
+    assert.equal(b.sent.length, 0);
   });
 
-  it("zcash_payment_status finds a call made by another process", async () => {
-    const config = tempConfig();
-    paymentIndexFor(config);
-    paidElsewhere(config, "other-call", { amount_zec: "0.001", recipient: ALLOWED, idempotency_key: "shared-3" });
-    const s = await paymentStatus(config, new MockChainAdapter(), { idempotency_key: "shared-3" });
-    assert.equal(s.call_id, "other-call");
+  it("zcash_payment_status finds a call made by another process with another audit dir", async () => {
+    const w = wallet();
+    const first = JSON.parse(
+      (await executePay({ amount_zec: "0.001", recipient: ALLOWED, idempotency_key: "shared-3" }, { config: tempConfig(), chain: walletChain(w).chain })).text
+    );
+    resetPaymentStores();
+    const s = await paymentStatus(tempConfig(), walletChain(w).chain, { idempotency_key: "shared-3" });
+    assert.equal(s.call_id, first.call_id);
+    const byCall = await paymentStatus(tempConfig(), walletChain(w).chain, { call_id: first.call_id });
+    assert.equal(byCall.txid, first.txid);
   });
 });
 
 describe("replay audit rows", () => {
   it("carry the allowlist hit and view key fingerprint of the first call", async () => {
     const config = tempConfig();
-    const { chain } = countingChain();
+    const { chain } = walletChain(wallet());
     const input = { amount_zec: "0.001", recipient: ALLOWED, idempotency_key: "copy-1" };
     await executePay(input, { config, chain });
-    resetPaymentIndexes(); // A new process, as in the testnet proof.
+    resetPaymentStores(); // A new process, as in the testnet proof.
     await executePay(input, { config, chain });
     const rows = readAuditRows(config);
     const [ok, replay] = [rows[1], rows[2]];

@@ -15,7 +15,7 @@ import {
 } from "../src/chain/live.ts";
 import type { WalletSyncer } from "../src/chain/sync.ts";
 import { WALLET_LOCK_FILE } from "../src/payments/filelock.ts";
-import { resetPaymentIndexes } from "../src/payments/index.ts";
+import { resetPaymentStores as resetPaymentIndexes } from "../src/payments/store.ts";
 import { matchSend } from "../src/tools/pay.ts";
 import { paymentStatus } from "../src/tools/status.ts";
 import { tempConfig } from "./helpers.ts";
@@ -85,7 +85,7 @@ describe("zcash_payment_status syncs first, on real zingo-cli output", () => {
       syncs.push(o.timeoutMs);
       return syncComplete === true ? { complete: true, elapsedMs: 5 } : { complete: false, elapsedMs: o.timeoutMs, detail: `sync did not finish within ${o.timeoutMs} ms` };
     };
-    const chain = new LiveChainAdapter({ network: "testnet", dataDir: dir, lockDir: dir, runner, syncer });
+    const chain = new LiveChainAdapter({ network: "testnet", dataDir: dir, stateDir: dir, runner, syncer });
     return { config, chain, calls, syncs };
   }
 

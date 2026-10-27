@@ -6,6 +6,8 @@ import type { ChainHealth, OutgoingNote, PaymentReceipt, PaymentRequest, TxSumma
 import { assertTestnetAddress, NetworkError } from "./network.js";
 import { ChainUnreachableError, CliTimeoutError, SendOutcomeUnknownError } from "./outcome.js";
 import { defaultSyncer, type SyncResult, type WalletSyncer } from "./sync.js";
+import { displayUrl, redact, registerServerUrl } from "../redact.js";
+import { walletStateDir } from "../payments/store.js";
 
 /** Used when a test injects a runner and no syncer: no process is started. */
 const skipSync: WalletSyncer = async () => ({ complete: true, elapsedMs: 0 });
@@ -33,35 +35,76 @@ export const DEFAULT_READ_TIMEOUT_MS = 120_000;
 
 /** Default limit for each zingo-cli run in the pre-send check. */
 export const DEFAULT_HEALTH_TIMEOUT_MS = 30_000;
-
-export function healthTimeoutMs(): number {
-  const v = Number(process.env.ZINGO_HEALTH_TIMEOUT_MS);
-  return Number.isFinite(v) && v > 0 ? v : DEFAULT_HEALTH_TIMEOUT_MS;
-}
-
 /** Default limit for the bounded sync before a status answer or recovery. */
 export const DEFAULT_STATUS_SYNC_TIMEOUT_MS = 90_000;
 /** Default limit for the bounded sync before the pre-send funds check. */
 export const DEFAULT_HEALTH_SYNC_TIMEOUT_MS = 90_000;
 
-function envMs(name: string, fallback: number): number {
-  const v = Number(process.env[name]);
-  return Number.isFinite(v) && v >= 0 ? v : fallback;
+/**
+ * Every timeout setting, with its default and allowed range in milliseconds. A value out
+ * of range stops the server at startup (validateTimeouts); the getters clamp as well, so
+ * no setting can make a wait unbounded.
+ */
+export const TIMEOUT_SETTINGS = {
+  ZINGO_HEALTH_TIMEOUT_MS: { def: DEFAULT_HEALTH_TIMEOUT_MS, min: 1, max: 300_000 },
+  ZINGO_READ_TIMEOUT_MS: { def: DEFAULT_READ_TIMEOUT_MS, min: 1, max: 600_000 },
+  STATUS_SYNC_TIMEOUT_MS: { def: DEFAULT_STATUS_SYNC_TIMEOUT_MS, min: 0, max: 600_000 },
+  HEALTH_SYNC_TIMEOUT_MS: { def: DEFAULT_HEALTH_SYNC_TIMEOUT_MS, min: 0, max: 600_000 },
+} as const;
+type TimeoutName = keyof typeof TIMEOUT_SETTINGS;
+
+function boundedMs(name: TimeoutName, env: NodeJS.ProcessEnv = process.env): number {
+  const { def, min, max } = TIMEOUT_SETTINGS[name];
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === "") return def;
+  const v = Number(raw);
+  if (!Number.isFinite(v) || v < min) return def;
+  return Math.min(Math.floor(v), max);
+}
+
+/** Throws when a timeout setting is not a whole number in its range. Called at startup. */
+export function validateTimeouts(env: NodeJS.ProcessEnv = process.env): void {
+  for (const [name, { min, max }] of Object.entries(TIMEOUT_SETTINGS)) {
+    const raw = env[name];
+    if (raw === undefined || raw.trim() === "") continue;
+    if (!/^\d+$/.test(raw.trim()) || Number(raw) < min || Number(raw) > max) {
+      throw new Error(`${name} must be a whole number of milliseconds from ${min} to ${max}.`);
+    }
+  }
+}
+
+export function healthTimeoutMs(): number {
+  return boundedMs("ZINGO_HEALTH_TIMEOUT_MS");
 }
 
 /** STATUS_SYNC_TIMEOUT_MS: how long zcash_payment_status and recovery sync first. 0 skips it. */
 export function statusSyncTimeoutMs(): number {
-  return envMs("STATUS_SYNC_TIMEOUT_MS", DEFAULT_STATUS_SYNC_TIMEOUT_MS);
+  return boundedMs("STATUS_SYNC_TIMEOUT_MS");
 }
 
 /** HEALTH_SYNC_TIMEOUT_MS: how long a live send syncs before checking funds. 0 skips it. */
 export function healthSyncTimeoutMs(): number {
-  return envMs("HEALTH_SYNC_TIMEOUT_MS", DEFAULT_HEALTH_SYNC_TIMEOUT_MS);
+  return boundedMs("HEALTH_SYNC_TIMEOUT_MS");
 }
 
 export function readTimeoutMs(): number {
-  const v = Number(process.env.ZINGO_READ_TIMEOUT_MS);
-  return Number.isFinite(v) && v > 0 ? v : DEFAULT_READ_TIMEOUT_MS;
+  return boundedMs("ZINGO_READ_TIMEOUT_MS");
+}
+
+/**
+ * Wrap a runner so nothing that comes back from zingo-cli, output or error, carries a
+ * registered secret such as credentials in the server URL. zingo-cli prints the server
+ * URI in some messages.
+ */
+export function redactingRunner(runner: CliRunner): CliRunner {
+  return async (bin, args, opts) => {
+    try {
+      return redact(await runner(bin, args, opts));
+    } catch (e) {
+      if (e instanceof Error) e.message = redact(e.message);
+      throw e;
+    }
+  };
 }
 
 export const defaultRunner: CliRunner = (bin, args, opts = {}) =>
@@ -135,8 +178,11 @@ export interface LiveOptions {
    * passes its own runner without a syncer: then sync is skipped and reported complete.
    */
   syncer?: WalletSyncer;
-  /** Directory for the wallet lock file. Defaults to the wallet directory, or none for a test runner. */
-  lockDir?: string;
+  /**
+   * The payment store folder. Defaults to .zshield-state inside the wallet directory, or
+   * none for a test adapter built with a runner, which then uses one beside its audit dir.
+   */
+  stateDir?: string;
   /** Clock for the export_ufvk backoff. Tests pass a fake one. */
   now?: () => number;
 }
@@ -154,14 +200,8 @@ export class LiveChainAdapter implements ChainAdapter {
   readonly mode = "live" as const;
   readonly bin: string;
   readonly dataDir: string;
-  get walletId(): string {
-    return `live:${this.dataDir}`;
-  }
-  /**
-   * Where the wallet lock file lives: beside the wallet, so every process on it shares
-   * one. Undefined only for test adapters built with a runner and no lockDir.
-   */
-  readonly lockDir?: string;
+  /** The payment store, inside the wallet directory, shared by every process on the wallet. */
+  readonly stateDir?: string;
   readonly server: string;
   private readonly runner: CliRunner;
   private readonly syncer: WalletSyncer;
@@ -179,9 +219,10 @@ export class LiveChainAdapter implements ChainAdapter {
     this.bin = opts.zingoBin ?? "zingo-cli";
     this.dataDir = resolveWalletDir(opts.dataDir);
     this.server = opts.server ?? "https://testnet.zec.rocks:443";
-    this.runner = opts.runner ?? defaultRunner;
+    registerServerUrl(this.server);
+    this.runner = redactingRunner(opts.runner ?? defaultRunner);
     this.syncer = opts.syncer ?? (opts.runner ? skipSync : defaultSyncer);
-    this.lockDir = opts.lockDir ?? (opts.runner ? undefined : this.dataDir);
+    this.stateDir = opts.stateDir ?? (opts.runner ? undefined : walletStateDir(this.dataDir));
     this.now = opts.now ?? Date.now;
   }
 
@@ -218,9 +259,10 @@ export class LiveChainAdapter implements ChainAdapter {
     if (timeoutMs <= 0) return { complete: false, elapsedMs: 0, detail: "sync skipped (timeout is 0)" };
     const args = ["--chain", "testnet", "--server", this.server, "--data-dir", this.dataDir];
     try {
-      return await this.syncer(this.bin, args, { timeoutMs });
+      const r = await this.syncer(this.bin, args, { timeoutMs });
+      return r.detail ? { ...r, detail: redact(r.detail) } : r;
     } catch (e) {
-      return { complete: false, elapsedMs: 0, detail: e instanceof Error ? e.message : String(e) };
+      return { complete: false, elapsedMs: 0, detail: redact(e instanceof Error ? e.message : String(e)) };
     }
   }
 
@@ -249,7 +291,7 @@ export class LiveChainAdapter implements ChainAdapter {
       chainTip = parseLatestBlockHeight(await this.runner(this.bin, args, { timeoutMs }));
     } catch (e) {
       throw new ChainUnreachableError(
-        `lightwalletd at ${this.server} did not report the chain tip: ${e instanceof Error ? e.message : String(e)}`
+        `lightwalletd at ${displayUrl(this.server)} did not report the chain tip: ${redact(e instanceof Error ? e.message : String(e))}`
       );
     }
     const walletHeight = parseWalletHeight(await this.runner(this.bin, this.offline("height"), { timeoutMs }));
@@ -268,8 +310,9 @@ export class LiveChainAdapter implements ChainAdapter {
   }
 
   /**
-   * Read-only: runs `transactions` and returns the newest `limit` entries. With
-   * `offline`, reads the wallet file as last synced and starts no sync of its own.
+   * Read-only: runs `transactions` and returns the newest `limit` entries. zingo-cli
+   * prints the whole wallet history, so `Infinity` returns all of it. With `offline`,
+   * reads the wallet file as last synced and starts no sync of its own.
    */
   async getHistory(limit: number, opts: { offline?: boolean } = {}): Promise<TxSummary[]> {
     const args = opts.offline ? this.offline("transactions") : [...this.baseArgs(), "transactions"];

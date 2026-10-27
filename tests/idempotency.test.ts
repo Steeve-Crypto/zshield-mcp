@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 import { MockChainAdapter } from "../src/chain/mock.ts";
-import { resetPaymentIndexes } from "../src/payments/index.ts";
+import { resetPaymentStores as resetPaymentIndexes } from "../src/payments/store.ts";
 import { executePay } from "../src/tools/pay.ts";
 import type { PaymentReceipt, PaymentRequest } from "../src/types.ts";
 import { ALLOWED, connect, readAuditRows, tempConfig, textOf } from "./helpers.ts";

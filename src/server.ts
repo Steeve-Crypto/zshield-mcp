@@ -11,6 +11,10 @@ import { executeHistory, historyInputSchema, HISTORY_MAX_LIMIT } from "./tools/h
 import { describePolicy, POLICY_URI } from "./policy/describe.js";
 import { RATE_LIMITED_MESSAGE, RateLimiter, RATE_LIMIT_DEFAULT_PER_MIN } from "./policy/rate.js";
 import type { Config } from "./types.js";
+import { homedir } from "node:os";
+import { fallbackAuditPath } from "./audit/log.js";
+import { redact, registerRedaction, registerServerUrl } from "./redact.js";
+import { resolveStateDir, walletStateDir } from "./payments/store.js";
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError: boolean };
 
@@ -36,10 +40,30 @@ export function createChain(config: Config): ChainAdapter {
         dataDir: config.zingoDataDir,
         server: config.lightwalletd,
       })
-    : new MockChainAdapter();
+    : new MockChainAdapter({ stateDir: config.zingoDataDir ? walletStateDir(config.zingoDataDir) : undefined });
+}
+
+/**
+ * Register every local path and the server URL for redaction, so no response, log line,
+ * or audit row shows them. Longer paths win, so the home folder only covers the rest.
+ */
+export function registerRedactions(config: Config, chain?: ChainAdapter): void {
+  registerServerUrl(config.lightwalletd);
+  registerRedaction(config.auditDir, "[audit dir]");
+  registerRedaction(fallbackAuditPath(config.auditDir, config.auditFallbackPath), "[audit fallback]");
+  registerRedaction(config.allowlistPath, "[allowlist]");
+  registerRedaction(config.zingoDataDir, "[wallet dir]");
+  if (chain) registerRedaction(resolveStateDir(config, chain), "[state dir]");
+  const home = homedir();
+  if (home && home !== "/" && home.length >= 4) registerRedaction(home, "~");
+}
+
+function redactResult(r: ToolResult): ToolResult {
+  return { ...r, content: r.content.map((c) => ({ ...c, text: redact(c.text) })) };
 }
 
 export function createServer(config: Config = loadConfig(), chain: ChainAdapter = createChain(config)): McpServer {
+  registerRedactions(config, chain);
   const limiter = new RateLimiter(
     config.rateLimitPerMin ?? RATE_LIMIT_DEFAULT_PER_MIN,
     config.auditDir,
@@ -47,11 +71,12 @@ export function createServer(config: Config = loadConfig(), chain: ChainAdapter 
     undefined,
     config.auditFallbackPath
   );
-  // Every tool call passes the rate limit first. A refused call never reaches the tool.
+  // Every tool call and resource read passes the rate limit first. A refused call never
+  // reaches the tool. Every answer is redacted on the way out.
   const limited =
     <A extends unknown[]>(tool: string, fn: (...args: A) => Promise<ToolResult>) =>
     async (...args: A): Promise<ToolResult> =>
-      limiter.take(tool) ? fn(...args) : rateLimitedResult();
+      redactResult(limiter.take(tool) ? await fn(...args) : rateLimitedResult());
   const server = new McpServer({
     name: "zshield-mcp",
     version: "0.1.0",
@@ -128,7 +153,9 @@ export function createServer(config: Config = loadConfig(), chain: ChainAdapter 
       {
         uri: POLICY_URI,
         mimeType: "application/json",
-        text: JSON.stringify(describePolicy(config), null, 2),
+        text: redact(
+          limiter.take("policy_resource") ? JSON.stringify(describePolicy(config), null, 2) : rateLimitedResult().content[0].text
+        ),
       },
     ],
   }));

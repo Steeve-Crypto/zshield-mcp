@@ -8,11 +8,49 @@ import {
   type IcaclsRunner,
 } from "./chain/winacl.js";
 import type { Config } from "./types.js";
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
+import { fallbackAuditPath } from "./audit/log.js";
+import { checkPrivateFile, ensurePrivateDir } from "./fsafe.js";
+import { resolveStateDir, walletStateDir } from "./payments/store.js";
 
 export interface StartupDeps {
   icacls?: IcaclsRunner;
   env?: NodeJS.ProcessEnv;
   harden?: AclHardener;
+  /** The payment store folder; defaults to the one createChain gives the chain. */
+  stateDir?: string;
+}
+
+/** The payment store folder the server will use for this config. */
+export function stateDirFor(config: Config): string {
+  if (config.chainMode === "live") return walletStateDir(resolveWalletDir(config.zingoDataDir));
+  return resolveStateDir(config, { stateDir: config.zingoDataDir ? walletStateDir(config.zingoDataDir) : undefined });
+}
+
+/**
+ * The audit dir, the audit fallback file, and the payment store hold recipients, memos,
+ * and payment state. On POSIX: create them private, refuse a symlink or another owner
+ * (for the dirs and every file in them), and repair loose modes, returning a note for each
+ * repair. Windows has no modes; the ACL is checked in testnet mode instead.
+ */
+export function checkRecordPaths(config: Config, stateDir: string, platform: string = process.platform): string[] {
+  if (platform === "win32") return [];
+  const notes: string[] = [];
+  const note = (n: string | undefined) => {
+    if (n) notes.push(`zshield-mcp: repaired permissions: ${n}`);
+  };
+  for (const dir of [config.auditDir, stateDir]) {
+    note(ensurePrivateDir(dir));
+  }
+  for (const name of readdirSync(config.auditDir)) {
+    if (name.endsWith(".jsonl")) note(checkPrivateFile(join(config.auditDir, name)));
+  }
+  note(checkPrivateFile(fallbackAuditPath(config.auditDir, config.auditFallbackPath)));
+  for (const sub of ["keys", "calls", "pending", "txids"]) note(ensurePrivateDir(join(stateDir, sub)));
+  note(checkPrivateFile(join(stateDir, "wallet.lock")));
+  note(checkPrivateFile(join(stateDir, "meta.json")));
+  return notes;
 }
 
 /**
@@ -23,21 +61,38 @@ export interface StartupDeps {
  * icacls instead. Mock mode has no wallet to check.
  */
 export function startupChecks(config: Config, platform: string = process.platform, deps: StartupDeps = {}): string[] {
-  if (config.chainMode !== "live") return [];
+  if (config.chainMode !== "live") {
+    return checkRecordPaths(config, deps.stateDir ?? stateDirFor(config), platform);
+  }
   if (config.chainNetwork !== "testnet") {
     throw new Error("zshield-mcp: live mode requires CHAIN_MODE=testnet. Mainnet is refused.");
   }
   const dataDir = resolveWalletDir(config.zingoDataDir);
+  const stateDir = deps.stateDir ?? walletStateDir(dataDir);
   if (platform === "win32") {
-    // POSIX modes mean nothing on Windows; check the ACL instead.
-    return assertWindowsWalletPrivate(
-      dataDir,
-      deps.icacls ?? defaultIcacls,
-      deps.env ?? process.env,
-      deps.harden ?? defaultHardener
-    );
+    // POSIX modes mean nothing on Windows; check the ACLs instead: the wallet, then the
+    // audit dir and the payment store, which name recipients and amounts.
+    const icacls = deps.icacls ?? defaultIcacls;
+    const env = deps.env ?? process.env;
+    const harden = deps.harden ?? defaultHardener;
+    const warnings = assertWindowsWalletPrivate(dataDir, icacls, env, harden);
+    warnings.push(...assertWindowsWalletPrivate(config.auditDir, icacls, env, harden, "The audit log names recipients and amounts"));
+    warnings.push(...assertWindowsWalletPrivate(stateDir, icacls, env, harden, "The payment store names recipients and amounts"));
+    return warnings;
   }
-  return assertWalletPrivate(dataDir, platform);
+  const warnings = assertWalletPrivate(dataDir, platform);
+  warnings.push(...checkRecordPaths(config, stateDir, platform));
+  return warnings;
+}
+
+/**
+ * Everything that runs before the server takes a call: the checks above, then the umask.
+ * index.ts calls this; a throw stops the process.
+ */
+export function runStartup(config: Config, platform: string = process.platform, deps: StartupDeps = {}): string[] {
+  const warnings = startupChecks(config, platform, deps);
+  restrictUmask(config, platform);
+  return warnings;
 }
 
 /**

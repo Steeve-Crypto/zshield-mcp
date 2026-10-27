@@ -9,8 +9,17 @@ import { boundAuditEntry } from "../audit/log.js";
 import { MAX_AMOUNT_LENGTH } from "../policy/amount.js";
 import { addressNetwork } from "../chain/network.js";
 import type { PayCode } from "../errors.js";
-import { acquireWalletLock, BusyError, SEND_QUEUE_WAIT_DEFAULT_MS } from "../payments/lock.js";
-import { paymentIndexFor, paymentParamsHash, type PaymentRecord } from "../payments/index.js";
+import { acquireWalletLock, BusyError, SEND_QUEUE_WAIT_DEFAULT_MS, type WalletLock } from "../payments/lock.js";
+import { LeaseLostError } from "../payments/filelock.js";
+import {
+  paymentParamsHash,
+  rememberRefusal,
+  storeFor,
+  type CallIntent,
+  type CallRecord,
+  type CallState,
+  type PaymentStore,
+} from "../payments/store.js";
 import { ChainUnreachableError, SendOutcomeUnknownError } from "../chain/outcome.js";
 import type { AuditEntry, ChainHealth, Config, MatchConfidence, PayStatus, PossibleSend, TxSummary } from "../types.js";
 
@@ -33,10 +42,14 @@ class ViewKeyUnavailable extends Error {}
 
 /** Shown with SEND_UNCONFIRMED so a client does not retry blindly. */
 export const SEND_UNCONFIRMED_GUIDANCE =
-  "The payment may have been broadcast. Do not retry with a new idempotency key. Call zcash_payment_status with this call_id; pay again only if it reports expired.";
+  "The payment may have been broadcast. Do not pay again. Call zcash_payment_status with this call_id; it reports expired only once the wallet proves the payment was never sent.";
 
-/** How far back a history entry may be and still count as a match for an unknown send. */
-export const MATCH_WINDOW_MS = 30 * 60_000;
+/** Clock skew allowed between this host and a wallet entry's time, before the call started. */
+export const MATCH_SKEW_MS = 5 * 60_000;
+/** How long after the call started a wallet entry can still be its send. */
+export const MATCH_AFTER_MS = 3 * 60 * 60_000;
+/** Kept for callers of the old name: the skew before the start. */
+export const MATCH_WINDOW_MS = MATCH_SKEW_MS;
 
 export interface SendTarget {
   amountZats: bigint;
@@ -49,7 +62,7 @@ export interface SendTarget {
  * with an outgoing note to the same recipient for the same amount, and the same memo when
  * one was given. Amount alone never matches. Confidence is high when the memo matched too,
  * medium when no memo was given, and one step lower when the entry has no time yet.
- * Entries older than the window before `startedAt` never match.
+ * An entry from before the call started (beyond clock skew), or long after it, never matches.
  */
 export function matchSend(t: TxSummary, target: SendTarget, startedAt: number): PossibleSend | undefined {
   if (!/sent/i.test(t.kind) || t.status === "failed") return undefined;
@@ -63,7 +76,7 @@ export function matchSend(t: TxSummary, target: SendTarget, startedAt: number): 
   const ms = t.time ? Date.parse(t.time) : NaN;
   if (Number.isNaN(ms)) {
     confidence = confidence === "high" ? "medium" : "low";
-  } else if (ms < startedAt - MATCH_WINDOW_MS) {
+  } else if (ms < startedAt - MATCH_SKEW_MS || ms > startedAt + MATCH_AFTER_MS) {
     return undefined;
   } else {
     matched.push("time");
@@ -72,18 +85,40 @@ export function matchSend(t: TxSummary, target: SendTarget, startedAt: number): 
 }
 
 /**
- * After an unknown send, look in recent wallet history for the send. Best effort: a failed
- * lookup returns an empty list and never changes the outcome.
+ * Every entry in `txs` that matches the send, skipping txids already credited to another
+ * call (`claimedBy` returns that call's id).
  */
-export async function findPossibleSends(chain: ChainAdapter, target: SendTarget, startedAt: number): Promise<PossibleSend[]> {
+export function matchHistory(
+  txs: TxSummary[],
+  target: SendTarget,
+  startedAt: number,
+  claimedBy?: (txid: string) => string | undefined,
+  callId?: string
+): PossibleSend[] {
+  const out: PossibleSend[] = [];
+  for (const t of txs) {
+    const m = matchSend(t, target, startedAt);
+    if (!m) continue;
+    const owner = claimedBy?.(t.txid);
+    if (owner && owner !== callId) continue;
+    out.push(m);
+  }
+  return out;
+}
+
+/**
+ * After an unknown send, look in the whole wallet history for the send. Best effort: a
+ * failed lookup returns an empty list and never changes the outcome.
+ */
+export async function findPossibleSends(
+  chain: ChainAdapter,
+  target: SendTarget,
+  startedAt: number,
+  claimedBy?: (txid: string) => string | undefined,
+  callId?: string
+): Promise<PossibleSend[]> {
   try {
-    const txs = await chain.getHistory(20);
-    const out: PossibleSend[] = [];
-    for (const t of txs) {
-      const m = matchSend(t, target, startedAt);
-      if (m) out.push(m);
-    }
-    return out;
+    return matchHistory(await chain.getHistory(Infinity), target, startedAt, claimedBy, callId);
   } catch {
     return [];
   }
@@ -180,6 +215,19 @@ export async function preSendProblem(
 /** Fingerprint of each adapter's wallet once read, so refused calls can carry it without running zingo-cli. */
 const knownFingerprints = new WeakMap<ChainAdapter, string>();
 
+/**
+ * Keys held by a call in flight in this process, before the key is bound on disk (the
+ * health check runs first). A second call with the key waits for nothing: it reports
+ * pending or conflict. Scoped by store, so two wallets never share a key.
+ */
+const inFlight = new Map<string, { callId: string; paramsSha256: string }>();
+const flightKey = (store: PaymentStore, key: string) => `${store.dir}\u0000${key}`;
+
+/** The in-flight call holding `key` in this process, if any. For zcash_payment_status. */
+export function inFlightCall(store: PaymentStore, key: string): string | undefined {
+  return inFlight.get(flightKey(store, key))?.callId;
+}
+
 export interface PayDeps {
   config: Config;
   chain: ChainAdapter;
@@ -193,41 +241,64 @@ export interface PayResult {
   auditWarning?: string;
 }
 
+const KEY_PROBLEM = `idempotency_key must be 1 to ${MAX_IDEMPOTENCY_KEY_LENGTH} letters, digits, dot, underscore, colon, or dash`;
+
 /**
  * zcash_pay. With an idempotency key: a key already bound to the same parameters returns
  * that call's outcome, or its pending status, and sends nothing. A key bound to different
- * parameters is refused with IDEMPOTENCY_CONFLICT. A new key is reserved for this call and
- * bound for good once the pending row is written.
+ * parameters is refused with IDEMPOTENCY_CONFLICT. A new key is bound, exclusively, in
+ * the wallet's payment store before the broadcast; only one call can ever win it.
  */
 export async function executePay(input: PayInput, deps: PayDeps): Promise<PayResult> {
   const callId = randomUUID();
   const key = input.idempotency_key;
-  if (key === undefined) return runPay(input, deps, callId, {});
-  if (!IDEMPOTENCY_KEY_PATTERN.test(key)) {
+  if (key !== undefined && !IDEMPOTENCY_KEY_PATTERN.test(key)) {
     // Direct callers skip the schema; refuse the same way.
-    return refuseKey(input, deps, callId, "INVALID_IDEMPOTENCY_KEY", `idempotency_key must be 1 to ${MAX_IDEMPOTENCY_KEY_LENGTH} letters, digits, dot, underscore, colon, or dash`);
+    return refuseKey(input, deps, callId, "INVALID_IDEMPOTENCY_KEY", KEY_PROBLEM);
   }
-  const index = paymentIndexFor(deps.config);
-  const paramsSha256 = paymentParamsHash(input);
-  const prior = index.byIdempotencyKey(key);
-  if (prior) {
-    if (prior.paramsSha256 !== paramsSha256) {
-      return refuseKey(
-        input,
-        deps,
-        callId,
-        "IDEMPOTENCY_CONFLICT",
-        `idempotency_key was already used by call ${prior.callId} with different parameters. Nothing was sent.`
-      );
-    }
-    return replay(input, deps, callId, prior.callId, prior.record);
-  }
-  index.reserve(key, callId, paramsSha256);
+  let store: PaymentStore;
   try {
-    return await runPay(input, deps, callId, { idempotency_key: key, params_sha256: paramsSha256 });
-  } finally {
-    index.release(key, callId);
+    store = storeFor(deps.config, deps.chain);
+  } catch (e) {
+    const message = `The payment store could not be opened: ${e instanceof Error ? e.message : String(e)}. Nothing was sent.`;
+    return refuseKey(input, deps, callId, "STATE_WRITE_FAILED", message, "error");
   }
+  if (key === undefined) return runPay(input, deps, store, callId, {});
+  const paramsSha256 = paymentParamsHash(input);
+  const early = priorUse(input, deps, store, callId, key, paramsSha256);
+  if (early) return early;
+  const slot = flightKey(store, key);
+  inFlight.set(slot, { callId, paramsSha256 });
+  try {
+    return await runPay(input, deps, store, callId, { idempotency_key: key, params_sha256: paramsSha256 });
+  } finally {
+    if (inFlight.get(slot)?.callId === callId) inFlight.delete(slot);
+  }
+}
+
+/** A replay or a conflict when the key is bound on disk or held by a call in flight here. */
+function priorUse(
+  input: PayInput,
+  deps: PayDeps,
+  store: PaymentStore,
+  callId: string,
+  key: string,
+  paramsSha256: string
+): PayResult | undefined {
+  const bound = store.readKey(key);
+  const flying = inFlight.get(flightKey(store, key));
+  const other = bound ? { callId: bound.call_id, paramsSha256: bound.params_sha256 } : flying && flying.callId !== callId ? flying : undefined;
+  if (!other) return undefined;
+  if (other.paramsSha256 !== paramsSha256) {
+    return refuseKey(
+      input,
+      deps,
+      callId,
+      "IDEMPOTENCY_CONFLICT",
+      `idempotency_key was already used by call ${other.callId} with different parameters. Nothing was sent.`
+    );
+  }
+  return replay(input, deps, callId, other.callId, store.readCall(other.callId));
 }
 
 function baseRow(input: PayInput, config: Config, callId: string): AuditEntry {
@@ -245,28 +316,35 @@ function baseRow(input: PayInput, config: Config, callId: string): AuditEntry {
   };
 }
 
-/** Write a row for a call that ends without touching policy or the chain. Never throws. */
+/** Write a row for a call that ends without touching the chain. Never throws. */
 function finish(config: Config, row: AuditEntry): { audit: AuditEntry; auditWarning?: string } {
   const audit = boundAuditEntry(row);
   const written = writeAuditRow(config, audit);
-  paymentIndexFor(config).record(audit as unknown as Record<string, unknown>);
   return { audit, auditWarning: written.warning };
 }
 
-function refuseKey(input: PayInput, deps: PayDeps, callId: string, code: PayCode, message: string): PayResult {
+function refuseKey(
+  input: PayInput,
+  deps: PayDeps,
+  callId: string,
+  code: PayCode,
+  message: string,
+  status: "rejected" | "error" = "rejected"
+): PayResult {
   const { audit, auditWarning } = finish(deps.config, {
     ...baseRow(input, deps.config, callId),
-    status: "rejected",
+    status,
     code,
     error: message,
     // Only a hash of an invalid key, so an oversized one stays out of the log.
     idempotency_key: code === "INVALID_IDEMPOTENCY_KEY" ? undefined : input.idempotency_key,
   });
+  rememberRefusal(callId, { code, error: message, idempotency_key: code === "INVALID_IDEMPOTENCY_KEY" ? undefined : input.idempotency_key });
   return {
     ok: false,
     code,
     text: JSON.stringify(
-      { ok: false, status: "rejected", code, message, error: message, call_id: callId, audit, audit_warning: auditWarning },
+      { ok: false, status, code, message, error: message, call_id: callId, audit, audit_warning: auditWarning },
       null,
       2
     ),
@@ -275,92 +353,84 @@ function refuseKey(input: PayInput, deps: PayDeps, callId: string, code: PayCode
   };
 }
 
-/** Same key, same parameters: report the first call's outcome. Nothing is sent. */
-function replay(input: PayInput, deps: PayDeps, callId: string, originalCallId: string, record?: PaymentRecord): PayResult {
+/** What a caller is told about a call in each state, for a replay. */
+const PENDING_MESSAGE =
+  "A payment with this idempotency key was started and has no recorded result yet. It was not sent again. Call zcash_payment_status with this idempotency_key.";
+const EXPIRED_MESSAGE =
+  "The first payment with this idempotency key was proven never sent: the wallet scanned past its expiry height and found no matching transaction. Use a new idempotency key to pay.";
+
+/** Same key, same parameters: report the first call's outcome from the store. Nothing is sent. */
+function replay(input: PayInput, deps: PayDeps, callId: string, originalCallId: string, record?: CallRecord): PayResult {
   const { config } = deps;
-  const result = record?.result;
-  // Copy what the first call learned, so the replay row is not read as a refused call.
-  const first = result ?? record?.intent;
+  const intent = record?.intent;
   const { audit, auditWarning } = finish(config, {
     ...baseRow(input, config, callId),
-    allowlist_hit: first?.allowlist_hit ?? false,
-    view_key_fingerprint: first?.view_key_fingerprint ?? null,
+    allowlist_hit: intent?.allowlist_hit ?? false,
+    view_key_fingerprint: intent?.view_key_fingerprint ?? null,
     status: "replayed",
     idempotency_key: input.idempotency_key,
     replay_of: originalCallId,
   });
   const common = { call_id: originalCallId, idempotency_key: input.idempotency_key, idempotent_replay: true };
-  if (result?.status === "ok") {
-    return {
-      ok: true,
-      audit,
-      auditWarning,
-      text: JSON.stringify(
-        {
-          ok: true,
-          status: "ok",
-          ...common,
-          txid: result.mock_txid,
-          amount_zec: result.amount_zec,
-          amount_zats: result.amount_zats,
-          recipient: result.recipient,
-          mode: config.chainMode,
-          view_key_fingerprint: result.view_key_fingerprint,
-          audit_warning: auditWarning,
-        },
-        null,
-        2
-      ),
-    };
-  }
-  if (result) {
-    const code = result.code as PayCode | undefined;
-    return {
-      ok: false,
-      code,
-      audit,
-      auditWarning,
-      text: JSON.stringify(
-        {
-          ok: false,
-          status: result.status,
-          code,
-          message: result.error,
-          error: result.error,
-          ...common,
-          possible_txids: result.possible_txids,
-          possible_sends: result.possible_sends,
-          audit_warning: auditWarning,
-        },
-        null,
-        2
-      ),
-    };
-  }
-  // In flight in this process, or a pending row with no result (the process stopped mid-send).
-  const message =
-    "A payment with this idempotency key was started and has no recorded result yet. It was not sent again. Call zcash_payment_status with this idempotency_key.";
-  return {
-    ok: false,
-    code: "PAYMENT_PENDING",
+  const state: CallState = record?.state ?? "pending";
+  const respond = (ok: boolean, body: Record<string, unknown>, code?: PayCode): PayResult => ({
+    ok,
+    code,
     audit,
     auditWarning,
-    text: JSON.stringify(
-      { ok: false, status: "pending", code: "PAYMENT_PENDING", message, error: message, ...common, audit_warning: auditWarning },
-      null,
-      2
-    ),
-  };
+    text: JSON.stringify({ ok, ...body, ...common, audit_warning: auditWarning }, null, 2),
+  });
+  if ((state === "sent" || state === "mined") && record?.txid) {
+    return respond(true, {
+      status: "ok",
+      txid: record.txid,
+      amount_zec: intent?.amount_zec,
+      amount_zats: intent?.amount_zats,
+      recipient: intent?.recipient,
+      mode: config.chainMode,
+      view_key_fingerprint: intent?.view_key_fingerprint,
+      confirmed: state === "mined" ? true : undefined,
+      block_height: record.blockHeight,
+    });
+  }
+  const top = record?.top;
+  if (state === "not_sent") {
+    const code = (top?.code as PayCode | undefined) ?? "CHAIN_ERROR";
+    return respond(false, { status: top?.code && isRejectCode(top.code) ? "rejected" : "error", code, message: top?.error, error: top?.error }, code);
+  }
+  if (state === "expired") {
+    return respond(false, { status: "expired", code: "PAYMENT_EXPIRED", message: EXPIRED_MESSAGE, error: EXPIRED_MESSAGE }, "PAYMENT_EXPIRED");
+  }
+  if (state === "unknown") {
+    const message = top?.error ?? SEND_UNCONFIRMED_GUIDANCE;
+    return respond(
+      false,
+      {
+        status: "unknown",
+        code: "SEND_UNCONFIRMED",
+        message,
+        error: message,
+        possible_txids: top?.possible_sends?.map((p) => p.txid),
+        possible_sends: top?.possible_sends,
+      },
+      "SEND_UNCONFIRMED"
+    );
+  }
+  return respond(false, { status: "pending", code: "PAYMENT_PENDING", message: PENDING_MESSAGE, error: PENDING_MESSAGE }, "PAYMENT_PENDING");
+}
+
+function isRejectCode(code: string): boolean {
+  return code === "IDEMPOTENCY_CONFLICT";
 }
 
 async function runPay(
   input: PayInput,
   deps: PayDeps,
+  store: PaymentStore,
   callId: string,
   keyFields: Pick<AuditEntry, "idempotency_key" | "params_sha256">
 ): Promise<PayResult> {
   const { config, chain } = deps;
-  const index = paymentIndexFor(config);
   const startedAt = Date.now();
   let allowlistHit = false;
   let possibleSends: PossibleSend[] | undefined;
@@ -375,6 +445,7 @@ async function runPay(
   // Rows for calls refused before that use the fingerprint from an earlier call, if any.
   let viewKeyFingerprint: string | null = knownFingerprints.get(chain) ?? null;
   let viewKeyError: string | undefined;
+  let chainTip: number | undefined;
 
   const entry = (): AuditEntry => ({
     ts: new Date().toISOString(),
@@ -394,10 +465,15 @@ async function runPay(
     possible_txids: possibleSends?.map((p) => p.txid),
     possible_sends: possibleSends,
     ...keyFields,
+    chain_tip: chainTip,
   });
+  const fail = (s: PayStatus, c: PayCode, message: string) => {
+    status = s;
+    code = c;
+    error = message;
+  };
 
   let policyPassed = false;
-  let intentWriteFailed = false;
   const warnings: string[] = [];
   try {
     // Bound caller strings first. The schema enforces the same limits for MCP calls; this
@@ -426,113 +502,166 @@ async function runPay(
     }
     policyPassed = true;
   } catch (e) {
-    if (e instanceof PolicyError) {
-      status = "rejected";
-      code = e.code;
-    } else if (e instanceof ViewKeyUnavailable) {
-      status = "error";
-      code = "VIEWKEY_UNAVAILABLE";
-    } else {
-      status = "error";
-      code = "CONFIG_ERROR";
-    }
-    error = e instanceof Error ? e.message : String(e);
+    const message = e instanceof Error ? e.message : String(e);
+    if (e instanceof PolicyError) fail("rejected", e.code, message);
+    else if (e instanceof ViewKeyUnavailable) fail("error", "VIEWKEY_UNAVAILABLE", message);
+    else fail("error", "CONFIG_ERROR", message);
   }
 
-  // One send at a time per wallet. Later calls queue for a bounded time, then get BUSY.
-  let release: (() => void) | undefined;
+  // One send at a time per wallet: an in-process queue, then the wallet lease shared with
+  // every process on the wallet. Later calls queue for a bounded time, then get BUSY.
+  let lock: WalletLock | undefined;
   if (policyPassed && amountZats !== undefined) {
     try {
-      release = await acquireWalletLock(chain, config.sendQueueWaitMs ?? SEND_QUEUE_WAIT_DEFAULT_MS, "zcash_pay");
+      lock = await acquireWalletLock(store, config.sendQueueWaitMs ?? SEND_QUEUE_WAIT_DEFAULT_MS, "zcash_pay");
     } catch (e) {
       policyPassed = false;
-      status = "error";
-      if (e instanceof BusyError) {
-        code = "BUSY";
-        error = e.message;
-      } else {
-        code = "CHAIN_ERROR";
-        error = `The wallet lock could not be taken: ${e instanceof Error ? e.message : String(e)}. Nothing was sent.`;
-      }
+      if (e instanceof BusyError) fail("error", "BUSY", e.message);
+      else fail("error", "CHAIN_ERROR", `The wallet lock could not be taken: ${e instanceof Error ? e.message : String(e)}. Nothing was sent.`);
     }
   }
 
+  let wroteIntent = false;
   let audit: AuditEntry;
   let final: ReturnType<typeof writeAuditRow>;
   try {
-    // Another process on this wallet may have bound the key since this call started.
-    // Holding the wallet lock, re-read the audit log; if the key is taken, this call
-    // becomes a replay or a conflict and sends nothing.
-    if (release && keyFields.idempotency_key) {
-      index.reload();
-      const other = index.byIdempotencyKey(keyFields.idempotency_key);
-      if (other && other.callId !== callId) {
-        release();
-        release = undefined;
-        return other.paramsSha256 === keyFields.params_sha256
-          ? replay(input, deps, callId, other.callId, other.record)
-          : refuseKey(
-              input,
-              deps,
-              callId,
-              "IDEMPOTENCY_CONFLICT",
-              `idempotency_key was already used by call ${other.callId} with different parameters. Nothing was sent.`
-            );
+    // Another process on this wallet may have bound the key while this call queued.
+    // Under the lease, read the binding fresh; if taken, this call becomes a replay or a
+    // conflict and sends nothing.
+    if (lock && keyFields.idempotency_key) {
+      const other = store.readKey(keyFields.idempotency_key);
+      if (other && other.call_id !== callId) {
+        lock.release();
+        lock = undefined;
+        return priorUse(input, deps, store, callId, keyFields.idempotency_key, keyFields.params_sha256!)!;
       }
     }
 
-    // Live mode: check the wallet and server before writing the intent. A failure here
-    // sends nothing and leaves no pending row.
+    // Live mode: check the wallet and server before anything is bound. A failure here
+    // sends nothing, binds nothing, and the key stays free for a retry.
     if (policyPassed && amountZats !== undefined && config.chainMode === "live" && chain.checkHealth) {
-      const problem = await preSendProblem(() => chain.checkHealth!(), amountZats, config.healthMaxLagBlocks ?? HEALTH_MAX_LAG_DEFAULT);
+      const problem = await preSendProblem(
+        async () => {
+          const h = await chain.checkHealth!();
+          chainTip = h.chainTip;
+          return h;
+        },
+        amountZats,
+        config.healthMaxLagBlocks ?? HEALTH_MAX_LAG_DEFAULT
+      );
       if (problem) {
         policyPassed = false;
-        status = "error";
-        code = problem.code;
-        error = problem.message;
+        fail("error", problem.code, problem.message);
       }
     }
 
-    if (policyPassed && amountZats !== undefined) {
-      // Record intent before broadcast, fsynced to the main log or the fallback file.
-      // If it cannot be made durable anywhere, nothing is sent.
+    if (policyPassed && amountZats !== undefined && lock) {
+      // The health check can be slow. Prove the lease is still ours before any write.
+      try {
+        lock.assertHeld();
+      } catch (e) {
+        policyPassed = false;
+        fail("error", "BUSY", lostLeaseMessage(e));
+      }
+    }
+
+    if (policyPassed && amountZats !== undefined && lock) {
+      // Record the intent, then the audit pending row, then bind the key: all on disk
+      // before the broadcast. The key is bound last so a call that stops here leaves it
+      // free; once bound, nothing slow runs before the send.
       status = "pending";
-      const intentRow = boundAuditEntry(entry());
-      const intent = writeAuditRow(config, intentRow);
-      // Bind the idempotency key only to an intent that reached disk.
-      if (intent.durable) index.record(intentRow as unknown as Record<string, unknown>);
-      if (intent.warning) warnings.push(intent.warning);
-      if (!intent.durable) {
-        intentWriteFailed = true;
-        status = "error";
-        code = "AUDIT_WRITE_FAILED";
-        error = `Audit write failed before send; payment not sent: ${intent.warning}`;
+      const intent: CallIntent = {
+        call_id: callId,
+        ts: new Date(startedAt).toISOString(),
+        amount_zec: input.amount_zec,
+        amount_zats: amountZats.toString(),
+        recipient: input.recipient,
+        memo: input.memo,
+        allowlist_hit: allowlistHit,
+        cap_zec: config.spendingCapZec,
+        view_key_fingerprint: viewKeyFingerprint,
+        ...keyFields,
+        chain_tip: chainTip,
+      };
+      let ready = false;
+      try {
+        store.writeIntent(intent);
+        wroteIntent = true;
+        ready = true;
+      } catch (e) {
+        fail("error", "STATE_WRITE_FAILED", `The payment store could not be written before the send: ${e instanceof Error ? e.message : String(e)}. Nothing was sent.`);
       }
 
-      if (!intentWriteFailed) {
-        try {
-          const receipt = await chain.pay({
-            amountZats,
-            recipient: input.recipient,
-            memo: input.memo,
-          });
+      if (ready) {
+        const pendingRow = boundAuditEntry(entry());
+        const written = writeAuditRow(config, pendingRow);
+        if (written.warning) warnings.push(written.warning);
+        if (!written.durable) {
+          ready = false;
+          fail("error", "AUDIT_WRITE_FAILED", `Audit write failed before send; payment not sent: ${written.warning}`);
+        }
+      }
 
+      if (ready) {
+        // Last check before binding and sending: the lease is still this call's.
+        try {
+          lock.assertHeld();
+        } catch (e) {
+          ready = false;
+          fail("error", "BUSY", lostLeaseMessage(e));
+        }
+      }
+
+      if (ready && keyFields.idempotency_key) {
+        let bound: ReturnType<PaymentStore["bindKey"]> | undefined;
+        try {
+          bound = store.bindKey(keyFields.idempotency_key, callId, keyFields.params_sha256!);
+        } catch (e) {
+          ready = false;
+          fail("error", "STATE_WRITE_FAILED", `The idempotency key could not be bound: ${e instanceof Error ? e.message : String(e)}. Nothing was sent.`);
+        }
+        if (bound && !bound.won) {
+          // Another call won the key, one the lease did not stop. It owns the key; this
+          // call sends nothing and reports that call's outcome.
+          recordSafely(store, { ts: now(), call_id: callId, state: "not_sent", code: "IDEMPOTENCY_CONFLICT", error: "Another call bound this idempotency key first.", by: "send" }, warnings);
+          writeAuditRow(config, boundAuditEntry({ ...entry(), status: "error", code: "IDEMPOTENCY_CONFLICT", error: "Another call bound this idempotency key first. Nothing was sent." }));
+          lock.release();
+          lock = undefined;
+          return priorUse(input, deps, store, callId, keyFields.idempotency_key, keyFields.params_sha256!)!;
+        }
+      }
+
+      if (!ready && wroteIntent) {
+        recordSafely(store, { ts: now(), call_id: callId, state: "not_sent", code, error, by: "send" }, warnings);
+      }
+
+      if (ready) {
+        try {
+          const receipt = await chain.pay({ amountZats, recipient: input.recipient, memo: input.memo });
           mockTxid = receipt.txid;
           status = "ok";
+          code = undefined;
+          error = undefined;
+          try {
+            store.claimTxid(receipt.txid, callId);
+          } catch {
+            // The sent event below carries the txid; the claim only guides matching.
+          }
+          recordSafely(store, { ts: now(), call_id: callId, state: "sent", txid: receipt.txid, by: "send" }, warnings);
         } catch (e) {
           if (e instanceof SendOutcomeUnknownError) {
-            status = "unknown";
-            code = "SEND_UNCONFIRMED";
-            error = `${SEND_UNCONFIRMED_GUIDANCE} Detail: ${redactInput(e.message, input)}`;
+            fail("unknown", "SEND_UNCONFIRMED", `${SEND_UNCONFIRMED_GUIDANCE} Detail: ${redactInput(e.message, input)}`);
             possibleSends = await findPossibleSends(
               chain,
               { amountZats, recipient: input.recipient, memo: input.memo },
-              startedAt
+              startedAt,
+              (txid) => safeOwner(store, txid),
+              callId
             );
+            recordSafely(store, { ts: now(), call_id: callId, state: "unknown", code, error, possible_sends: possibleSends, by: "send" }, warnings);
           } else {
-            status = "error";
-            code = "CHAIN_ERROR";
-            error = redactInput(e instanceof Error ? e.message : String(e), input);
+            fail("error", "CHAIN_ERROR", redactInput(e instanceof Error ? e.message : String(e), input));
+            recordSafely(store, { ts: now(), call_id: callId, state: "not_sent", code, error, by: "send" }, warnings);
           }
         }
       }
@@ -543,10 +672,10 @@ async function runPay(
     // writeAuditRow never throws. A send may already have happened, and throwing would hide
     // the txid and invite a retry that pays twice. A failed write is reported with the result.
     final = writeAuditRow(config, audit);
-    index.record(audit as unknown as Record<string, unknown>);
   } finally {
-    release?.();
+    lock?.release();
   }
+  if (!wroteIntent && status !== "ok") rememberRefusal(callId, { code, error, amount_zats: amountZats?.toString(), idempotency_key: keyFields.idempotency_key });
   if (final.warning) warnings.push(final.warning);
   const auditWarning = warnings.length > 0 ? warnings.join(" ") : undefined;
 
@@ -598,4 +727,30 @@ async function runPay(
     audit,
     auditWarning,
   };
+}
+
+function now(): string {
+  return new Date().toISOString();
+}
+
+function lostLeaseMessage(e: unknown): string {
+  const detail = e instanceof LeaseLostError ? e.message : e instanceof Error ? e.message : String(e);
+  return `The wallet lock was lost before the send (${detail}). Nothing was sent. Try again.`;
+}
+
+function safeOwner(store: PaymentStore, txid: string): string | undefined {
+  try {
+    return store.txidOwner(txid);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Record an event after the send decision. A failure becomes a warning; it never hides the outcome. */
+function recordSafely(store: PaymentStore, event: Parameters<PaymentStore["advance"]>[0], warnings: string[]): void {
+  try {
+    store.advance(event);
+  } catch (e) {
+    warnings.push(`The payment store could not record this outcome (${e instanceof Error ? e.message : String(e)}); the audit log has it.`);
+  }
 }

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { withWalletRead } from "../payments/lock.js";
+import { storeFor } from "../payments/store.js";
 import { TESTNET_EXPLORER } from "../chain/live.js";
 import { formatZats } from "../policy/amount.js";
 import type { TxSummary } from "../types.js";
@@ -34,7 +35,7 @@ export async function executeHistory(input: HistoryInput, deps: ReadDeps) {
     deps.config,
     async () => {
       const limit = checkLimit(input.limit);
-      return withWalletRead(deps.chain, "zcash_history", (offline) => deps.chain.getHistory(limit, { offline }));
+      return withWalletRead(storeFor(deps.config, deps.chain), "zcash_history", (offline) => deps.chain.getHistory(limit, { offline }));
     },
     (txs) => ({
       count: txs.length,
@@ -48,6 +49,8 @@ export async function executeHistory(input: HistoryInput, deps: ReadDeps) {
         value_zats: t.valueZats.toString(),
         value_zec: formatZats(t.valueZats),
         fee_zats: t.feeZats?.toString(),
+        // Who a send paid, so a caller can tell two sends of one amount apart.
+        outgoing: t.outgoing?.map((n) => ({ recipient: n.recipient, value_zats: n.valueZats.toString(), memo: n.memo || undefined })),
         explorer_url: live ? `${TESTNET_EXPLORER}${t.txid}` : undefined,
       })),
     }),

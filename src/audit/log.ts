@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import fs from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { appendPrivate, ensurePrivateDir } from "../fsafe.js";
+import { redactDeep } from "../redact.js";
 import { MAX_AUDIT_ROW_BYTES, MAX_RECIPIENT_LENGTH } from "../policy/limits.js";
 import { MAX_AMOUNT_LENGTH } from "../policy/amount.js";
 import type { AuditEntry, RateLimitAuditEntry, ReadAuditEntry } from "../types.js";
@@ -57,48 +58,19 @@ export function boundAuditEntry<T extends object>(entry: T): T {
   return row as unknown as T;
 }
 
-/**
- * Flush a directory entry to disk, so a newly created file or folder survives a crash.
- * Windows cannot open a directory for fsync; NTFS journals the entry, so it is skipped there.
- */
-export function fsyncDir(dir: string): void {
-  if (process.platform === "win32") return;
-  const fd = fs.openSync(dir, "r");
-  try {
-    fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
-  }
-}
+export { fsyncDir } from "../fsafe.js";
 
-/** Create `dir` if needed, fsyncing the parent of each folder that was created. */
+/** Create `dir` if needed (0700, parents fsynced); refuse a symlink or another owner; tighten a loose mode. */
 export function ensureDurableDir(dir: string): void {
-  const missing: string[] = [];
-  for (let d = dir; !fs.existsSync(d); d = dirname(d)) {
-    missing.unshift(d);
-    if (dirname(d) === d) break;
-  }
-  if (missing.length === 0) return;
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  for (const d of missing) fsyncDir(dirname(d));
+  ensurePrivateDir(dir);
 }
 
 /**
- * Append `line` to `file` and fsync it before returning: open, write, fsync, close. A new
- * file is created with mode 0600 and its directory entry is fsynced too.
+ * Append `line` to `file` and fsync it before returning. Never follows a symlink, refuses
+ * a file owned by another user, and tightens a loose mode to 0600.
  */
 export function appendDurable(file: string, line: string): void {
-  const isNew = !fs.existsSync(file);
-  const buf = Buffer.from(line, "utf8");
-  const fd = fs.openSync(file, "a", 0o600);
-  try {
-    let off = 0;
-    while (off < buf.length) off += fs.writeSync(fd, buf, off, buf.length - off);
-    fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
-  }
-  if (isNew) fsyncDir(dirname(file));
+  appendPrivate(file, line);
 }
 
 /** Appends one bounded row, flushed to disk, and returns the file it went to. */
@@ -130,8 +102,11 @@ export interface AuditWriteResult {
 type AuditRow = AuditEntry | ReadAuditEntry | RateLimitAuditEntry | RecoveryAuditEntry;
 type StderrWrite = (line: string) => void;
 
+/** Why a write failed, without the absolute path a filesystem error message carries. */
 function msg(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
+  const code = (e as NodeJS.ErrnoException)?.code;
+  if (typeof code === "string") return code;
+  return e instanceof Error ? e.message.replace(/(?:[A-Za-z]:)?[\\/][^\s'"]+/g, "[path]") : String(e);
 }
 
 /**
@@ -145,6 +120,8 @@ export function writeAuditRow(
   stderr: StderrWrite = (line) => process.stderr.write(line)
 ): AuditWriteResult {
   const { auditDir } = target;
+  // No row carries a server credential or a local path, even inside an error message.
+  entry = redactDeep(entry);
   let mainError = "";
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -161,7 +138,7 @@ export function writeAuditRow(
     return {
       durable: true,
       file: fallback,
-      warning: `Audit row could not be written to ${auditDir} (${mainError}); it was written to ${fallback}.`,
+      warning: `Audit row could not be written to the audit dir (${mainError}); it was written to the fallback file ${basename(fallback)}.`,
     };
   } catch (e) {
     try {
@@ -171,7 +148,7 @@ export function writeAuditRow(
     }
     return {
       durable: false,
-      warning: `Audit row could not be written to ${auditDir} (${mainError}) or ${fallback} (${msg(e)}); it was printed to stderr only.`,
+      warning: `Audit row could not be written to the audit dir (${mainError}) or the fallback file ${basename(fallback)} (${msg(e)}); it was printed to stderr only.`,
     };
   }
 }
