@@ -19,7 +19,7 @@ export const PAY_REJECTION_CODES = [
 ] as const;
 
 /** zcash_pay failed after policy passed, or the server is misconfigured. Audited with status `error`. */
-export const PAY_ERROR_CODES = ["AUDIT_WRITE_FAILED", "VIEWKEY_UNAVAILABLE", "CHAIN_ERROR", "CONFIG_ERROR"] as const;
+export const PAY_ERROR_CODES = ["AUDIT_WRITE_FAILED", "VIEWKEY_UNAVAILABLE", "CHAIN_ERROR", "CONFIG_ERROR", "BUSY"] as const;
 
 /**
  * zcash_pay was attempted but its outcome is not known, for example zingo-cli timed out

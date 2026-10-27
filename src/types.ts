@@ -19,6 +19,8 @@ export interface Config {
   chainNetwork?: string;
   zingoBin?: string;
   zingoDataDir?: string;
+  /** How long a send waits for another send on the same wallet before BUSY. Default 10000 */
+  sendQueueWaitMs?: number;
   /** Where audit rows go when auditDir cannot be written. Default: audit-fallback.jsonl beside auditDir. */
   auditFallbackPath?: string;
   lightwalletd?: string;
