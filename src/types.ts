@@ -10,7 +10,8 @@ export interface AllowlistFile {
 }
 
 export interface Config {
-  spendingCapZec: number;
+  /** Hard per-call cap in ZEC, at most 8 decimals; compared as integer zatoshis */
+  spendingCapZec: number | string;
   allowlistPath: string;
   chainMode: ChainMode;
   auditDir: string;
@@ -26,10 +27,13 @@ export type PayStatus = "ok" | "rejected" | "error";
 export interface AuditEntry {
   ts: string;
   tool: "zcash_pay";
-  amount_zec: number;
+  /** Amount as passed to the tool */
+  amount_zec: number | string;
+  /** Amount in integer zatoshis, as a decimal string; absent when the amount was invalid */
+  amount_zats?: string;
   recipient: string;
   allowlist_hit: boolean;
-  cap_zec: number;
+  cap_zec: number | string;
   status: PayStatus;
   mock_txid?: string;
   view_key_fingerprint: string;
@@ -38,14 +42,16 @@ export interface AuditEntry {
 }
 
 export interface PaymentRequest {
-  amountZec: number;
+  /** Integer zatoshis */
+  amountZats: bigint;
   recipient: string;
   memo?: string;
 }
 
 export interface PaymentReceipt {
   txid: string;
-  amountZec: number;
+  /** Integer zatoshis */
+  amountZats: bigint;
   recipient: string;
   memo?: string;
   /** Opaque viewing-key material used only for fingerprinting, never logged raw */

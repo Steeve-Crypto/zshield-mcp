@@ -11,7 +11,7 @@ import { executePay } from "../src/tools/pay.ts";
 import type { Config } from "../src/types.ts";
 
 const base = join(homedir(), ".zshield-testnet");
-const amount = Number(process.env.DEMO_AMOUNT_ZEC ?? "0.001");
+const amount = process.env.DEMO_AMOUNT_ZEC ?? "0.001";
 const bin = process.env.ZINGO_BIN ?? "zingo-cli";
 const server = process.env.LIGHTWALLETD_URL ?? "https://testnet.zec.rocks:443";
 
