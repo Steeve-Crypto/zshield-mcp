@@ -11,7 +11,7 @@ import { appendAuditEntry, boundAuditEntry } from "../src/audit/log.ts";
 import { MAX_AUDIT_ROW_BYTES, MAX_MEMO_BYTES, MAX_RECIPIENT_LENGTH } from "../src/policy/limits.ts";
 import { executePay, payInputSchema, redactInput } from "../src/tools/pay.ts";
 import type { AuditEntry, Config } from "../src/types.ts";
-import { connect, textOf } from "./helpers.ts";
+import { connect, textOf, unusedReads } from "./helpers.ts";
 
 const ALLOWED = "u1mockrecipientaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -39,6 +39,7 @@ function auditLines(config: Config): string[] {
 function countingChain(calls: { n: number }): ChainAdapter {
   const mock = new MockChainAdapter();
   return {
+    ...unusedReads,
     mode: "mock",
     getViewingKey: async () => MOCK_UFVK,
     async pay(req) {
@@ -187,6 +188,7 @@ describe("chain errors", () => {
   it("do not carry the recipient or memo back to the caller", async () => {
     const config = tempConfig();
     const chain: ChainAdapter = {
+      ...unusedReads,
       mode: "mock",
       getViewingKey: async () => MOCK_UFVK,
       async pay(req) {
@@ -202,14 +204,15 @@ describe("chain errors", () => {
 
   it("an unknown send outcome does not repeat the recipient or memo either", async () => {
     const config = tempConfig();
-    const chain = {
+    const chain: ChainAdapter = {
+      ...unusedReads,
       mode: "mock",
       getViewingKey: async () => MOCK_UFVK,
       getHistory: async () => [],
-      async pay(req: { recipient: string; memo?: string }) {
+      async pay(req) {
         throw new SendOutcomeUnknownError(`no txid after sending to ${req.recipient} with memo ${req.memo}`);
       },
-    } as unknown as ChainAdapter;
+    };
     const r = await executePay({ amount_zec: 0.01, recipient: ALLOWED, memo: "private memo text" }, { config, chain });
     assert.equal(r.audit.status, "unknown");
     assert.match(r.audit.error ?? "", /Detail: no txid after sending to \[recipient\] with memo \[memo\]$/);

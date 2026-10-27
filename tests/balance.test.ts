@@ -7,7 +7,7 @@ import { MockChainAdapter, MOCK_FEE_ZATS, MOCK_START_ZATS } from "../src/chain/m
 import { LiveChainAdapter, parseBalance, parseSpendable, type CliRunner } from "../src/chain/live.ts";
 import { executeBalance } from "../src/tools/balance.ts";
 import { executePay } from "../src/tools/pay.ts";
-import { ALLOWED, readAuditRows, tempConfig } from "./helpers.ts";
+import { ALLOWED, readAuditRows, tempConfig, withEnv } from "./helpers.ts";
 
 // Captured from zingo-cli on testnet (offline read of the demo wallet).
 const BALANCE_OUT = `Launching save task...
@@ -59,7 +59,8 @@ describe("LiveChainAdapter.getBalance", () => {
   it("runs only read commands on testnet with a read timeout", async () => {
     const calls: { args: string[]; timeoutMs?: number }[] = [];
     const a = new LiveChainAdapter({ network: "testnet", runner: fakeRunner(calls) });
-    const b = await a.getBalance();
+    // The default only applies when ZINGO_READ_TIMEOUT_MS is not set in the shell running the tests.
+    const b = await withEnv("ZINGO_READ_TIMEOUT_MS", undefined, () => a.getBalance());
     assert.deepEqual(b, { confirmedZats: 3_000n, unconfirmedZats: 12_390_005n, spendableZats: 3_000n });
     assert.deepEqual(calls.map((c) => c.args.at(-1)), ["balance", "spendable_balance"]);
     for (const c of calls) {
@@ -71,12 +72,7 @@ describe("LiveChainAdapter.getBalance", () => {
   it("honors ZINGO_READ_TIMEOUT_MS", async () => {
     const calls: { args: string[]; timeoutMs?: number }[] = [];
     const a = new LiveChainAdapter({ network: "testnet", runner: fakeRunner(calls) });
-    process.env.ZINGO_READ_TIMEOUT_MS = "5000";
-    try {
-      await a.getBalance();
-    } finally {
-      delete process.env.ZINGO_READ_TIMEOUT_MS;
-    }
+    await withEnv("ZINGO_READ_TIMEOUT_MS", "5000", () => a.getBalance());
     assert.equal(calls[0].timeoutMs, 5000);
   });
 });

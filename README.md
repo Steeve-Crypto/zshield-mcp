@@ -33,6 +33,7 @@ git clone <this-repo> zshield-mcp && cd zshield-mcp
 cp .env.example .env
 npm install
 npm test
+npm run typecheck   # type-checks src, tests, and scripts
 npm run build
 npm start   # stdio MCP server
 ```
