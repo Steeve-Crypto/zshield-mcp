@@ -4,7 +4,7 @@
 
 # zshield-mcp
 
-Open-source **MCP server** that exposes one tool, `zcash_pay`, for agent-initiated **shielded ZEC** payments under human policy:
+Open-source **MCP server** that exposes `zcash_pay` for agent-initiated **shielded ZEC** payments under human policy, plus read-only wallet tools that never move funds. `zcash_pay` is guarded by:
 
 - **Hard per-call spending cap**
 - **Recipient allow-list**
@@ -70,6 +70,31 @@ Oversized or malformed input is rejected before anything else runs. Error messag
 
 Resource `zshield://policy` returns the active cap, allow-list path, and chain mode.
 
+## Read-only tools
+
+These tools never send anything. Each call writes one audit row with the tool name, mode, and outcome. The row does not hold balances, addresses, or transaction data. If that row cannot be written, the tool still answers and adds an `audit_warning`, since nothing moved.
+
+### `zcash_balance`
+
+No arguments. Returns the wallet balance in integer zatoshis and as a ZEC string:
+
+```json
+{
+  "ok": true,
+  "mode": "mock",
+  "confirmed_zats": "1000000000",
+  "confirmed_zec": "10",
+  "spendable_zats": "1000000000",
+  "spendable_zec": "10",
+  "unconfirmed_zats": "0",
+  "unconfirmed_zec": "0"
+}
+```
+
+Zatoshi values are strings so they stay exact in JSON. `confirmed` is the sum of confirmed funds across every pool. `spendable` is what the wallet can send right now. In testnet mode the values come from `zingo-cli balance` and `zingo-cli spendable_balance`, as of the wallet's last sync.
+
+In mock mode the wallet starts with 10 ZEC. Each mock payment takes the amount plus a 0.0001 ZEC fee, and a payment larger than the balance fails with an insufficient funds error.
+
 ## Config: caps & allow-list
 
 Precedence: **environment variables** override `config/default.yaml`.
@@ -108,7 +133,7 @@ Raw viewing-key material is **never** written, only a short fingerprint. See [do
 src/policy/   caps + allow-list
 src/chain/    mock adapter, testnet adapter, address checks
 src/audit/    JSONL writer + fingerprint
-src/tools/    zcash_pay
+src/tools/    zcash_pay and the read-only tools
 src/server.ts MCP registration
 tests/        happy path + rejections
 ```
@@ -138,7 +163,7 @@ ZINGO_DATA_DIR=~/.zshield-testnet/wallet \
 ALLOWLIST_PATH=./allowlists/testnet.json npm start
 ```
 
-Optional variables: `ZINGO_BIN`, `ZINGO_DATA_DIR`, `LIGHTWALLETD_URL`.
+Optional variables: `ZINGO_BIN`, `ZINGO_DATA_DIR`, `LIGHTWALLETD_URL`, and `ZINGO_READ_TIMEOUT_MS` (default `120000`), which stops a read-only call that takes too long.
 
 Run the demo:
 
