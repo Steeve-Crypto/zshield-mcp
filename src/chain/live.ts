@@ -7,6 +7,7 @@ import { assertTestnetAddress, NetworkError } from "./network.js";
 import { ChainUnreachableError, CliTimeoutError, SendOutcomeUnknownError } from "./outcome.js";
 import { defaultSyncer, type SyncResult, type WalletSyncer } from "./sync.js";
 import { displayUrl, redact, registerServerUrl } from "../redact.js";
+import { memoProblem } from "../policy/limits.js";
 import { walletStateDir } from "../payments/store.js";
 
 /** Used when a test injects a runner and no syncer: no process is started. */
@@ -378,6 +379,10 @@ export class LiveChainAdapter implements ChainAdapter {
     if (typeof req.amountZats !== "bigint" || req.amountZats <= 0n) {
       throw new Error("Amount must be a positive integer number of zatoshis");
     }
+    // The memo goes out exactly as given, so one that could not be matched back from the
+    // listing is refused here too, whatever called the adapter.
+    const memoIssue = memoProblem(req.memo);
+    if (memoIssue) throw new Error(`Memo refused: ${memoIssue}`);
     // The recipient, amount, and memo go over stdin to zingo-cli's prompt, never in argv,
     // so they do not show up in the process list. argv holds only the fixed base options.
     const input = buildSendInput(req);
@@ -414,6 +419,7 @@ export function buildSendInput(req: PaymentRequest): string {
     amount: Number(req.amountZats),
   };
   if (!Number.isSafeInteger(entry.amount)) throw new Error("Amount is too large to send");
+  // The memo goes out exactly as given: no trimming, no change.
   if (req.memo) entry.memo = req.memo;
   const json = JSON.stringify([entry]).replace(/'/g, "\\u0027");
   if (/[\r\n']/.test(json)) throw new Error("Send line could not be encoded safely");

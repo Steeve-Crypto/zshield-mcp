@@ -99,7 +99,7 @@ export function countRivals(store: PaymentStore, record: CallRecord): number {
     const other = store.readCall(id);
     const b = other?.intent;
     if (!other || !b || isSettled(other.state)) continue;
-    if (b.recipient !== a.recipient || b.amount_zats !== a.amount_zats || (b.memo ?? "").trim() !== (a.memo ?? "").trim()) continue;
+    if (b.recipient !== a.recipient || b.amount_zats !== a.amount_zats || (b.memo ?? "") !== (a.memo ?? "")) continue;
     const gap = Math.abs(Date.parse(b.ts) - Date.parse(a.ts));
     if (Number.isNaN(gap) || gap <= MATCH_AFTER_MS + MATCH_SKEW_MS) n++;
   }

@@ -30,11 +30,19 @@ export function recipientProblem(recipient: unknown): string | undefined {
  */
 const MEMO_FORBIDDEN = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+
 export function memoProblem(memo: unknown): string | undefined {
   if (memo === undefined) return undefined;
   if (typeof memo !== "string") return "Memo must be a string.";
   if (Buffer.byteLength(memo, "utf8") > MAX_MEMO_BYTES) return `Memo is longer than ${MAX_MEMO_BYTES} bytes.`;
   if (MEMO_FORBIDDEN.test(memo)) return "Memo contains a control or line-break character. Use one line of text.";
+  // The wallet listing prints a memo with its edges trimmed, and matching compares the
+  // listed text to the sent text. A memo that trimming would change could never be matched
+  // back exactly, so it is refused rather than quietly changed.
+  if (memo !== memo.trim()) return "Memo starts or ends with whitespace. Remove it; the memo is sent exactly as given.";
+  // A lone surrogate is not text: it would be sent as a replacement character, not as given.
+  if (LONE_SURROGATE.test(memo)) return "Memo is not well-formed text (it holds an unpaired surrogate).";
   return undefined;
 }
 

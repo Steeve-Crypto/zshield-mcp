@@ -89,9 +89,12 @@ export const REORG_SLACK_BLOCKS = 5;
  */
 export function matchSend(t: TxSummary, target: SendTarget, startedAt: number): PossibleSend | undefined {
   if (!/sent/i.test(t.kind) || t.status === "failed") return undefined;
-  const memo = (target.memo ?? "").trim();
+  // Memos are exact: accepted memos have no edge whitespace, and the listing parser trims
+  // the edges it prints, so the two compare as plain strings. A call with an older memo
+  // that has edge whitespace cannot match, and stays unknown.
+  const memo = target.memo ?? "";
   const note = (t.outgoing ?? []).find(
-    (n) => (n.recipient === target.recipient || n.unifiedAddress === target.recipient) && n.valueZats === target.amountZats && n.memo.trim() === memo
+    (n) => (n.recipient === target.recipient || n.unifiedAddress === target.recipient) && n.valueZats === target.amountZats && n.memo === memo
   );
   if (!note) return undefined;
   const matched = ["recipient", "amount", ...(memo ? ["memo"] : [])];
@@ -195,7 +198,7 @@ export const payInputSchema = z.object({
   memo: z
     .string()
     .max(MAX_MEMO_BYTES)
-    .refine((m) => memoProblem(m) === undefined, `INVALID_MEMO: memo is longer than ${MAX_MEMO_BYTES} bytes or has a control character`)
+    .refine((m) => memoProblem(m) === undefined, `INVALID_MEMO: memo is longer than ${MAX_MEMO_BYTES} bytes, has a control character, or starts or ends with whitespace`)
     .optional()
     .describe(`Optional memo, at most ${MAX_MEMO_BYTES} UTF-8 bytes (the Zcash memo size). Sent to the recipient and written to the audit log`),
   idempotency_key: z
@@ -310,7 +313,9 @@ const KEY_PROBLEM = `idempotency_key must be 1 to ${MAX_IDEMPOTENCY_KEY_LENGTH} 
  * parameters is refused with IDEMPOTENCY_CONFLICT. A new key is bound, exclusively, in
  * the wallet's payment store before the broadcast; only one call can ever win it.
  */
-export async function executePay(input: PayInput, deps: PayDeps): Promise<PayResult> {
+export async function executePay(rawInput: PayInput, deps: PayDeps): Promise<PayResult> {
+  // An empty memo is no memo: one form everywhere (the key hash, the audit row, the send).
+  const input: PayInput = rawInput.memo === "" ? { ...rawInput, memo: undefined } : rawInput;
   const callId = randomUUID();
   const key = input.idempotency_key;
   if (key !== undefined && !IDEMPOTENCY_KEY_PATTERN.test(key)) {
