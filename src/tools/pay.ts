@@ -9,6 +9,7 @@ import { boundAuditEntry } from "../audit/log.js";
 import { MAX_AMOUNT_LENGTH } from "../policy/amount.js";
 import { addressNetwork } from "../chain/network.js";
 import type { PayCode } from "../errors.js";
+import { paymentIndexFor, paymentParamsHash, type PaymentRecord } from "../payments/index.js";
 import { SendOutcomeUnknownError } from "../chain/outcome.js";
 import type { AuditEntry, Config, MatchConfidence, PayStatus, PossibleSend, TxSummary } from "../types.js";
 
@@ -87,6 +88,9 @@ export async function findPossibleSends(chain: ChainAdapter, target: SendTarget,
   }
 }
 
+export const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
+const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+
 export const payInputSchema = z.object({
   amount_zec: z
     .union([z.string().max(MAX_AMOUNT_LENGTH), z.number()])
@@ -101,7 +105,15 @@ export const payInputSchema = z.object({
     .refine((m) => memoProblem(m) === undefined, `INVALID_MEMO: memo is longer than ${MAX_MEMO_BYTES} bytes`)
     .optional()
     .describe(`Optional memo, at most ${MAX_MEMO_BYTES} UTF-8 bytes (the Zcash memo size). Sent to the recipient and written to the audit log`),
+  idempotency_key: z
+    .string()
+    .regex(IDEMPOTENCY_KEY_PATTERN, `INVALID_IDEMPOTENCY_KEY: use 1 to ${MAX_IDEMPOTENCY_KEY_LENGTH} letters, digits, dot, underscore, colon, or dash`)
+    .optional()
+    .describe(
+      `Optional key, 1 to ${MAX_IDEMPOTENCY_KEY_LENGTH} characters. A repeat call with the same key and parameters returns the first outcome and never pays again; different parameters return IDEMPOTENCY_CONFLICT`
+    ),
 });
+
 
 export type PayInput = z.infer<typeof payInputSchema>;
 
@@ -128,12 +140,178 @@ export interface PayDeps {
   chain: ChainAdapter;
 }
 
-export async function executePay(
-  input: PayInput,
-  deps: PayDeps
-): Promise<{ ok: boolean; code?: PayCode; text: string; audit: AuditEntry; auditWarning?: string }> {
-  const { config, chain } = deps;
+export interface PayResult {
+  ok: boolean;
+  code?: PayCode;
+  text: string;
+  audit: AuditEntry;
+  auditWarning?: string;
+}
+
+/**
+ * zcash_pay. With an idempotency key: a key already bound to the same parameters returns
+ * that call's outcome, or its pending status, and sends nothing. A key bound to different
+ * parameters is refused with IDEMPOTENCY_CONFLICT. A new key is reserved for this call and
+ * bound for good once the pending row is written.
+ */
+export async function executePay(input: PayInput, deps: PayDeps): Promise<PayResult> {
   const callId = randomUUID();
+  const key = input.idempotency_key;
+  if (key === undefined) return runPay(input, deps, callId, {});
+  if (!IDEMPOTENCY_KEY_PATTERN.test(key)) {
+    // Direct callers skip the schema; refuse the same way.
+    return refuseKey(input, deps, callId, "INVALID_IDEMPOTENCY_KEY", `idempotency_key must be 1 to ${MAX_IDEMPOTENCY_KEY_LENGTH} letters, digits, dot, underscore, colon, or dash`);
+  }
+  const index = paymentIndexFor(deps.config);
+  const paramsSha256 = paymentParamsHash(input);
+  const prior = index.byIdempotencyKey(key);
+  if (prior) {
+    if (prior.paramsSha256 !== paramsSha256) {
+      return refuseKey(
+        input,
+        deps,
+        callId,
+        "IDEMPOTENCY_CONFLICT",
+        `idempotency_key was already used by call ${prior.callId} with different parameters. Nothing was sent.`
+      );
+    }
+    return replay(input, deps, callId, prior.callId, prior.record);
+  }
+  index.reserve(key, callId, paramsSha256);
+  try {
+    return await runPay(input, deps, callId, { idempotency_key: key, params_sha256: paramsSha256 });
+  } finally {
+    index.release(key, callId);
+  }
+}
+
+function baseRow(input: PayInput, config: Config, callId: string): AuditEntry {
+  return {
+    ts: new Date().toISOString(),
+    tool: "zcash_pay",
+    call_id: callId,
+    amount_zec: input.amount_zec,
+    recipient: input.recipient,
+    allowlist_hit: false,
+    cap_zec: config.spendingCapZec,
+    status: "rejected",
+    view_key_fingerprint: null,
+    memo: input.memo,
+  };
+}
+
+/** Write a row for a call that ends without touching policy or the chain. Never throws. */
+function finish(config: Config, row: AuditEntry): { audit: AuditEntry; auditWarning?: string } {
+  const audit = boundAuditEntry(row);
+  const written = writeAuditRow(config, audit);
+  paymentIndexFor(config).record(audit as unknown as Record<string, unknown>);
+  return { audit, auditWarning: written.warning };
+}
+
+function refuseKey(input: PayInput, deps: PayDeps, callId: string, code: PayCode, message: string): PayResult {
+  const { audit, auditWarning } = finish(deps.config, {
+    ...baseRow(input, deps.config, callId),
+    status: "rejected",
+    code,
+    error: message,
+    // Only a hash of an invalid key, so an oversized one stays out of the log.
+    idempotency_key: code === "INVALID_IDEMPOTENCY_KEY" ? undefined : input.idempotency_key,
+  });
+  return {
+    ok: false,
+    code,
+    text: JSON.stringify(
+      { ok: false, status: "rejected", code, message, error: message, call_id: callId, audit, audit_warning: auditWarning },
+      null,
+      2
+    ),
+    audit,
+    auditWarning,
+  };
+}
+
+/** Same key, same parameters: report the first call's outcome. Nothing is sent. */
+function replay(input: PayInput, deps: PayDeps, callId: string, originalCallId: string, record?: PaymentRecord): PayResult {
+  const { config } = deps;
+  const result = record?.result;
+  const { audit, auditWarning } = finish(config, {
+    ...baseRow(input, config, callId),
+    status: "replayed",
+    idempotency_key: input.idempotency_key,
+    replay_of: originalCallId,
+  });
+  const common = { call_id: originalCallId, idempotency_key: input.idempotency_key, idempotent_replay: true };
+  if (result?.status === "ok") {
+    return {
+      ok: true,
+      audit,
+      auditWarning,
+      text: JSON.stringify(
+        {
+          ok: true,
+          status: "ok",
+          ...common,
+          txid: result.mock_txid,
+          amount_zec: result.amount_zec,
+          amount_zats: result.amount_zats,
+          recipient: result.recipient,
+          mode: config.chainMode,
+          view_key_fingerprint: result.view_key_fingerprint,
+          audit_warning: auditWarning,
+        },
+        null,
+        2
+      ),
+    };
+  }
+  if (result) {
+    const code = result.code as PayCode | undefined;
+    return {
+      ok: false,
+      code,
+      audit,
+      auditWarning,
+      text: JSON.stringify(
+        {
+          ok: false,
+          status: result.status,
+          code,
+          message: result.error,
+          error: result.error,
+          ...common,
+          possible_txids: result.possible_txids,
+          possible_sends: result.possible_sends,
+          audit_warning: auditWarning,
+        },
+        null,
+        2
+      ),
+    };
+  }
+  // In flight in this process, or a pending row with no result (the process stopped mid-send).
+  const message =
+    "A payment with this idempotency key was started and has no recorded result yet. It was not sent again. Check its status before doing anything else.";
+  return {
+    ok: false,
+    code: "PAYMENT_PENDING",
+    audit,
+    auditWarning,
+    text: JSON.stringify(
+      { ok: false, status: "pending", code: "PAYMENT_PENDING", message, error: message, ...common, audit_warning: auditWarning },
+      null,
+      2
+    ),
+  };
+}
+
+async function runPay(
+  input: PayInput,
+  deps: PayDeps,
+  callId: string,
+  keyFields: Pick<AuditEntry, "idempotency_key" | "params_sha256">
+): Promise<PayResult> {
+  const { config, chain } = deps;
+  const index = paymentIndexFor(config);
   const startedAt = Date.now();
   let allowlistHit = false;
   let possibleSends: PossibleSend[] | undefined;
@@ -166,6 +344,7 @@ export async function executePay(
     memo: input.memo,
     possible_txids: possibleSends?.map((p) => p.txid),
     possible_sends: possibleSends,
+    ...keyFields,
   });
 
   let policyPassed = false;
@@ -215,7 +394,10 @@ export async function executePay(
     // Record intent before broadcast, fsynced to the main log or the fallback file.
     // If it cannot be made durable anywhere, nothing is sent.
     status = "pending";
-    const intent = writeAuditRow(config, entry());
+    const intentRow = boundAuditEntry(entry());
+    const intent = writeAuditRow(config, intentRow);
+    // Bind the idempotency key only to an intent that reached disk.
+    if (intent.durable) index.record(intentRow as unknown as Record<string, unknown>);
     if (intent.warning) warnings.push(intent.warning);
     if (!intent.durable) {
       intentWriteFailed = true;
@@ -258,6 +440,7 @@ export async function executePay(
   // writeAuditRow never throws. A send may already have happened, and throwing would hide
   // the txid and invite a retry that pays twice. A failed write is reported with the result.
   const final = writeAuditRow(config, audit);
+  index.record(audit as unknown as Record<string, unknown>);
   if (final.warning) warnings.push(final.warning);
   const auditWarning = warnings.length > 0 ? warnings.join(" ") : undefined;
 
@@ -273,6 +456,7 @@ export async function executePay(
           message: error,
           error,
           call_id: callId,
+          idempotency_key: input.idempotency_key,
           possible_txids: possibleSends?.map((p) => p.txid),
           possible_sends: possibleSends,
           audit,
@@ -293,6 +477,7 @@ export async function executePay(
         ok: true,
         status: "ok",
         call_id: callId,
+        idempotency_key: input.idempotency_key,
         txid: mockTxid,
         amount_zec: input.amount_zec,
         amount_zats: amountZats?.toString(),

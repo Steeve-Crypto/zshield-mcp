@@ -27,7 +27,7 @@ export interface Config {
 }
 
 /** `unknown`: the send was attempted and may have been broadcast, but no txid came back */
-export type PayStatus = "pending" | "ok" | "rejected" | "error" | "unknown";
+export type PayStatus = "pending" | "ok" | "rejected" | "error" | "unknown" | "replayed";
 
 export interface AuditEntry {
   ts: string;
@@ -58,6 +58,12 @@ export interface AuditEntry {
   possible_txids?: string[];
   /** The same txids with how each one matched */
   possible_sends?: PossibleSend[];
+  /** The caller's idempotency key, when one was given */
+  idempotency_key?: string;
+  /** sha256 of amount in zatoshis, recipient, and memo: what the key is bound to */
+  params_sha256?: string;
+  /** Replay rows only: the call whose outcome was returned. Nothing was sent */
+  replay_of?: string;
 }
 
 /** Read-only tools. They never move funds. */

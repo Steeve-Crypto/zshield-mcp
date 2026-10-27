@@ -88,7 +88,7 @@ describe("send timeout", () => {
 
 describe("SEND_UNCONFIRMED", () => {
   it("is its own code with status unknown", () => {
-    assert.deepEqual([...PAY_UNKNOWN_CODES], ["SEND_UNCONFIRMED"]);
+    assert.deepEqual([...PAY_UNKNOWN_CODES], ["SEND_UNCONFIRMED", "PAYMENT_PENDING"]);
   });
 
   it("returns guidance, writes an unknown row, and lists a matching recent send", async () => {
