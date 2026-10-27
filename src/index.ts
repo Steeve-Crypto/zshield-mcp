@@ -2,14 +2,16 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadConfig } from "./config.js";
 import { createServer } from "./server.js";
+import { restrictUmask, startupChecks } from "./startup.js";
 
 async function main() {
   const config = loadConfig();
-  if (config.chainMode === "live") {
-    if (config.chainNetwork !== "testnet") {
-      console.error("zshield-mcp: live mode requires CHAIN_MODE=testnet. Mainnet is refused.");
-      process.exit(1);
-    }
+  try {
+    for (const warning of startupChecks(config)) console.error(warning);
+    restrictUmask(config);
+  } catch (e) {
+    console.error(e instanceof Error ? e.message : String(e));
+    process.exit(1);
   }
   const server = createServer(config);
   const transport = new StdioServerTransport();
