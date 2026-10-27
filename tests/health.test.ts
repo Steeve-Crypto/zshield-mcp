@@ -98,6 +98,8 @@ describe("pre-send health check", () => {
     assert.equal(calls.length, 3);
     assert.ok(calls.every((c) => !c.args.includes("--waitsync") && c.timeoutMs === 4000));
     assert.ok(calls.slice(1).every((c) => c.args.includes("--offline") && !c.args.includes("--server")));
+    // info must not start a sync: an interrupted one makes spendable read 0.
+    assert.ok(calls[0].args.includes("--nosync"));
   });
 
   it("parses real zingo-cli info and height output", () => {

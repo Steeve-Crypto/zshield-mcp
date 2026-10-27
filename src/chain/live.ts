@@ -175,7 +175,9 @@ export class LiveChainAdapter implements ChainAdapter {
     const timeoutMs = healthTimeoutMs();
     let chainTip: number;
     try {
-      const args = ["--chain", "testnet", "--server", this.server, "--data-dir", this.dataDir, "info"];
+      // --nosync: a sync cut short by this one-shot run leaves new blocks marked unscanned,
+      // and zingo-cli then reports a spendable balance of 0 until the next full sync.
+      const args = ["--chain", "testnet", "--server", this.server, "--data-dir", this.dataDir, "--nosync", "info"];
       chainTip = parseLatestBlockHeight(await this.runner(this.bin, args, { timeoutMs }));
     } catch (e) {
       throw new ChainUnreachableError(
