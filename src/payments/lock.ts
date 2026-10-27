@@ -1,12 +1,13 @@
 import type { ChainAdapter } from "../chain/types.js";
+import { acquireFileLock } from "./filelock.js";
 
 /** How long a send waits for another send on the same wallet before BUSY, by default. */
 export const SEND_QUEUE_WAIT_DEFAULT_MS = 10_000;
 export const SEND_QUEUE_WAIT_MAX_MS = 600_000;
 
 export class BusyError extends Error {
-  constructor(waitedMs: number) {
-    super(`Another payment from this wallet is in progress; waited ${waitedMs} ms. Nothing was sent. Try again shortly.`);
+  constructor(waitedMs: number, detail = "Another payment from this wallet is in progress.") {
+    super(`${detail} Waited ${waitedMs} ms. Nothing was sent. Try again shortly.`);
     this.name = "BusyError";
   }
 }
@@ -87,4 +88,52 @@ export function parseSendQueueWait(value: unknown): number {
     throw new Error(`SEND_QUEUE_WAIT_MS must be a whole number from 0 to ${SEND_QUEUE_WAIT_MAX_MS}.`);
   }
   return n;
+}
+
+/**
+ * The full wallet lock: this process's lock for the wallet, then the lock file in the
+ * wallet directory, which other zshield-mcp processes on the same wallet also take.
+ * Mock adapters have no directory and use only the in-process lock. Throws BusyError
+ * after `waitMs` in total.
+ */
+export async function acquireWalletLock(
+  chain: ChainAdapter,
+  waitMs: number,
+  purpose: string,
+  now: () => number = Date.now
+): Promise<() => void> {
+  const start = now();
+  const releaseLocal = await sendLockFor(chain).acquire(waitMs);
+  if (!chain.lockDir) return releaseLocal;
+  try {
+    const releaseFile = await acquireFileLock(chain.lockDir, { waitMs: Math.max(0, waitMs - (now() - start)), purpose });
+    return () => {
+      releaseFile();
+      releaseLocal();
+    };
+  } catch (e) {
+    releaseLocal();
+    throw e;
+  }
+}
+
+/**
+ * Run a read-only wallet call without racing a send or sync. A one-shot zingo-cli run
+ * syncs and saves the wallet file, so it takes the wallet lock without waiting. If a
+ * send or sync holds the lock, the call reads the wallet file offline instead, as last
+ * synced. `fn` gets `offline` set accordingly.
+ */
+export async function withWalletRead<T>(chain: ChainAdapter, purpose: string, fn: (offline: boolean) => Promise<T>): Promise<T> {
+  let release: (() => void) | undefined;
+  try {
+    release = await acquireWalletLock(chain, 0, purpose);
+  } catch (e) {
+    if (e instanceof BusyError) return fn(true);
+    throw e;
+  }
+  try {
+    return await fn(false);
+  } finally {
+    release();
+  }
 }
