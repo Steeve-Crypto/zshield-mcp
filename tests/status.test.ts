@@ -82,7 +82,7 @@ describe("zcash_payment_status", () => {
 
   it("an interrupted send: pending, then mined once it shows up, and mined stays mined (V12 F-20)", async () => {
     const config = tempConfig();
-    pending(config, "c1", { idempotency_key: "k1", params_sha256: "p", chain_tip: 480 });
+    pending(config, "c1", { idempotency_key: "k1", params_sha256: "p", chain_tip: 480, wallet_height: 480 });
     assert.equal((await paymentStatus(config, chain([]).c, { idempotency_key: "k1" }, T0 + 60_000)).state, "pending");
     const mined = await paymentStatus(config, chain([tx()]).c, { idempotency_key: "k1" }, T0 + 60_000);
     assert.equal(mined.state, "mined");
@@ -96,7 +96,7 @@ describe("zcash_payment_status", () => {
 
   it("expired only with proof: synced, whole history, past the expiry height (V12 F-18)", async () => {
     const config = tempConfig();
-    pending(config, "c2", { chain_tip: 400 });
+    pending(config, "c2", { chain_tip: 400, wallet_height: 400 });
     // Wallet at 445: not yet past 400 + 40 + 10.
     assert.equal((await paymentStatus(config, chain([], 445).c, { call_id: "c2" }, T0 + RECOVERY_EXPIRY_MS + 1)).state, "unknown");
     const s = await paymentStatus(config, chain([], 505).c, { call_id: "c2" }, T0 + RECOVERY_EXPIRY_MS + 1);

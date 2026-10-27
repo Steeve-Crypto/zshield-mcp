@@ -192,6 +192,11 @@ export async function reconcile(record: CallRecord, chain: ChainAdapter, opts: R
   if (intent.chain_tip === undefined) {
     return { ...base, status: "unknown", note: "No match, but this call has no recorded chain height, so expiry cannot be proven. Check by hand." };
   }
+  if (intent.wallet_height === undefined) {
+    // Recorded before the wallet's own height was kept: its tip came from the server alone
+    // and may have been low, so an expiry cannot be proven from it.
+    return { ...base, status: "unknown", note: "No match, but this call was recorded without the wallet's own height, so its recorded chain tip cannot be trusted to prove expiry. Check by hand." };
+  }
   // The anchor is never below the wallet's own height at the time, and the proof needs a
   // server that agrees with the wallet and has not gone backwards: a tip below the anchor
   // or below what was seen before is not evidence of anything.

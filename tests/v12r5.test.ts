@@ -404,6 +404,14 @@ describe("F-22: the chain tip cannot be trusted low", () => {
     assert.equal(storeFor(config, chain).readTipMark(), 1000, "the mark never goes down");
   });
 
+  it("a tip reported far above the wallet does not raise the recorded mark far above it", async () => {
+    const config = liveCfg();
+    config.healthMaxLagBlocks = 10_000;
+    const { chain } = liveChain({ reading: () => ({ walletHeight: 1000, chainTip: 9000, spendableZats: funds }) });
+    await executePay({ amount_zec: "0.0001", recipient: R }, { config, chain });
+    assert.equal(storeFor(config, chain).readTipMark(), 1010);
+  });
+
   it("the recorded anchor is the highest of the server tip, the wallet height, and the mark", async () => {
     const config = liveCfg();
     const { chain } = liveChain({ reading: () => ({ walletHeight: 1005, chainTip: 1000, spendableZats: funds }) });
@@ -440,6 +448,14 @@ describe("F-22: the chain tip cannot be trusted low", () => {
     storeFor(config, chainOf([])).raiseTipMark(5000);
     const rows = await recoverPendingPayments(config, chainOf([], { walletHeight: 1100, chainTip: 1101, spendableZats: 0n }), { now: T0 + recovery.RECOVERY_EXPIRY_MS + 1 });
     assert.equal(rows[0].status, "unknown");
+  });
+
+  it("a call recorded without the wallet's own height cannot be proven expired from its server tip", async () => {
+    const config = liveCfg();
+    pending(config, "c1", { chain_tip: 100 });
+    const rows = await recoverPendingPayments(config, chainOf([], { walletHeight: 5000, chainTip: 5001, spendableZats: 0n }), { now: T0 + recovery.RECOVERY_EXPIRY_MS + 1 });
+    assert.equal(rows[0].status, "unknown");
+    assert.match(rows[0].note, /without the wallet's own height/);
   });
 
   it("heights alone never prove expiry: the call must also be old enough", async () => {

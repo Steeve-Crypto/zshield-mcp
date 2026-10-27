@@ -24,6 +24,7 @@ function pending(config: Config, callId: string, extra: Partial<AuditEntry> = {}
     view_key_fingerprint: "abc",
     memo: "rent",
     chain_tip: 900,
+    wallet_height: 900,
     ...extra,
   };
   appendAuditEntry(config.auditDir, row);
@@ -105,7 +106,7 @@ describe("crash recovery on startup", () => {
 
   it("does not confirm on amount alone", async () => {
     const config = tempConfig();
-    pending(config, "c1", { chain_tip: 990 });
+    pending(config, "c1", { chain_tip: 990, wallet_height: 990 });
     const other = sent("bb".repeat(32), { outgoing: [{ recipient: "utest1other", valueZats: 10000n, memo: "rent" }] });
     const { c } = chain([other, sent("cc".repeat(32), {}, "different memo")], synced);
     const [row] = await recoverPendingPayments(config, c, { now: T0 + 60_000 });
@@ -153,12 +154,12 @@ describe("crash recovery on startup", () => {
 
   it("skips calls with a result row and settled recoveries, retries unknown ones after a restart", async () => {
     const config = tempConfig();
-    pending(config, "done", { chain_tip: 990 });
+    pending(config, "done", { chain_tip: 990, wallet_height: 990 });
     appendAuditEntry(config.auditDir, {
       ts: new Date(T0 + 1).toISOString(), tool: "zcash_pay", call_id: "done", amount_zec: "0.0001", recipient: R,
       allowlist_hit: true, cap_zec: "0.01", status: "ok", view_key_fingerprint: "abc",
     });
-    pending(config, "open", { chain_tip: 990 });
+    pending(config, "open", { chain_tip: 990, wallet_height: 990 });
     const first = chain([], synced);
     assert.deepEqual((await recoverPendingPayments(config, first.c, { now: T0 + 60_000 })).map((r) => [r.call_id, r.status]), [["open", "unknown"]]);
 

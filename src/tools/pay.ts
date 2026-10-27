@@ -11,7 +11,7 @@ import { addressNetwork } from "../chain/network.js";
 import type { PayCode } from "../errors.js";
 import { acquireWalletLock, BusyError, SEND_QUEUE_WAIT_DEFAULT_MS, type WalletLock } from "../payments/lock.js";
 import { LeaseLostError } from "../payments/filelock.js";
-import { expiryAnchor, tipProblem } from "../payments/tip.js";
+import { expiryAnchor, TIP_TOLERANCE_BLOCKS, tipProblem } from "../payments/tip.js";
 import {
   paymentParamsHash,
   rememberRefusal,
@@ -632,9 +632,11 @@ async function runPay(
         // wallet itself has scanned, and the highest tip ever recorded: never a lower one.
         chainTip = expiryAnchor(seen, tipFloor);
         walletHeight = seen.walletHeight;
-        // The reading passed the lag limit, so it is near the wallet and safe to record.
+        // Record it, capped a little above the wallet's own height: a server that reports a
+        // tip far ahead (within a loose lag limit) cannot push the mark up and block
+        // honest readings afterwards.
         try {
-          store.raiseTipMark(seen.chainTip);
+          store.raiseTipMark(Math.min(seen.chainTip, seen.walletHeight + TIP_TOLERANCE_BLOCKS));
         } catch {
           // The anchor above still holds for this call.
         }
