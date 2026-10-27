@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { parseZecToZats } from "./policy/amount.js";
+import { parseRateLimit, RATE_LIMIT_DEFAULT_PER_MIN } from "./policy/rate.js";
 import type { Config, ChainMode } from "./types.js";
 
 function envOr<T>(key: string, fallback: T, parse: (v: string) => T): T {
@@ -20,6 +21,7 @@ export function loadConfig(cwd = process.cwd()): Config {
     chain_mode: string;
     audit_dir: string;
     view_key_fingerprint_salt: string;
+    rate_limit_per_min: number | string;
   }> = {};
 
   if (existsSync(yamlPath)) {
@@ -60,5 +62,8 @@ export function loadConfig(cwd = process.cwd()): Config {
     zingoBin: process.env.ZINGO_BIN,
     zingoDataDir: process.env.ZINGO_DATA_DIR,
     lightwalletd: process.env.LIGHTWALLETD_URL,
+    rateLimitPerMin: parseRateLimit(
+      envOr<number | string>("RATE_LIMIT_PER_MIN", fromFile.rate_limit_per_min ?? RATE_LIMIT_DEFAULT_PER_MIN, (v) => v)
+    ),
   };
 }

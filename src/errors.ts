@@ -28,6 +28,9 @@ export const PAY_UNKNOWN_CODES = ["SEND_UNCONFIRMED"] as const;
 /** Read-only tool failures. */
 export const READ_ERROR_CODES = ["INVALID_LIMIT", "MAINNET_REFUSED", "CHAIN_ERROR"] as const;
 
+/** Any tool: too many calls this minute. Refused before the tool runs. Counted in one summary audit row per window. */
+export const RATE_LIMIT_CODES = ["RATE_LIMITED"] as const;
+
 export type PayRejectionCode = (typeof PAY_REJECTION_CODES)[number];
 export type PayErrorCode = (typeof PAY_ERROR_CODES)[number];
 export type PayUnknownCode = (typeof PAY_UNKNOWN_CODES)[number];

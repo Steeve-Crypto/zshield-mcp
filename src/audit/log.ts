@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { MAX_AUDIT_ROW_BYTES, MAX_RECIPIENT_LENGTH } from "../policy/limits.js";
 import { MAX_AMOUNT_LENGTH } from "../policy/amount.js";
-import type { AuditEntry, ReadAuditEntry } from "../types.js";
+import type { AuditEntry, RateLimitAuditEntry, ReadAuditEntry } from "../types.js";
 
 /**
  * Short salted fingerprint of a viewing key: the first 16 hex characters of
@@ -57,7 +57,7 @@ export function boundAuditEntry<T extends object>(entry: T): T {
 }
 
 /** Appends one bounded row and returns the file it went to. */
-export function appendAuditEntry(auditDir: string, entry: AuditEntry | ReadAuditEntry): string {
+export function appendAuditEntry(auditDir: string, entry: AuditEntry | ReadAuditEntry | RateLimitAuditEntry): string {
   mkdirSync(auditDir, { recursive: true });
   const day = entry.ts.slice(0, 10);
   const file = join(auditDir, `${day}.jsonl`);

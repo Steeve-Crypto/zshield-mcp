@@ -1,5 +1,6 @@
 import { loadAllowlist } from "./allowlist.js";
 import { formatZats, MAX_DECIMALS, parseZecToZats } from "./amount.js";
+import { RATE_LIMIT_DEFAULT_PER_MIN } from "./rate.js";
 import type { Config } from "../types.js";
 
 export const POLICY_URI = "zshield://policy";
@@ -41,6 +42,7 @@ export function describePolicy(config: Config) {
       daily_or_rolling_cap: "none",
       amount_unit: "integer zatoshis, 1 ZEC = 100000000",
       max_decimals: MAX_DECIMALS,
+      tool_calls_per_min: config.rateLimitPerMin ?? RATE_LIMIT_DEFAULT_PER_MIN,
     },
     allowlist: {
       path: config.allowlistPath,
@@ -53,6 +55,7 @@ export function describePolicy(config: Config) {
       dir: config.auditDir,
       every_call_audited: true,
       pending_row_before_send: true,
+      rate_limited_calls: "not audited one by one; counted in one summary row per minute",
     },
     tools: {
       payment: [...PAYMENT_TOOLS],

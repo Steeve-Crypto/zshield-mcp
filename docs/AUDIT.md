@@ -32,6 +32,10 @@ Each row is capped at 8 KiB (8192 bytes of UTF-8 JSON). If a row would be larger
 
 Read-only tools (`zcash_balance`, `zcash_receive_address`, `zcash_history`) write one row per call with these fields: `ts`, `tool`, `call_id`, `mode` (`mock` or `live`), `status` (`ok`, `rejected`, or `error`), `code` and `error` when the call failed, and for `zcash_history` the `limit` that was asked for. They never record balances, addresses, or transaction details.
 
+## Rate limit rows
+
+Calls refused with `RATE_LIMITED` do not get a row each, so a flood of calls cannot grow the log faster than the limit allows. Instead the server counts them and writes one summary row when the minute ends, or on the next call after it: `ts`, `tool` (`rate_limit`), `status` (`rejected`), `code` (`RATE_LIMITED`), `window_start`, `limit_per_min`, `refused_calls`, and `refused_by_tool` (a count per tool name). It holds nothing from the refused calls. If the server stops before the summary is written, that count is lost.
+
 ## Retention
 
 Rotate or archive `audits/*.jsonl` as your compliance needs require. Do not commit live audit files (gitignored).

@@ -20,6 +20,8 @@ export interface Config {
   zingoBin?: string;
   zingoDataDir?: string;
   lightwalletd?: string;
+  /** Tool calls allowed per minute in this process; default 60 */
+  rateLimitPerMin?: number;
 }
 
 /** `unknown`: the send was attempted and may have been broadcast, but no txid came back */
@@ -69,6 +71,19 @@ export interface ReadAuditEntry {
   error?: string;
   /** zcash_history only: the limit that was asked for */
   limit?: unknown;
+}
+
+/** One summary row for calls refused by the rate limit in a window. Holds no caller input. */
+export interface RateLimitAuditEntry {
+  ts: string;
+  tool: "rate_limit";
+  status: "rejected";
+  code: "RATE_LIMITED";
+  /** Start of the one-minute window the refused calls fell in */
+  window_start: string;
+  limit_per_min: number;
+  refused_calls: number;
+  refused_by_tool: Record<string, number>;
 }
 
 /** Wallet balance in integer zatoshis. */
