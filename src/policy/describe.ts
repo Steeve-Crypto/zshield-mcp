@@ -10,7 +10,8 @@ export const READ_ONLY_TOOLS = ["zcash_balance", "zcash_receive_address", "zcash
 /**
  * Snapshot of the active policy for the zshield://policy resource.
  * Read fresh on every request, so the allow-list size matches the file the next
- * zcash_pay call will check. Never includes the fingerprint salt or any key.
+ * zcash_pay call will check (the read is cached by file size and mtime). Never includes
+ * the fingerprint salt, any key, or a local path.
  */
 export function describePolicy(config: Config) {
   let cap: { zats: string; zec: string } | null = null;
@@ -45,14 +46,12 @@ export function describePolicy(config: Config) {
       tool_calls_per_min: config.rateLimitPerMin ?? RATE_LIMIT_DEFAULT_PER_MIN,
     },
     allowlist: {
-      path: config.allowlistPath,
       size: allowlistSize,
       error: allowlistError,
       match: "exact address string",
       on_failure: allowlistError ? "every zcash_pay call is rejected until the file is fixed" : undefined,
     },
     audit: {
-      dir: config.auditDir,
       every_call_audited: true,
       pending_row_before_send: true,
       rate_limited_calls: "not audited one by one; counted in one summary row per minute",

@@ -38,7 +38,7 @@ describe("describePolicy", () => {
   it("reports a broken allow-list instead of throwing", () => {
     const p = describePolicy(tempConfig({ allowlistPath: "/nonexistent/allow.json" }));
     assert.equal(p.allowlist.size, null);
-    assert.match(p.allowlist.error ?? "", /Cannot read allow-list/);
+    assert.match(p.allowlist.error ?? "", /Cannot read the allow-list file/);
     assert.match(p.allowlist.on_failure ?? "", /rejected/);
   });
 
