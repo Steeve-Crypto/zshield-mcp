@@ -60,18 +60,17 @@ export class LiveChainAdapter implements ChainAdapter {
 
   async pay(req: PaymentRequest): Promise<PaymentReceipt> {
     assertTestnetAddress(req.recipient);
-    if (!Number.isFinite(req.amountZec) || req.amountZec <= 0) {
-      throw new Error("Amount must be positive");
+    if (typeof req.amountZats !== "bigint" || req.amountZats <= 0n) {
+      throw new Error("Amount must be a positive integer number of zatoshis");
     }
-    const zats = Math.round(req.amountZec * 1e8);
-    const args = ["quicksend", req.recipient, String(zats)];
+    const args = ["quicksend", req.recipient, req.amountZats.toString()];
     if (req.memo) args.push(req.memo);
     const out = await this.run(args);
     const txid = parseTxid(out);
     const viewKeyMaterial = `vk_testnet_${createHash("sha256").update(`${txid}|${req.recipient}`).digest("hex").slice(0, 32)}`;
     return {
       txid,
-      amountZec: req.amountZec,
+      amountZats: req.amountZats,
       recipient: req.recipient,
       memo: req.memo,
       viewKeyMaterial,

@@ -11,7 +11,7 @@ export class MockChainAdapter implements ChainAdapter {
   async pay(req: PaymentRequest): Promise<PaymentReceipt> {
     const nonce = randomBytes(16).toString("hex");
     const txid = createHash("sha256")
-      .update(`mock|${req.recipient}|${req.amountZec}|${nonce}`)
+      .update(`mock|${req.recipient}|${req.amountZats}|${nonce}`)
       .digest("hex");
 
     // Synthetic viewing-key material: fingerprint only in audit; never a real key
@@ -22,7 +22,7 @@ export class MockChainAdapter implements ChainAdapter {
 
     return {
       txid: `mock_${txid.slice(0, 32)}`,
-      amountZec: req.amountZec,
+      amountZats: req.amountZats,
       recipient: req.recipient,
       memo: req.memo,
       viewKeyMaterial,

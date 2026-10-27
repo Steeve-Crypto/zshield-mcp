@@ -62,7 +62,7 @@ Or during development: `"command": "npx", "args": ["tsx", "src/index.ts"]` with 
 
 | Arg | Type | Required | Description |
 |-----|------|----------|-------------|
-| `amount_zec` | number | yes | Must be `> 0` and `<= SPENDING_CAP_ZEC` |
+| `amount_zec` | string or number | yes | Decimal ZEC such as `"0.05"`, at most 8 decimals. Must be `> 0` and `<= SPENDING_CAP_ZEC`, compared as integer zatoshis. Never rounded |
 | `recipient` | string | yes | At most 256 characters, visible ASCII only. Must exactly match an allow-list `address` |
 | `memo` | string | no | Optional memo, at most 512 UTF-8 bytes (the Zcash memo size) |
 
@@ -76,7 +76,7 @@ Precedence: **environment variables** override `config/default.yaml`.
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `SPENDING_CAP_ZEC` | `0.1` | Hard max ZEC **per tool call** |
+| `SPENDING_CAP_ZEC` | `0.1` | Hard max ZEC **per tool call**, positive with at most 8 decimals |
 | `ALLOWLIST_PATH` | `./allowlists/recipients.example.json` | JSON allow-list |
 | `CHAIN_MODE` | `mock` | `mock` or `testnet` (any other live value exits) |
 | `AUDIT_DIR` | `./audits` | JSONL audit directory |
@@ -97,7 +97,7 @@ Allow-list shape:
 JSONL per day: `audits/YYYY-MM-DD.jsonl`. A call that passes policy writes a `pending` row before the chain send and a result row after it, linked by `call_id`. A rejected call writes one `rejected` row. Example success line:
 
 ```json
-{"ts":"2026-10-05T19:00:00.000Z","tool":"zcash_pay","call_id":"3f0c…","amount_zec":0.05,"recipient":"u1…","allowlist_hit":true,"cap_zec":0.1,"status":"ok","mock_txid":"mock_…","view_key_fingerprint":"a1b2c3d4e5f60718","memo":"test"}
+{"ts":"2026-10-05T19:00:00.000Z","tool":"zcash_pay","call_id":"3f0c…","amount_zec":0.05,"amount_zats":"5000000","recipient":"u1…","allowlist_hit":true,"cap_zec":0.1,"status":"ok","mock_txid":"mock_…","view_key_fingerprint":"a1b2c3d4e5f60718","memo":"test"}
 ```
 
 Raw viewing-key material is **never** written, only a short fingerprint. See [docs/AUDIT.md](docs/AUDIT.md).

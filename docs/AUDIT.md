@@ -11,11 +11,12 @@ Every call writes at least one row. A call that passes policy writes a `pending`
 | `ts` | string (ISO-8601) | When the row was written |
 | `tool` | `"zcash_pay"` | Always |
 | `call_id` | string | Same value on the `pending` row and its result row |
-| `amount_zec` | number | Requested amount |
+| `amount_zec` | string or number | Requested amount as passed to the tool |
+| `amount_zats` | string? | Amount in integer zatoshis (1 ZEC = 100,000,000). Absent when the amount was invalid |
 | `recipient` | string | Address as passed to the tool. One longer than 256 characters is cut to its first 64, and `recipient_sha256` holds the hash of the full value |
 | `recipient_sha256` | string? | Only on rows with an oversized recipient |
 | `allowlist_hit` | boolean | Whether recipient was on the allow-list |
-| `cap_zec` | number | Active hard per-call cap |
+| `cap_zec` | string or number | Active hard per-call cap |
 | `status` | `pending` \| `ok` \| `rejected` \| `error` | `pending` is written before the send; the others are outcomes |
 | `mock_txid` | string? | Present on success in mock mode |
 | `view_key_fingerprint` | string | `sha256(salt \| viewKeyMaterial)[0:16]`, **never** the raw key |
