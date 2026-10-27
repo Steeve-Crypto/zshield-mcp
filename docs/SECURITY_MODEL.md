@@ -27,7 +27,7 @@ Limits today:
 - Read the wallet's balance, current unified address, and recent transactions through `zcash_balance`, `zcash_receive_address`, and `zcash_history`.
 - Read the allow-list file on every `zcash_pay` call and every read of `zshield://policy`.
 - Append rows to JSONL files in `AUDIT_DIR`.
-- Run `zingo-cli` as a child process with a fixed argument list. It uses `execFile`, so no shell parses the arguments.
+- Run `zingo-cli` as a child process with a fixed argument list. It uses `execFile`, so no shell parses the arguments. For a send, argv holds only the chain, server, and data directory. The recipient, amount, and memo go to `zingo-cli`'s prompt over stdin as one `quicksend` line in its JSON form, so they never show up in the process list.
 
 ## What the server cannot do
 
@@ -103,7 +103,7 @@ What it does not give: it is not a signature. Anyone who knows the UFVK and the 
 | Payment lands on mainnet | Seven layers listed under "Mainnet refusal" | Prefix checks only, no checksum decode |
 | Payment with no audit trail | `pending` row is written before the send; the send is refused if that write fails | Rows can be edited afterwards by anyone with file access |
 | Retry after a timeout pays twice | Post-send audit failures return the txid instead of throwing. `CHAIN_ERROR` is documented as "check history before retrying" | A `zingo-cli` timeout can hide a send that did go out. There is no idempotency key |
-| Memo leaks data | Memo is capped at 512 UTF-8 bytes | The agent chooses the memo text. Anything in it reaches an allow-listed recipient and the audit log. Memos also appear briefly in the local process list as a `zingo-cli` argument |
+| Memo leaks data | Memo is capped at 512 UTF-8 bytes | The agent chooses the memo text. Anything in it reaches an allow-listed recipient and the audit log. It is passed over stdin, not argv, so other local users cannot read it from the process list |
 | Oversized arguments fill the disk or memory | Recipient is capped at 256 characters, memo at 512 bytes, amount strings at 32 characters, all in the input schema and again in the handler. Each audit row is capped at 8 KiB. Errors do not repeat the caller's text | A caller can still make many small calls. There is no rate limit and no log rotation |
 | Key theft from disk | Keys stay in the `zingo-cli` wallet file, outside the repo | The file is not encrypted by zshield-mcp and its permissions are not checked |
 | Lying or stale lightwalletd | None in the server | Balances and history are only as good as the server `zingo-cli` talks to |

@@ -8,6 +8,12 @@ export const TESTNET_EXPLORER = "https://blockexplorer.one/zcash/testnet/tx/";
 export interface RunOptions {
   /** Kill the CLI after this many milliseconds. */
   timeoutMs?: number;
+  /**
+   * Written to the CLI's stdin, which is then closed. Used to drive the interactive prompt
+   * so payment details never appear in argv. When set, stderr is appended to the result,
+   * because the prompt reports command errors there and still exits 0.
+   */
+  input?: string;
 }
 
 /** Runs a zingo-cli invocation and returns stdout. Injectable for tests. */
@@ -26,10 +32,16 @@ export function readTimeoutMs(): number {
 export const defaultRunner: CliRunner = (bin, args, opts = {}) =>
   new Promise((resolve, reject) => {
     const timeout = opts.timeoutMs ?? SEND_TIMEOUT_MS;
-    execFile(bin, args, { maxBuffer: 16 * 1024 * 1024, timeout }, (err, stdout, stderr) => {
+    const child = execFile(bin, args, { maxBuffer: 16 * 1024 * 1024, timeout }, (err, stdout, stderr) => {
       if (err) reject(new Error(`zingo-cli failed: ${(stderr || err.message).toString().slice(0, 500)}`));
-      else resolve(stdout.toString());
+      else resolve(opts.input === undefined ? stdout.toString() : `${stdout}\n${stderr}`);
     });
+    if (opts.input !== undefined) {
+      child.stdin?.on("error", () => {
+        // The CLI exited before reading everything; the exit callback reports it.
+      });
+      child.stdin?.end(opts.input);
+    }
   });
 
 export interface LiveOptions {
@@ -119,9 +131,12 @@ export class LiveChainAdapter implements ChainAdapter {
     if (typeof req.amountZats !== "bigint" || req.amountZats <= 0n) {
       throw new Error("Amount must be a positive integer number of zatoshis");
     }
-    const args = ["quicksend", req.recipient, req.amountZats.toString()];
-    if (req.memo) args.push(req.memo);
-    const out = await this.run(args, { timeoutMs: SEND_TIMEOUT_MS });
+    // The recipient, amount, and memo go over stdin to zingo-cli's prompt, never in argv,
+    // so they do not show up in the process list. argv holds only the fixed base options.
+    const out = await this.runner(this.bin, this.baseArgs(), {
+      timeoutMs: SEND_TIMEOUT_MS,
+      input: buildSendInput(req),
+    });
     const txid = parseTxid(out);
     return {
       txid,
@@ -131,6 +146,24 @@ export class LiveChainAdapter implements ChainAdapter {
       mode: "live",
     };
   }
+}
+
+/**
+ * Build the stdin script for one send: a `quicksend` line in zingo-cli's JSON form, then
+ * `quit`. The prompt splits the line like a shell, so the JSON goes inside single quotes.
+ * JSON.stringify already escapes newlines and control characters; single quotes become
+ * \u0027, which is still valid JSON. The result is one line with no single quote in it.
+ */
+export function buildSendInput(req: PaymentRequest): string {
+  const entry: Record<string, string | number> = {
+    address: req.recipient,
+    amount: Number(req.amountZats),
+  };
+  if (!Number.isSafeInteger(entry.amount)) throw new Error("Amount is too large to send");
+  if (req.memo) entry.memo = req.memo;
+  const json = JSON.stringify([entry]).replace(/'/g, "\\u0027");
+  if (/[\r\n']/.test(json)) throw new Error("Send line could not be encoded safely");
+  return `quicksend '${json}'\nquit\n`;
 }
 
 export function parseTxid(out: string): string {
