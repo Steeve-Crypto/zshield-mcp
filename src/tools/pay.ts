@@ -26,6 +26,8 @@ function assertNetworkAllowed(recipient: string, config: Config): void {
   }
 }
 
+class ViewKeyUnavailable extends Error {}
+
 export const payInputSchema = z.object({
   amount_zec: z
     .union([z.string().max(MAX_AMOUNT_LENGTH), z.number()])
@@ -77,7 +79,14 @@ export async function executePay(
   let code: PayCode | undefined;
   let mockTxid: string | undefined;
   let amountZats: bigint | undefined;
-  let viewKeyFingerprint = fingerprintViewKey("none", config.viewKeyFingerprintSalt);
+  // One fingerprint per wallet: a salted hash of its UFVK, written on every row of the call.
+  let viewKeyFingerprint: string | null = null;
+  let viewKeyError: string | undefined;
+  try {
+    viewKeyFingerprint = fingerprintViewKey(await chain.getViewingKey(), config.viewKeyFingerprintSalt);
+  } catch (e) {
+    viewKeyError = e instanceof Error ? e.message : String(e);
+  }
 
   const entry = (): AuditEntry => ({
     ts: new Date().toISOString(),
@@ -112,11 +121,17 @@ export async function executePay(
     if (config.chainMode === "live" && chain.mode !== "live") {
       throw new Error("CHAIN_MODE=live but adapter is not live");
     }
+    if (viewKeyFingerprint === null) {
+      throw new ViewKeyUnavailable(`Wallet viewing key could not be read, so the payment was not sent: ${viewKeyError}`);
+    }
     policyPassed = true;
   } catch (e) {
     if (e instanceof PolicyError) {
       status = "rejected";
       code = e.code;
+    } else if (e instanceof ViewKeyUnavailable) {
+      status = "error";
+      code = "VIEWKEY_UNAVAILABLE";
     } else {
       status = "error";
       code = "CONFIG_ERROR";
@@ -145,10 +160,6 @@ export async function executePay(
         });
 
         mockTxid = receipt.txid;
-        viewKeyFingerprint = fingerprintViewKey(
-          receipt.viewKeyMaterial,
-          config.viewKeyFingerprintSalt
-        );
         status = "ok";
       } catch (e) {
         status = "error";
@@ -177,7 +188,7 @@ export async function executePay(
       ok: false,
       code,
       text: JSON.stringify(
-        { ok: false, status, code, message: error, error, audit, audit_warning: auditWarning },
+        { ok: false, status, code, message: error, error, call_id: callId, audit, audit_warning: auditWarning },
         null,
         2
       ),
@@ -192,6 +203,7 @@ export async function executePay(
       {
         ok: true,
         status: "ok",
+        call_id: callId,
         txid: mockTxid,
         amount_zec: input.amount_zec,
         amount_zats: amountZats?.toString(),

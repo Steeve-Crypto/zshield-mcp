@@ -19,7 +19,7 @@ Every call writes at least one row. A call that passes policy writes a `pending`
 | `cap_zec` | string or number | Active hard per-call cap |
 | `status` | `pending` \| `ok` \| `rejected` \| `error` | `pending` is written before the send; the others are outcomes |
 | `mock_txid` | string? | Present on success in mock mode |
-| `view_key_fingerprint` | string | `sha256(salt \| viewKeyMaterial)[0:16]`, **never** the raw key |
+| `view_key_fingerprint` | string or null | `sha256(salt \| UFVK)[0:16]`, the same on every row from one wallet. **Never** the key itself. `null` when the key could not be read, in which case nothing is sent |
 | `code` | string? | Stable machine code on `rejected` and `error` rows, such as `CAP_EXCEEDED`. See the README for the full list |
 | `error` | string? | Policy or runtime message |
 | `memo` | string? | Optional memo, at most 512 UTF-8 bytes |

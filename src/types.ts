@@ -39,7 +39,8 @@ export interface AuditEntry {
   cap_zec: number | string;
   status: PayStatus;
   mock_txid?: string;
-  view_key_fingerprint: string;
+  /** Salted hash of the wallet UFVK, the same on every row from one wallet. Null when the key could not be read */
+  view_key_fingerprint: string | null;
   /** Stable machine code on rejected and error rows, see README */
   code?: string;
   error?: string;
@@ -105,7 +106,5 @@ export interface PaymentReceipt {
   amountZats: bigint;
   recipient: string;
   memo?: string;
-  /** Opaque viewing-key material used only for fingerprinting, never logged raw */
-  viewKeyMaterial: string;
   mode: ChainMode;
 }

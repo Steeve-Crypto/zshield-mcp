@@ -11,7 +11,8 @@ It is a policy gate for a single local operator. It is not a custody system, it 
 ## Where keys live
 
 - **Mock mode.** There are no keys. The mock wallet is an in-memory ledger that starts at 10 ZEC and resets when the server restarts.
-- **Testnet mode.** The wallet seed and spending keys live in the `zingo-cli` wallet file, by default `~/.zshield-testnet/wallet/zingo-wallet.dat`. `zingo-cli` creates and manages that file. zshield-mcp never reads it, never parses it, and never passes a seed, spending key, or viewing key to the agent or into the audit log.
+- **Testnet mode.** The wallet seed and spending keys live in the `zingo-cli` wallet file, by default `~/.zshield-testnet/wallet/zingo-wallet.dat`. `zingo-cli` creates and manages that file. zshield-mcp never reads or parses it directly, and never passes a seed, spending key, or viewing key to the agent or into the audit log.
+- **The viewing key in memory.** In testnet mode the server runs `zingo-cli export_ufvk` once per process, in an offline session, and keeps the unified full viewing key (UFVK) in memory to compute the audit fingerprint. It is never logged, written to disk, or returned by a tool. Anyone who can read the server's memory can read it, which is the same exposure as the wallet file.
 - **The agent and the model.** They hold no keys. They see only tool results: txids, amounts, balances, the wallet's receive address, and transaction summaries.
 - **The fingerprint salt.** `VIEW_KEY_FINGERPRINT_SALT` comes from the environment or `config/default.yaml`. The default value is `dev-only-change-me`. It is never returned by any tool or by the policy resource.
 
@@ -79,14 +80,16 @@ Limits today:
 
 ## The viewing-key fingerprint
 
-Each payment row has a `view_key_fingerprint`. Despite the name, **it is not derived from a real viewing key** in either mode:
+Each payment row has a `view_key_fingerprint`. It is the first 16 hex characters of `sha256(salt | UFVK)`:
 
-- In mock mode the "viewing-key material" is a hash of the mock txid and the recipient.
-- In testnet mode it is also `sha256(txid | recipient)`, built in `src/chain/live.ts`. It never touches the wallet's actual unified full viewing key.
-- The logged value is the first 16 hex characters of `sha256(salt | material)`.
-- Rejected, failed, and `pending` rows use a fixed fingerprint of the word `none`, so those rows all share one value under a given salt.
+- In testnet mode the UFVK is the wallet's real unified full viewing key, read with `zingo-cli export_ufvk` (see `getViewingKey` in `src/chain/live.ts`). Only a testnet key (`uviewtest1...`) is accepted.
+- In mock mode it is a fixed fake key, `MOCK_UFVK` in `src/chain/mock.ts`, so mock rows are deterministic.
+- Every row of every call carries it, including `pending`, `rejected`, and `error` rows. All rows from one wallet share one value under a given salt.
+- If the key cannot be read, the row records `null`. A call that passes policy is then refused with `VIEWKEY_UNAVAILABLE` and nothing is sent.
 
-So today the fingerprint works as a salted tag for each transaction. It does not let an auditor prove anything about the wallet's keys, and it adds little beyond the txid that the same row already stores. A real design would fingerprint the wallet's UFVK once and record it on every row, so an auditor holding the UFVK could match the log to the chain. That is not built yet.
+What it gives an auditor: holding the UFVK and the salt, they can recompute the fingerprint and confirm which wallet a log belongs to. With the UFVK they can also decrypt that wallet's transactions on chain and match each `ok` row to its txid. The tool response carries the same `call_id` as the audit rows, so a receipt can be matched to its rows.
+
+What it does not give: it is not a signature. Anyone who knows the UFVK and the salt can compute the fingerprint and write fake rows with it. The fingerprint is 64 bits, which is fine for telling wallets apart but is not a security proof. With the default salt, `dev-only-change-me`, anyone holding the UFVK can confirm it matches a log. Change the salt if that matters.
 
 ## Threats and mitigations
 
@@ -124,6 +127,7 @@ So today the fingerprint works as a salted tag for each transaction. It does not
 - Payment flow and audit ordering: `src/tools/pay.ts`
 - Read-only tools: `src/tools/read.ts`, `src/tools/balance.ts`, `src/tools/address.ts`, `src/tools/history.ts`
 - Network checks: `src/chain/network.ts`
-- Testnet adapter and fingerprint material: `src/chain/live.ts`
+- Testnet adapter and viewing-key read: `src/chain/live.ts`
+- Fingerprint hash: `src/audit/log.ts`
 - Startup refusal of mainnet: `src/config.ts`, `src/index.ts`
 - Stable codes: `src/errors.ts`

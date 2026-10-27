@@ -138,6 +138,7 @@ Branch on `code`. It is stable. `message` is for people and may change. `error` 
 | Code | Meaning |
 |------|---------|
 | `AUDIT_WRITE_FAILED` | The `pending` audit row could not be written, so the payment was not sent |
+| `VIEWKEY_UNAVAILABLE` | The wallet's viewing key could not be read for the audit fingerprint, so the payment was not sent |
 | `CHAIN_ERROR` | Policy passed and the send was attempted, but the chain or `zingo-cli` failed. A `pending` row exists. Check `zcash_history` before retrying, because a timeout can hide a send that did go out |
 | `CONFIG_ERROR` | The server is misconfigured, for example testnet mode without the testnet adapter. Nothing was sent |
 
@@ -246,7 +247,7 @@ JSONL per day: `audits/YYYY-MM-DD.jsonl`. A call that passes policy writes a `pe
 {"ts":"2026-10-05T19:00:00.000Z","tool":"zcash_pay","call_id":"3f0c…","amount_zec":0.05,"amount_zats":"5000000","recipient":"u1…","allowlist_hit":true,"cap_zec":0.1,"status":"ok","mock_txid":"mock_…","view_key_fingerprint":"a1b2c3d4e5f60718","memo":"test"}
 ```
 
-Raw viewing-key material is **never** written, only a short fingerprint. See [docs/AUDIT.md](docs/AUDIT.md). Today that fingerprint comes from the txid and recipient, not from the wallet's real viewing key, in both mock and testnet mode. [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md) explains what that means.
+The viewing key itself is **never** written or returned, only a short fingerprint of it. `view_key_fingerprint` is the first 16 hex characters of `sha256(salt | UFVK)`, where UFVK is the wallet's unified full viewing key. In testnet mode the server reads it once per process with `zingo-cli export_ufvk` in an offline session and keeps it in memory. Mock mode uses a fixed fake key. Every row from one wallet carries the same fingerprint, so anyone holding the UFVK and the salt can confirm which wallet wrote a log, then match each row to the chain by its txid. The tool response includes the same `call_id` as the audit rows. See [docs/AUDIT.md](docs/AUDIT.md) and [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md).
 
 ## Security model
 
@@ -311,7 +312,7 @@ One real shielded 0.001 TAZ payment through `zcash_pay`, plus a blocked over-cap
 - ✅ Read-only balance, receive address, and history tools
 - ✅ Stable rejection codes
 - ❌ Daily or rolling spend limits (per call only for now)
-- ❌ Fingerprint from the wallet's real viewing key
+- ✅ Audit fingerprint from the wallet's real viewing key (UFVK)
 - ❌ Mainnet (refused by design)
 - ❌ Custody of user spend keys
 
