@@ -142,7 +142,7 @@ describe("findPossibleSends", () => {
   const tx = (over: Partial<TxSummary>): TxSummary => ({ txid: TXID, status: "transmitted", kind: "sent", valueZats: 5n, ...over });
   const chainOf = (txs: TxSummary[]) => ({ async getHistory() { return txs; }, async getViewingKey() { return TEST_UFVK; } }) as unknown as ChainAdapter;
 
-  it("matches sent transactions of the same amount that are recent or have no time", async () => {
+  it("matches recent sent transactions of the same amount and skips failed ones", async () => {
     const now = Date.now();
     const found = await findPossibleSends(
       chainOf([
@@ -151,6 +151,7 @@ describe("findPossibleSends", () => {
         tx({ txid: "3".repeat(64), time: new Date(now - 3 * 60 * 60_000).toISOString() }),
         tx({ txid: "4".repeat(64), valueZats: 6n }),
         tx({ txid: "5".repeat(64), kind: "received" }),
+        tx({ txid: "6".repeat(64), status: "failed" }),
       ]),
       5n,
       now

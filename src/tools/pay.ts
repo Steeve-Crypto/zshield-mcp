@@ -45,7 +45,8 @@ export async function findPossibleSends(chain: ChainAdapter, amountZats: bigint,
   try {
     const txs = await chain.getHistory(20);
     return txs
-      .filter((t) => /sent/i.test(t.kind) && t.valueZats === amountZats)
+      // A failed transaction expired or was rejected, so it did not pay anyone.
+      .filter((t) => /sent/i.test(t.kind) && t.valueZats === amountZats && t.status !== "failed")
       .filter((t) => {
         if (!t.time) return true;
         const ms = Date.parse(t.time);
