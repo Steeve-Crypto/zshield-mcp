@@ -3,6 +3,7 @@ import { writeAuditRow } from "../audit/log.js";
 import { matchSend } from "../tools/pay.js";
 import type { AuditEntry, Config, MatchConfidence, PossibleSend } from "../types.js";
 import { paymentIndexFor, type PaymentRecord } from "./index.js";
+import { SEND_QUEUE_WAIT_MAX_MS, sendLockFor } from "./lock.js";
 
 /**
  * How long after its pending row a send that never showed up counts as not sent. zingo-cli
@@ -111,7 +112,8 @@ export async function reconcile(
  * On startup: find sends with a pending row and no result row (the process stopped
  * mid-send), reconcile each against wallet history, and write one recovery row each.
  * Rows already settled by an earlier recovery (confirmed or not_found) are skipped.
- * Never resends. Never throws.
+ * Holds the wallet's send lock while it runs, so no send overlaps it and two zingo-cli
+ * runs never share the wallet. Never resends. Never throws.
  */
 export async function recoverPendingPayments(
   config: Config,
@@ -121,6 +123,26 @@ export async function recoverPendingPayments(
   const index = paymentIndexFor(config);
   const todo = index.unresolved();
   if (todo.length === 0) return [];
+  let release: () => void;
+  try {
+    release = await sendLockFor(chain).acquire(SEND_QUEUE_WAIT_MAX_MS);
+  } catch {
+    return [];
+  }
+  try {
+    return await recoverLocked(config, chain, todo, opts);
+  } finally {
+    release();
+  }
+}
+
+async function recoverLocked(
+  config: Config,
+  chain: ChainAdapter,
+  todo: PaymentRecord[],
+  opts: { now?: number; maxLagBlocks?: number }
+): Promise<RecoveryAuditEntry[]> {
+  const index = paymentIndexFor(config);
   const synced = walletSynced(chain, opts.maxLagBlocks ?? config.healthMaxLagBlocks ?? 10);
   const rows: RecoveryAuditEntry[] = [];
   for (const record of todo) {

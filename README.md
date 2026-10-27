@@ -82,7 +82,7 @@ Other protections on every send:
 
 - **One send at a time per wallet.** A second call waits up to `SEND_QUEUE_WAIT_MS` for the first to finish, then gets `BUSY`.
 - **Health check first (testnet mode).** Before the `pending` row, the server checks that the lightwalletd server answers, the wallet is within `HEALTH_MAX_LAG_BLOCKS` of the chain tip, and spendable funds cover the amount plus a 0.0001 ZEC fee estimate. A failure returns `CHAIN_UNREACHABLE`, `WALLET_NOT_SYNCED`, or `INSUFFICIENT_FUNDS` and sends nothing.
-- **Recovery on startup.** If the server stopped between the `pending` row and the result row, the next start looks for the send in wallet history, matched on recipient, amount, and memo. It writes one `zcash_pay_recovery` row: `confirmed` with the txid, `not_found` once the wallet is synced and two hours have passed with no match, or `unknown`. It never sends again. `unknown` ones are checked again on the next start.
+- **Recovery on startup.** If the server stopped between the `pending` row and the result row, the next start looks for the send in wallet history, matched on recipient, amount, and memo. It writes one `zcash_pay_recovery` row: `confirmed` with the txid, `not_found` once the wallet is synced and two hours have passed with no match, or `unknown`. It never sends again, and it holds the send lock while it runs, so a payment made right after startup waits for it. `unknown` ones are checked again on the next start.
 
 ## Resource: `zshield://policy`
 
