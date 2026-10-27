@@ -55,33 +55,78 @@ export interface SendTarget {
   amountZats: bigint;
   recipient: string;
   memo?: string;
+  /**
+   * The chain height recorded when the call started. A mined transaction below it, less
+   * REORG_SLACK_BLOCKS, cannot be this call's send.
+   */
+  notBeforeHeight?: number;
 }
+
+/** Blocks a recorded tip may exceed the height a new transaction lands at, after a reorg. */
+export const REORG_SLACK_BLOCKS = 5;
 
 /**
  * Match one history entry against a send. A match needs a sent, not failed, transaction
- * with an outgoing note to the same recipient for the same amount, and the same memo when
- * one was given. Amount alone never matches. Confidence is high when the memo matched too,
- * medium when no memo was given, and one step lower when the entry has no time yet.
- * An entry from before the call started (beyond clock skew), or long after it, never matches.
+ * with an outgoing note to the same recipient for the same amount and the same memo: a
+ * send with no memo only matches a note with none, so it never takes a transaction that
+ * carries someone's message. Amount alone never matches.
+ * The entry must also fit the call in time. With a time, it must fall between the start
+ * (less clock skew) and MATCH_AFTER_MS after it. Without one, a mined entry must sit at or
+ * above the height recorded at the start; an entry that cannot be placed in time is only a
+ * low confidence candidate and is never confirmed on its own.
  */
 export function matchSend(t: TxSummary, target: SendTarget, startedAt: number): PossibleSend | undefined {
   if (!/sent/i.test(t.kind) || t.status === "failed") return undefined;
-  const memo = target.memo?.trim();
+  const memo = (target.memo ?? "").trim();
   const note = (t.outgoing ?? []).find(
-    (n) => n.recipient === target.recipient && n.valueZats === target.amountZats && (!memo || n.memo.trim() === memo)
+    (n) => (n.recipient === target.recipient || n.unifiedAddress === target.recipient) && n.valueZats === target.amountZats && n.memo.trim() === memo
   );
   if (!note) return undefined;
   const matched = ["recipient", "amount", ...(memo ? ["memo"] : [])];
   let confidence: MatchConfidence = memo ? "high" : "medium";
   const ms = t.time ? Date.parse(t.time) : NaN;
-  if (Number.isNaN(ms)) {
-    confidence = confidence === "high" ? "medium" : "low";
-  } else if (ms < startedAt - MATCH_SKEW_MS || ms > startedAt + MATCH_AFTER_MS) {
-    return undefined;
-  } else {
+  const minHeight = target.notBeforeHeight === undefined ? undefined : target.notBeforeHeight - REORG_SLACK_BLOCKS;
+  if (!Number.isNaN(ms)) {
+    if (ms < startedAt - MATCH_SKEW_MS || ms > startedAt + MATCH_AFTER_MS) return undefined;
     matched.push("time");
+  } else if (t.blockHeight !== undefined && minHeight !== undefined) {
+    if (t.blockHeight < minHeight) return undefined;
+    matched.push("height");
+  } else {
+    confidence = confidence === "high" ? "medium" : "low";
   }
   return { txid: t.txid, confidence, matched, status: t.status };
+}
+
+/**
+ * A sent entry that could be this call's send if the recipient or memo were written
+ * differently: the same amount, not failed, and not placed outside the call's time. Used
+ * to refuse "never sent" while one exists that no call owns, so a wallet that lists a
+ * recipient in a form this code does not know can never turn a real send into "not sent".
+ */
+export function lookalikeSends(
+  txs: TxSummary[],
+  target: SendTarget,
+  startedAt: number,
+  claimedBy?: (txid: string) => string | undefined,
+  callId?: string
+): TxSummary[] {
+  const minHeight = target.notBeforeHeight === undefined ? undefined : target.notBeforeHeight - REORG_SLACK_BLOCKS;
+  return txs.filter((t) => {
+    if (!/sent/i.test(t.kind) || t.status === "failed") return false;
+    if (t.valueZats !== target.amountZats && !(t.outgoing ?? []).some((n) => n.valueZats === target.amountZats)) return false;
+    const owner = claimedBy?.(t.txid);
+    if (owner && owner !== callId) return false;
+    const ms = t.time ? Date.parse(t.time) : NaN;
+    if (!Number.isNaN(ms)) return ms >= startedAt - MATCH_SKEW_MS && ms <= startedAt + MATCH_AFTER_MS;
+    if (t.blockHeight !== undefined && minHeight !== undefined) return t.blockHeight >= minHeight;
+    return true;
+  });
+}
+
+/** Whether a match is placed in time, by its timestamp or its mined height. */
+export function placedInTime(m: PossibleSend): boolean {
+  return m.matched.includes("time") || m.matched.includes("height");
 }
 
 /**
@@ -138,7 +183,7 @@ export const payInputSchema = z.object({
   memo: z
     .string()
     .max(MAX_MEMO_BYTES)
-    .refine((m) => memoProblem(m) === undefined, `INVALID_MEMO: memo is longer than ${MAX_MEMO_BYTES} bytes`)
+    .refine((m) => memoProblem(m) === undefined, `INVALID_MEMO: memo is longer than ${MAX_MEMO_BYTES} bytes or has a control character`)
     .optional()
     .describe(`Optional memo, at most ${MAX_MEMO_BYTES} UTF-8 bytes (the Zcash memo size). Sent to the recipient and written to the audit log`),
   idempotency_key: z

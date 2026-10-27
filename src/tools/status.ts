@@ -2,9 +2,9 @@ import { z } from "zod";
 import { TESTNET_EXPLORER } from "../chain/live.js";
 import type { ChainAdapter } from "../chain/types.js";
 import { recentRefusal, recentRefusalByKey, storeFor, type CallRecord, type PaymentStore } from "../payments/store.js";
-import { boundedSync, chainEvidence, reconcile, recordReconcile, RECOVERY_EXPIRY_MS } from "../payments/recovery.js";
+import { boundedSync, chainEvidence, countRivals, reconcile, recordReconcile, RECOVERY_EXPIRY_MS } from "../payments/recovery.js";
 import { acquireWalletLock, BusyError, type WalletLock } from "../payments/lock.js";
-import { inFlightCall } from "./pay.js";
+import { inFlightCall, placedInTime } from "./pay.js";
 import type { Config, PossibleSend } from "../types.js";
 import type { SyncResult } from "../chain/sync.js";
 import { ReadRejection, runReadTool, type ReadDeps } from "./read.js";
@@ -216,12 +216,14 @@ async function fromChain(
   if (!intent) return { ...common, state: "unknown", message: "No intent recorded to check against. Do not pay again." };
 
   // Outcome not recorded (SEND_UNCONFIRMED, or the process stopped mid-send): look for it.
+  const rivals = safely(() => countRivals(store, record)) ?? 1;
   const r = await reconcile(record, chain, {
     now,
     offline,
     evidence: chainEvidence(chain, offline ? sync : undefined, config.healthMaxLagBlocks ?? 10),
     claimedBy: (txid) => safeOwner(store, txid),
     live: chain.checkHealth !== undefined,
+    rivals,
   });
   const after = safely(() => recordReconcile(store, r, "status"));
   if (r.status === "confirmed" && r.txid && (!after || after.txid === r.txid)) {
@@ -229,7 +231,7 @@ async function fromChain(
   }
   if (r.status === "not_found") return { ...common, state: "expired", code: "PAYMENT_EXPIRED", message: r.note };
   const candidates = r.possible_sends ?? [];
-  if (candidates.length === 1 && candidates[0].status !== "failed") {
+  if (candidates.length === 1 && candidates[0].status !== "failed" && placedInTime(candidates[0]) && !rivals) {
     return { ...common, state: "broadcast", txid: candidates[0].txid, possible_sends: candidates, message: r.note };
   }
   return {

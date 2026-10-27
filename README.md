@@ -142,7 +142,7 @@ Branch on `code`. It is stable. `message` is for people and may change. `error` 
 | Code | Meaning |
 |------|---------|
 | `INVALID_RECIPIENT` | Recipient is empty, longer than 256 characters, or has characters that cannot appear in an address. The value is not repeated in the message |
-| `INVALID_MEMO` | Memo is longer than 512 UTF-8 bytes |
+| `INVALID_MEMO` | Memo is longer than 512 UTF-8 bytes, or has a control or line-break character. A memo is one line of text |
 | `INVALID_AMOUNT` | Amount is not a positive decimal with at most 8 decimals, or is above the 21,000,000 ZEC supply |
 | `CAP_EXCEEDED` | Amount is above `SPENDING_CAP_ZEC` |
 | `INVALID_CAP` | The configured cap itself is not valid, so every payment is refused |

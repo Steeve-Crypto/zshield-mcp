@@ -146,6 +146,8 @@ export interface OutgoingNote {
   valueZats: bigint;
   /** Empty when the note has no memo */
   memo: string;
+  /** The unified address the wallet lists next to a different `recipient`, when it does */
+  unifiedAddress?: string;
 }
 
 /** How sure a match between a send and a history entry is. */
