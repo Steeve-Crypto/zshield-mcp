@@ -66,13 +66,13 @@ Or during development: `"command": "npx", "args": ["tsx", "src/index.ts"]` with 
 | `amount_zec` | string or number | yes | Decimal ZEC such as `"0.05"`, at most 8 decimals and 32 characters. Must be `> 0` and `<= SPENDING_CAP_ZEC`, compared as integer zatoshis. Never rounded |
 | `recipient` | string | yes | At most 256 characters, visible ASCII only. Must exactly match an allow-list `address` |
 | `memo` | string | no | Optional memo, at most 512 UTF-8 bytes (the Zcash memo size) |
-| `idempotency_key` | string | no | 1 to 128 characters: letters, digits, `.`, `_`, `:`, `-`. Makes a retry safe, see below |
+| `idempotency_key` | string | live: yes. mock: no | 1 to 128 characters: letters, digits, `.`, `_`, `:`, `-`. Makes a retry safe, see below. A live payment without one is refused with `IDEMPOTENCY_KEY_REQUIRED` |
 
 Oversized or malformed input is rejected before anything else runs. Error messages never repeat the amount text, recipient, or memo, and errors from `zingo-cli` have them replaced with `[recipient]` and `[memo]`. Each audit row is capped at 8 KiB, see [docs/AUDIT.md](docs/AUDIT.md).
 
 ### Safe retries
 
-Pass an `idempotency_key` you choose, such as an order id. The server binds it in the payment store, so it survives a restart and holds across every server process on the same wallet.
+Pass an `idempotency_key` you choose, such as an order id. Live payments require one, so no live payment can be repeated by a retry, a restart, or a second process. The server binds it in the payment store, so it survives a restart and holds across every server process on the same wallet.
 
 - Same key, same amount, recipient, and memo: nothing is sent again. You get the first call's result with `idempotent_replay: true` and the first `call_id`. If the first call has no result yet, you get `PAYMENT_PENDING`. If the wallet has since marked the first call's transaction failed, you get `PAYMENT_FAILED` and nothing is sent. A failed send does not reuse its key: pay again with a new one.
 - Same key, anything different: `IDEMPOTENCY_CONFLICT`. Nothing is sent.
@@ -151,6 +151,7 @@ Branch on `code`. It is stable. `message` is for people and may change. `error` 
 | `NOT_ALLOWLISTED` | Recipient is not an exact match for an allow-list entry |
 | `ALLOWLIST_UNAVAILABLE` | The allow-list file is missing or malformed, so every payment is refused |
 | `INVALID_IDEMPOTENCY_KEY` | `idempotency_key` is empty, longer than 128 characters, or has characters other than letters, digits, `.`, `_`, `:`, `-` |
+| `IDEMPOTENCY_KEY_REQUIRED` | A live payment was called without an `idempotency_key`. Nothing is sent. Choose a key such as an order id and call again |
 | `IDEMPOTENCY_CONFLICT` | `idempotency_key` was already used for a payment with a different amount, recipient, or memo |
 
 `status` is `error` when something failed outside policy:

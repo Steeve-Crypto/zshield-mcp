@@ -100,7 +100,7 @@ describe("SEND_UNCONFIRMED", () => {
       txBlock("bb".repeat(32), "sent", 100_000, utcNow(-2 * 60 * 60_000)),
     ].join("\n");
     const r = await executePay(
-      { amount_zec: "0.001", recipient: UTEST, memo: "m" },
+      { idempotency_key: "t-su-1", amount_zec: "0.001", recipient: UTEST, memo: "m" },
       { config, chain: chainWith(new CliTimeoutError("stopped after 900000 ms"), history) }
     );
     assert.equal(r.ok, false);
@@ -122,7 +122,7 @@ describe("SEND_UNCONFIRMED", () => {
   it("still reports SEND_UNCONFIRMED when the history lookup fails", async () => {
     const config = liveConfig();
     const r = await executePay(
-      { amount_zec: "0.001", recipient: UTEST },
+      { idempotency_key: "t-su-2", amount_zec: "0.001", recipient: UTEST },
       { config, chain: chainWith(new CliTimeoutError("stopped"), new Error("offline")) }
     );
     const body = JSON.parse(r.text);
@@ -134,7 +134,7 @@ describe("SEND_UNCONFIRMED", () => {
     const config = liveConfig();
     const calls: string[][] = [];
     const r = await executePay(
-      { amount_zec: "0.001", recipient: UTEST },
+      { idempotency_key: "t-su-3", amount_zec: "0.001", recipient: UTEST },
       { config, chain: chainWith(new Error("zingo-cli failed: insufficient funds"), "", calls) }
     );
     assert.equal(r.code, "CHAIN_ERROR");

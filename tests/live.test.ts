@@ -91,22 +91,22 @@ describe("policy runs before chain in live mode", () => {
     const calls: string[][] = [];
     const chain = new LiveChainAdapter({ network: "testnet", runner: okRunner(calls) });
     const c = cfg();
-    const over = await executePay({ amount_zec: 1, recipient: UTEST }, { config: c, chain });
+    const over = await executePay({ idempotency_key: "t-live-1", amount_zec: 1, recipient: UTEST }, { config: c, chain });
     assert.equal(over.audit.status, "rejected");
-    const notListed = await executePay({ amount_zec: 0.001, recipient: ZTEST }, { config: c, chain });
+    const notListed = await executePay({ idempotency_key: "t-live-2", amount_zec: 0.001, recipient: ZTEST }, { config: c, chain });
     assert.equal(notListed.audit.status, "rejected");
-    const mainnet = await executePay({ amount_zec: 0.001, recipient: "u1mainnetlisted" }, { config: c, chain });
+    const mainnet = await executePay({ idempotency_key: "t-live-3", amount_zec: 0.001, recipient: "u1mainnetlisted" }, { config: c, chain });
     assert.equal(mainnet.audit.status, "rejected");
     assert.equal(mainnet.audit.code, "MAINNET_REFUSED");
     assert.equal(calls.length, 0);
-    const ok = await executePay({ amount_zec: 0.001, recipient: UTEST }, { config: c, chain });
+    const ok = await executePay({ idempotency_key: "t-live-4", amount_zec: 0.001, recipient: UTEST }, { config: c, chain });
     assert.equal(ok.audit.status, "ok");
     assert.equal(ok.audit.mock_txid, TXID);
   });
   it("passes exact zatoshis to zingo-cli without rounding", async () => {
     const calls: string[][] = [];
     const chain = new LiveChainAdapter({ network: "testnet", runner: okRunner(calls) });
-    const r = await executePay({ amount_zec: "0.00012345", recipient: UTEST }, { config: cfg(), chain });
+    const r = await executePay({ idempotency_key: "t-live-5", amount_zec: "0.00012345", recipient: UTEST }, { config: cfg(), chain });
     assert.equal(r.audit.status, "ok");
     assert.equal(r.audit.amount_zats, "12345");
     assert.ok(calls[0].at(-1)?.startsWith(`quicksend '[{"address":"${UTEST}","amount":12345}]'`));
@@ -114,7 +114,7 @@ describe("policy runs before chain in live mode", () => {
   it("rejects sub-zatoshi amounts before any CLI call", async () => {
     const calls: string[][] = [];
     const chain = new LiveChainAdapter({ network: "testnet", runner: okRunner(calls) });
-    const r = await executePay({ amount_zec: "0.000000015", recipient: UTEST }, { config: cfg(), chain });
+    const r = await executePay({ idempotency_key: "t-live-6", amount_zec: "0.000000015", recipient: UTEST }, { config: cfg(), chain });
     assert.equal(r.audit.status, "rejected");
     assert.match(r.audit.error ?? "", /more than 8 decimal places/);
     assert.equal(calls.length, 0);

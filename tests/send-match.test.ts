@@ -102,7 +102,7 @@ describe("send matching (V12 F-8)", () => {
       throw new CliTimeoutError("stopped after 900000 ms");
     };
     const chain = new LiveChainAdapter({ network: "testnet", runner: withUfvk(runner) });
-    const r = await pay.executePay({ amount_zec: "0.001", recipient: RECIPIENT, memo: "zshield-mcp testnet demo" }, { config, chain });
+    const r = await pay.executePay({ idempotency_key: "t-send-match-1", amount_zec: "0.001", recipient: RECIPIENT, memo: "zshield-mcp testnet demo" }, { config, chain });
     const body = JSON.parse(r.text);
     assert.equal(body.code, "SEND_UNCONFIRMED");
     assert.deepEqual(body.possible_txids, []);

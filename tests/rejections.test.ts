@@ -112,7 +112,7 @@ describe("zcash_pay rejection codes", () => {
     for (const addr of ["u1mainnetlisted", "zs1mainnetlisted", "t1mainnetlisted"]) {
       const calls: string[][] = [];
       const config = liveConfig([addr]);
-      const r = await executePay({ amount_zec: "0.001", recipient: addr }, { config, chain: liveChain(calls) });
+      const r = await executePay({ idempotency_key: "t-rej-1", amount_zec: "0.001", recipient: addr }, { config, chain: liveChain(calls) });
       expectCode(r, config, "rejected", "MAINNET_REFUSED");
       assert.equal(calls.length, 0);
       assert.deepEqual(readAuditRows(config).map((x) => x.status), ["rejected"]);
@@ -122,7 +122,7 @@ describe("zcash_pay rejection codes", () => {
   it("INVALID_ADDRESS for an address from no known Zcash network in testnet mode", async () => {
     const calls: string[][] = [];
     const config = liveConfig(["bc1notzcash"]);
-    const r = await executePay({ amount_zec: "0.001", recipient: "bc1notzcash" }, { config, chain: liveChain(calls) });
+    const r = await executePay({ idempotency_key: "t-rej-2", amount_zec: "0.001", recipient: "bc1notzcash" }, { config, chain: liveChain(calls) });
     expectCode(r, config, "rejected", "INVALID_ADDRESS");
     assert.equal(calls.length, 0);
   });
@@ -152,7 +152,7 @@ describe("zcash_pay error codes", () => {
     const chain = liveChain([], async () => {
       throw new Error("zingo-cli failed: insufficient funds");
     });
-    const r = await executePay({ amount_zec: "0.001", recipient: UTEST }, { config, chain });
+    const r = await executePay({ idempotency_key: "t-rej-3", amount_zec: "0.001", recipient: UTEST }, { config, chain });
     expectCode(r, config, "error", "CHAIN_ERROR");
   });
 

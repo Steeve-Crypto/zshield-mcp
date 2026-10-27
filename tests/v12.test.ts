@@ -114,7 +114,7 @@ describe("V12 F-8: possible sends are matched on the whole history and the recip
       throw new Error(`unexpected ${args.at(-1)}`);
     };
     const chain = new LiveChainAdapter({ network: "testnet", runner: withUfvk(runner) });
-    const r = JSON.parse((await executePay({ amount_zec: "0.001", recipient: R }, { config, chain })).text);
+    const r = JSON.parse((await executePay({ idempotency_key: "t-v12-1", amount_zec: "0.001", recipient: R }, { config, chain })).text);
     assert.equal(r.code, "SEND_UNCONFIRMED");
     return (r.possible_sends ?? []) as { txid: string }[];
   };
@@ -167,7 +167,7 @@ describe("V12 F-16: endpoint credentials never reach the caller", () => {
       server,
       runner: async (b, a, o) => (a.at(-1) === "info" ? runner(b, a, o) : ufvk(b, a, o)),
     });
-    const r = await executePay({ amount_zec: "0.001", recipient: R }, { config, chain: wrapped });
+    const r = await executePay({ idempotency_key: "t-v12-2", amount_zec: "0.001", recipient: R }, { config, chain: wrapped });
     assert.equal(r.code, "CHAIN_UNREACHABLE");
     for (const secret of ["hunter2secret", "tok3nsecretvalue"]) {
       assert.ok(!r.text.includes(secret), r.text);

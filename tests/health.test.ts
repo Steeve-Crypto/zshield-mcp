@@ -33,7 +33,7 @@ function chain(health: Parameters<typeof withUfvk>[1] = {}, info?: CliRunner) {
 }
 
 const pay = (c: LiveChainAdapter, config = liveConfig()) =>
-  executePay({ amount_zec: "0.001", recipient: UTEST }, { config, chain: c }).then((r) => ({ r, config }));
+  executePay({ idempotency_key: "t-health-1", amount_zec: "0.001", recipient: UTEST }, { config, chain: c }).then((r) => ({ r, config }));
 
 beforeEach(() => resetPaymentIndexes());
 
@@ -110,7 +110,7 @@ describe("pre-send health check", () => {
   });
 
   it("mock mode skips the check", async () => {
-    const r = await executePay({ amount_zec: "0.001", recipient: ALLOWED }, { config: tempConfig(), chain: new MockChainAdapter() });
+    const r = await executePay({ idempotency_key: "t-health-2", amount_zec: "0.001", recipient: ALLOWED }, { config: tempConfig(), chain: new MockChainAdapter() });
     assert.equal(r.ok, true);
   });
 });
