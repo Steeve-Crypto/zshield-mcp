@@ -1,0 +1,105 @@
+Server-Selection Sweep: bootstrapping a dedicated sweep transport (its Exit Node is recycled when the sweep completes)...
+Server-Selection Sweep: 1 of 2 candidates answered; judging the live cohort...
+Server-Selection Sweep: sync attaches to the pinned server https://testnet.zec.rocks:443/ (live cohort of 1).
+Launching sync task...
+Launching save task...
+(test) Block:0 [Syncing] >> {
+  "scan_ranges": [
+    {
+      "priority": "Scanned",
+      "start_block": "4492314",
+      "end_block": "4547631"
+    },
+    {
+      "priority": "Verify",
+      "start_block": "4547632",
+      "end_block": "4547636"
+    }
+  ],
+  "sync_start_height": 0,
+  "session_blocks_scanned": 0,
+  "total_blocks_scanned": 0,
+  "percentage_total_blocks_scanned": 0,
+  "session_sapling_outputs_scanned": 0,
+  "total_sapling_outputs_scanned": 0,
+  "session_orchard_outputs_scanned": 0,
+  "total_orchard_outputs_scanned": 0,
+  "session_ironwood_outputs_scanned": 0,
+  "total_ironwood_outputs_scanned": 0,
+  "percentage_total_outputs_scanned": 0,
+  "total_outputs_scanned": 0,
+  "total_outputs": 0
+}
+(test) Block:0 [Syncing] >> {
+  "scan_ranges": [
+    {
+      "priority": "Scanned",
+      "start_block": "4492314",
+      "end_block": "4547631"
+    },
+    {
+      "priority": "Verify",
+      "start_block": "4547632",
+      "end_block": "4547636"
+    }
+  ],
+  "sync_start_height": 0,
+  "session_blocks_scanned": 0,
+  "total_blocks_scanned": 0,
+  "percentage_total_blocks_scanned": 0,
+  "session_sapling_outputs_scanned": 0,
+  "total_sapling_outputs_scanned": 0,
+  "session_orchard_outputs_scanned": 0,
+  "total_orchard_outputs_scanned": 0,
+  "session_ironwood_outputs_scanned": 0,
+  "total_ironwood_outputs_scanned": 0,
+  "percentage_total_outputs_scanned": 0,
+  "total_outputs_scanned": 0,
+  "total_outputs": 0
+}
+(test) Block:0 [Syncing] >> {
+  "scan_ranges": [
+    {
+      "priority": "Scanned",
+      "start_block": "4492314",
+      "end_block": "4547638"
+    }
+  ],
+  "sync_start_height": 4547632,
+  "session_blocks_scanned": 7,
+  "total_blocks_scanned": 55325,
+  "percentage_total_blocks_scanned": 100,
+  "session_sapling_outputs_scanned": 0,
+  "total_sapling_outputs_scanned": 220,
+  "session_orchard_outputs_scanned": 0,
+  "total_orchard_outputs_scanned": 665,
+  "session_ironwood_outputs_scanned": 20,
+  "total_ironwood_outputs_scanned": 228362,
+  "percentage_total_outputs_scanned": 100,
+  "total_outputs_scanned": 229247,
+  "total_outputs": 229247
+}
+(test) Block:4547638 [Syncing 229247 / 229247 outputs] >> {
+  "scan_ranges": [
+    {
+      "priority": "Scanned",
+      "start_block": "4492314",
+      "end_block": "4547638"
+    }
+  ],
+  "sync_start_height": 4547632,
+  "session_blocks_scanned": 7,
+  "total_blocks_scanned": 55325,
+  "percentage_total_blocks_scanned": 100,
+  "session_sapling_outputs_scanned": 0,
+  "total_sapling_outputs_scanned": 220,
+  "session_orchard_outputs_scanned": 0,
+  "total_orchard_outputs_scanned": 665,
+  "session_ironwood_outputs_scanned": 20,
+  "total_ironwood_outputs_scanned": 228362,
+  "percentage_total_outputs_scanned": 100,
+  "total_outputs_scanned": 229247,
+  "total_outputs": 229247
+}
+(test) Block:4547641 [Syncing 229247 / 229247 outputs] >> Save task shutdown successfully.
+Zingo CLI quit successfully.
