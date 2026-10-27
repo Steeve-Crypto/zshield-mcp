@@ -3,6 +3,7 @@ import { writeAuditRow } from "../audit/log.js";
 import { lookalikeSends, MATCH_AFTER_MS, MATCH_SKEW_MS, matchHistory, placedInTime } from "../tools/pay.js";
 import type { Config, MatchConfidence, PossibleSend } from "../types.js";
 import { acquireWalletLock, BusyError, type WalletLock } from "./lock.js";
+import { TIP_TOLERANCE_BLOCKS, tipProblem } from "./tip.js";
 import { isSettled, storeFor, type CallEvent, type CallRecord, type CallState, type PaymentStore } from "./store.js";
 import { statusSyncTimeoutMs } from "../chain/live.js";
 import type { SyncResult } from "../chain/sync.js";
@@ -14,8 +15,18 @@ import type { SyncResult } from "../chain/sync.js";
 export const RECOVERY_EXPIRY_MS = 2 * 60 * 60_000;
 /** zingo-cli builds transactions that expire this many blocks after the tip it saw. */
 export const TX_EXPIRY_BLOCKS = 40;
-/** Extra blocks past expiry before a missing send counts as proven not sent. */
-export const EXPIRY_MARGIN_BLOCKS = 10;
+/**
+ * Extra blocks past expiry before a missing send counts as proven not sent. The
+ * transaction is built when zingo-cli runs, up to SEND_TIMEOUT_MS (15 minutes, about 12
+ * blocks) after the tip was recorded, so its expiry can sit that far above the recorded one.
+ */
+export const EXPIRY_MARGIN_BLOCKS = 30;
+/**
+ * A live "not sent" proof also needs this much time since the call started, whatever the
+ * heights say, so a wrong height alone can never make it. Blocks come about every 75
+ * seconds: 40 + 30 of them, plus the send timeout, is well inside two hours.
+ */
+export const LIVE_PROOF_MIN_AGE_MS = RECOVERY_EXPIRY_MS;
 
 /** Startup recovery handles at most this many calls per run, so one lock hold stays short. */
 export const RECOVERY_MAX_CALLS = 100;
@@ -55,6 +66,10 @@ export interface ChainEvidence {
   synced: boolean;
   /** The wallet's scanned height, when known */
   walletHeight?: number;
+  /** The server's chain tip now, when known */
+  chainTip?: number;
+  /** The highest tip recorded for this wallet, when known */
+  tipMark?: number;
 }
 
 export interface ReconcileOptions {
@@ -113,7 +128,7 @@ export async function reconcile(record: CallRecord, chain: ChainAdapter, opts: R
     return { ...base, status: "unknown", note: "The call has no recorded amount in zatoshis; check by hand." };
   }
   const startedAt = Date.parse(intent.ts);
-  const target = { amountZats: BigInt(intent.amount_zats), recipient: intent.recipient, memo: intent.memo, notBeforeHeight: intent.chain_tip };
+  const target = { amountZats: BigInt(intent.amount_zats), recipient: intent.recipient, memo: intent.memo, notBeforeHeight: intent.wallet_height ?? intent.chain_tip };
   let matches: PossibleSend[];
   let lookalikes: PossibleSend[] = [];
   const heights = new Map<string, number | undefined>();
@@ -177,8 +192,22 @@ export async function reconcile(record: CallRecord, chain: ChainAdapter, opts: R
   if (intent.chain_tip === undefined) {
     return { ...base, status: "unknown", note: "No match, but this call has no recorded chain height, so expiry cannot be proven. Check by hand." };
   }
-  const provenAt = intent.chain_tip + TX_EXPIRY_BLOCKS + EXPIRY_MARGIN_BLOCKS;
-  if (ev.walletHeight === undefined || ev.walletHeight <= provenAt) {
+  // The anchor is never below the wallet's own height at the time, and the proof needs a
+  // server that agrees with the wallet and has not gone backwards: a tip below the anchor
+  // or below what was seen before is not evidence of anything.
+  const anchor = Math.max(intent.chain_tip, intent.wallet_height ?? 0);
+  if (ev.chainTip === undefined || ev.walletHeight === undefined) {
+    return { ...base, status: "unknown", note: "No match, but the wallet could not report its height and the chain tip, so it cannot prove the payment was not sent." };
+  }
+  const tipIssue = tipProblem({ chainTip: ev.chainTip, walletHeight: ev.walletHeight }, Math.max(anchor, ev.tipMark ?? 0));
+  if (tipIssue) {
+    return { ...base, status: "unknown", note: `No match, but the chain tip cannot be trusted (${tipIssue}), so it cannot prove the payment was not sent.` };
+  }
+  if (now - startedAt < LIVE_PROOF_MIN_AGE_MS) {
+    return { ...base, status: "unknown", note: "No match yet, and the send has not been outstanding long enough to prove it was not sent." };
+  }
+  const provenAt = anchor + TX_EXPIRY_BLOCKS + EXPIRY_MARGIN_BLOCKS;
+  if (ev.walletHeight <= provenAt) {
     return {
       ...base,
       status: "unknown",
@@ -280,7 +309,7 @@ async function recoverLocked(
 ): Promise<RecoveryAuditEntry[]> {
   // Sync first, bounded, then read history offline so no read starts a sync of its own.
   const sync = await boundedSync(chain, RECOVERY_SYNC_MAX_MS);
-  const evidence = chainEvidence(chain, sync, opts.maxLagBlocks ?? config.healthMaxLagBlocks ?? 10);
+  const evidence = chainEvidence(chain, sync, opts.maxLagBlocks ?? config.healthMaxLagBlocks ?? 10, () => store.readTipMark());
   // One history read for the whole run: the wallet does not change while the lease is
   // held, and N pending calls should not mean N full reads.
   let history: ReturnType<ChainAdapter["getHistory"]> | undefined;
@@ -327,7 +356,12 @@ async function recoverLocked(
  * A once-only read of what the wallet can prove: synced (the bounded sync finished, or
  * the chain has none, and the wallet is within `maxLag` blocks of the tip) and its height.
  */
-export function chainEvidence(chain: ChainAdapter, sync: SyncResult | undefined, maxLag: number): () => Promise<ChainEvidence> {
+export function chainEvidence(
+  chain: ChainAdapter,
+  sync: SyncResult | undefined,
+  maxLag: number,
+  tipMark?: () => number | undefined
+): () => Promise<ChainEvidence> {
   let answer: Promise<ChainEvidence> | undefined;
   return () =>
     (answer ??= (async () => {
@@ -336,7 +370,7 @@ export function chainEvidence(chain: ChainAdapter, sync: SyncResult | undefined,
       try {
         // No sync here: callers run the bounded sync first.
         const h = await chain.checkHealth({ sync: false });
-        return { synced: h.chainTip - h.walletHeight <= maxLag, walletHeight: h.walletHeight };
+        return { synced: h.chainTip - h.walletHeight <= Math.min(maxLag, TIP_TOLERANCE_BLOCKS), walletHeight: h.walletHeight, chainTip: h.chainTip, tipMark: tipMark?.() };
       } catch {
         return { synced: false };
       }

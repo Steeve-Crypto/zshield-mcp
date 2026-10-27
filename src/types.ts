@@ -68,8 +68,10 @@ export interface AuditEntry {
   params_sha256?: string;
   /** Replay rows only: the call whose outcome was returned. Nothing was sent */
   replay_of?: string;
-  /** Testnet pending rows: the chain tip the pre-send check saw, used to prove expiry */
+  /** Testnet pending rows: the height an expiry is proven from (see CallIntent.chain_tip) */
   chain_tip?: number;
+  /** Testnet pending rows: the wallet's own scanned height at the pre-send check */
+  wallet_height?: number;
 }
 
 /** Read-only tools. They never move funds. */

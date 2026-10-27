@@ -45,8 +45,13 @@ export interface CallIntent {
   view_key_fingerprint: string | null;
   idempotency_key?: string;
   params_sha256?: string;
-  /** The chain tip the pre-send check saw. Used to prove expiry later */
+  /**
+   * The height an expiry is proven from: the highest of the tip the pre-send check saw,
+   * the wallet's own height, and the highest tip recorded for this wallet.
+   */
   chain_tip?: number;
+  /** The wallet's own scanned height at the pre-send check. A mined send cannot be below it */
+  wallet_height?: number;
   /** Where it came from when imported from an older audit log */
   imported?: boolean;
 }
@@ -288,6 +293,24 @@ export class PaymentStore {
     return this.readJson<{ call_id: string }>(join(this.sub("txids"), safeName(txid, "txid")))?.call_id;
   }
 
+  /**
+   * The highest chain tip recorded for this wallet, or undefined. It only ever rises, so a
+   * server that later reports a lower tip cannot pull an expiry proof earlier.
+   */
+  readTipMark(): number | undefined {
+    const j = this.readJson<{ height?: unknown }>(join(this.dir, "tip.json"));
+    const h = j?.height;
+    return typeof h === "number" && Number.isSafeInteger(h) && h >= 0 ? h : undefined;
+  }
+
+  /** Record `height` as seen, if it is higher than the mark. Call it under the wallet lock. */
+  raiseTipMark(height: number): void {
+    if (!Number.isSafeInteger(height) || height < 0) return;
+    const current = this.readTipMark();
+    if (current !== undefined && current >= height) return;
+    replaceAtomic(this.dir, "tip.json", JSON.stringify({ height, ts: new Date().toISOString() }));
+  }
+
   /** Credit a txid to a call, once. True when it is this call's (now or before). */
   claimTxid(txid: string, callId: string): boolean {
     if (createExclusive(this.sub("txids"), safeName(txid, "txid"), JSON.stringify({ call_id: callId }))) return true;
@@ -455,6 +478,7 @@ export function importAuditLog(store: PaymentStore, target: { auditDir: string; 
       idempotency_key: i.idempotency_key,
       params_sha256: i.params_sha256,
       chain_tip: typeof i.chain_tip === "number" ? i.chain_tip : undefined,
+      wallet_height: typeof i.wallet_height === "number" ? i.wallet_height : undefined,
       imported: true,
     });
     if (i.idempotency_key && i.params_sha256) store.bindKey(i.idempotency_key, callId, i.params_sha256);
