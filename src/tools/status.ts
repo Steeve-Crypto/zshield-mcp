@@ -220,7 +220,7 @@ async function fromChain(
   const r = await reconcile(record, chain, {
     now,
     offline,
-    evidence: chainEvidence(chain, offline ? sync : undefined, config.healthMaxLagBlocks ?? 10),
+    evidence: chainEvidence(chain, offline ? sync : undefined, config.healthMaxLagBlocks ?? 10, () => safely(() => store.readTipMark())),
     claimedBy: (txid) => safeOwner(store, txid),
     live: chain.checkHealth !== undefined,
     rivals,

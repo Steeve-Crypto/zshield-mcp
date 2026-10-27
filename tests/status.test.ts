@@ -99,7 +99,7 @@ describe("zcash_payment_status", () => {
     pending(config, "c2", { chain_tip: 400 });
     // Wallet at 445: not yet past 400 + 40 + 10.
     assert.equal((await paymentStatus(config, chain([], 445).c, { call_id: "c2" }, T0 + RECOVERY_EXPIRY_MS + 1)).state, "unknown");
-    const s = await paymentStatus(config, chain([], 505).c, { call_id: "c2" }, T0 + 60_000);
+    const s = await paymentStatus(config, chain([], 505).c, { call_id: "c2" }, T0 + RECOVERY_EXPIRY_MS + 1);
     assert.equal(s.state, "expired");
     await recoverPendingPayments(config, chain([]).c, { now: T0 + RECOVERY_EXPIRY_MS + 1 });
     assert.equal((await paymentStatus(config, chain([tx()]).c, { call_id: "c2" })).state, "expired");

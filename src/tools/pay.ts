@@ -11,6 +11,7 @@ import { addressNetwork } from "../chain/network.js";
 import type { PayCode } from "../errors.js";
 import { acquireWalletLock, BusyError, SEND_QUEUE_WAIT_DEFAULT_MS, type WalletLock } from "../payments/lock.js";
 import { LeaseLostError } from "../payments/filelock.js";
+import { expiryAnchor, tipProblem } from "../payments/tip.js";
 import {
   paymentParamsHash,
   rememberRefusal,
@@ -39,6 +40,14 @@ function assertNetworkAllowed(recipient: string, config: Config): void {
 }
 
 class ViewKeyUnavailable extends Error {}
+
+function safelyRead<T>(fn: () => T): T | undefined {
+  try {
+    return fn();
+  } catch {
+    return undefined;
+  }
+}
 
 /** The wallet lease was lost at the last moment before the wallet process would start. */
 class FenceError extends Error {}
@@ -225,7 +234,9 @@ export const HEALTH_MAX_LAG_DEFAULT = 10;
 export async function preSendProblem(
   check: () => Promise<ChainHealth>,
   amountZats: bigint,
-  maxLagBlocks: number
+  maxLagBlocks: number,
+  /** The highest tip recorded for this wallet. A server reporting far below it is not believed. */
+  tipFloor?: number
 ): Promise<{ code: PayCode; message: string } | undefined> {
   let health: ChainHealth;
   try {
@@ -235,6 +246,8 @@ export async function preSendProblem(
     if (e instanceof ChainUnreachableError) return { code: "CHAIN_UNREACHABLE", message: `${detail}. Nothing was sent.` };
     return { code: "CHAIN_ERROR", message: `Pre-send check failed: ${detail}. Nothing was sent.` };
   }
+  const tipIssue = tipProblem(health, tipFloor);
+  if (tipIssue) return { code: "CHAIN_ERROR", message: `Pre-send check failed: ${tipIssue}. A tip that is too low cannot anchor an expiry. Nothing was sent.` };
   const lag = health.chainTip - health.walletHeight;
   if (lag > maxLagBlocks) {
     return {
@@ -494,6 +507,7 @@ async function runPay(
   let viewKeyFingerprint: string | null = knownFingerprints.get(chain) ?? null;
   let viewKeyError: string | undefined;
   let chainTip: number | undefined;
+  let walletHeight: number | undefined;
 
   const entry = (): AuditEntry => ({
     ts: new Date().toISOString(),
@@ -514,6 +528,7 @@ async function runPay(
     possible_sends: possibleSends,
     ...keyFields,
     chain_tip: chainTip,
+    wallet_height: walletHeight,
   });
   const fail = (s: PayStatus, c: PayCode, message: string) => {
     status = s;
@@ -588,18 +603,31 @@ async function runPay(
     // Live mode: check the wallet and server before anything is bound. A failure here
     // sends nothing, binds nothing, and the key stays free for a retry.
     if (policyPassed && amountZats !== undefined && config.chainMode === "live" && chain.checkHealth) {
+      const tipFloor = safelyRead(() => store.readTipMark());
+      let seen: ChainHealth | undefined;
       const problem = await preSendProblem(
         async () => {
-          const h = await chain.checkHealth!();
-          chainTip = h.chainTip;
-          return h;
+          seen = await chain.checkHealth!();
+          return seen;
         },
         amountZats,
-        config.healthMaxLagBlocks ?? HEALTH_MAX_LAG_DEFAULT
+        config.healthMaxLagBlocks ?? HEALTH_MAX_LAG_DEFAULT,
+        tipFloor
       );
       if (problem) {
         policyPassed = false;
         fail("error", problem.code, problem.message);
+      } else if (seen) {
+        // Anchor any later expiry proof on the highest of what the server said, what the
+        // wallet itself has scanned, and the highest tip ever recorded: never a lower one.
+        chainTip = expiryAnchor(seen, tipFloor);
+        walletHeight = seen.walletHeight;
+        // The reading passed the lag limit, so it is near the wallet and safe to record.
+        try {
+          store.raiseTipMark(seen.chainTip);
+        } catch {
+          // The anchor above still holds for this call.
+        }
       }
     }
 
@@ -641,6 +669,7 @@ async function runPay(
         view_key_fingerprint: viewKeyFingerprint,
         ...keyFields,
         chain_tip: chainTip,
+        wallet_height: walletHeight,
       };
       let ready = false;
       try {
