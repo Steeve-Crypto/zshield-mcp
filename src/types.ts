@@ -19,6 +19,8 @@ export interface Config {
   chainNetwork?: string;
   zingoBin?: string;
   zingoDataDir?: string;
+  /** Where audit rows go when auditDir cannot be written. Default: audit-fallback.jsonl beside auditDir. */
+  auditFallbackPath?: string;
   lightwalletd?: string;
   /** Tool calls allowed per minute in this process; default 60 */
   rateLimitPerMin?: number;

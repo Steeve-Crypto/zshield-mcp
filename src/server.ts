@@ -40,7 +40,13 @@ export function createChain(config: Config): ChainAdapter {
 
 export function createServer(config: Config = loadConfig()): McpServer {
   const chain = createChain(config);
-  const limiter = new RateLimiter(config.rateLimitPerMin ?? RATE_LIMIT_DEFAULT_PER_MIN, config.auditDir);
+  const limiter = new RateLimiter(
+    config.rateLimitPerMin ?? RATE_LIMIT_DEFAULT_PER_MIN,
+    config.auditDir,
+    Date.now,
+    undefined,
+    config.auditFallbackPath
+  );
   // Every tool call passes the rate limit first. A refused call never reaches the tool.
   const limited =
     <A extends unknown[]>(tool: string, fn: (...args: A) => Promise<ToolResult>) =>
