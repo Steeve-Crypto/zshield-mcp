@@ -4,6 +4,8 @@
  */
 export const ZATS_PER_ZEC = 100_000_000n;
 export const MAX_DECIMALS = 8;
+/** Total ZEC supply. No valid amount or cap can be larger. */
+export const MAX_MONEY_ZATS = 21_000_000n * ZATS_PER_ZEC;
 
 export class AmountError extends Error {
   constructor(message: string) {
@@ -28,7 +30,7 @@ function numberToDecimalString(n: number): string {
 
 /**
  * Parse a ZEC amount given as a decimal string or a number into zatoshis.
- * Rejects non-finite, zero, negative, malformed, and more-than-8-decimal amounts.
+ * Rejects non-finite, zero, negative, malformed, more-than-8-decimal, and above-supply amounts.
  */
 export function parseZecToZats(value: unknown, label = "Amount"): bigint {
   let text: string;
@@ -62,6 +64,9 @@ export function parseZecToZats(value: unknown, label = "Amount"): bigint {
   const zats = BigInt(intPart) * ZATS_PER_ZEC + BigInt(fracPart.padEnd(MAX_DECIMALS, "0"));
   if (zats <= 0n) {
     throw new AmountError(`${label} must be greater than zero, got ${text}.`);
+  }
+  if (zats > MAX_MONEY_ZATS) {
+    throw new AmountError(`${label} ${text} is more than the 21,000,000 ZEC supply.`);
   }
   return zats;
 }
