@@ -20,7 +20,7 @@ export type HistoryInput = z.infer<typeof historyInputSchema>;
 export function checkLimit(limit: unknown): number {
   if (limit === undefined) return HISTORY_DEFAULT_LIMIT;
   if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > HISTORY_MAX_LIMIT) {
-    throw new ReadRejection(`limit must be a whole number from 1 to ${HISTORY_MAX_LIMIT}, got ${String(limit)}.`);
+    throw new ReadRejection(`limit must be a whole number from 1 to ${HISTORY_MAX_LIMIT}.`);
   }
   return limit;
 }
