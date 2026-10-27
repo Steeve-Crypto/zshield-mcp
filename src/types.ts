@@ -56,6 +56,8 @@ export interface AuditEntry {
   truncated?: boolean;
   /** Unknown rows only: recent sent transactions in wallet history that match this amount */
   possible_txids?: string[];
+  /** The same txids with how each one matched */
+  possible_sends?: PossibleSend[];
 }
 
 /** Read-only tools. They never move funds. */
@@ -121,6 +123,26 @@ export interface TxSummary {
   /** Value moved, in integer zatoshis */
   valueZats: bigint;
   feeZats?: bigint;
+  /** Notes this wallet sent, with recipient and memo, when the wallet output lists them */
+  outgoing?: OutgoingNote[];
+}
+
+export interface OutgoingNote {
+  recipient: string;
+  valueZats: bigint;
+  /** Empty when the note has no memo */
+  memo: string;
+}
+
+/** How sure a match between a send and a history entry is. */
+export type MatchConfidence = "high" | "medium" | "low";
+
+export interface PossibleSend {
+  txid: string;
+  confidence: MatchConfidence;
+  /** What matched: recipient, amount, memo, time */
+  matched: string[];
+  status: string;
 }
 
 export interface PaymentRequest {

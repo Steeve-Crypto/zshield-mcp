@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { ChainAdapter } from "./types.js";
-import type { PaymentReceipt, PaymentRequest, TxSummary, WalletBalance } from "../types.js";
+import type { OutgoingNote, PaymentReceipt, PaymentRequest, TxSummary, WalletBalance } from "../types.js";
 import { assertTestnetAddress, NetworkError } from "./network.js";
 import { CliTimeoutError, SendOutcomeUnknownError } from "./outcome.js";
 
@@ -324,6 +324,7 @@ export function parseTransactions(out: string): TxSummary[] {
     // for the rest it is the target height the transaction was built for.
     const confirmed = status === "confirmed";
     const fee = fields.get("fee") ?? fields.get("transaction fee");
+    const outgoing = parseOutgoingNotes(block[1]);
     txs.push({
       txid: txid.toLowerCase(),
       time: toIso(fields.get("datetime")),
@@ -333,11 +334,34 @@ export function parseTransactions(out: string): TxSummary[] {
       kind: fields.get("kind") || "unknown",
       valueZats: BigInt(value.replace(/_/g, "")),
       feeZats: fee && /^[\d_]+$/.test(fee) ? BigInt(fee.replace(/_/g, "")) : undefined,
+      ...(outgoing.length > 0 ? { outgoing } : {}),
     });
   }
   const height = (t: TxSummary) => t.blockHeight ?? Number.MAX_SAFE_INTEGER;
   const time = (t: TxSummary) => (t.time ? Date.parse(t.time) || 0 : 0);
   return txs.sort((a, b) => height(b) - height(a) || time(b) - time(a));
+}
+
+/**
+ * The notes listed under "outgoing ... notes:" in one transaction block. Each is a nested
+ * `{ ... }` group indented deeper than the transaction fields, with value, memo and
+ * recipient lines. Groups without a recipient (received notes) are skipped.
+ */
+export function parseOutgoingNotes(body: string): OutgoingNote[] {
+  const notes: OutgoingNote[] = [];
+  for (const section of body.matchAll(/^ {4}outgoing [a-z ]*notes:[^\n]*\n([\s\S]*?)(?=^ {4}[a-z]|(?![\s\S]))/gm)) {
+    for (const group of section[1].matchAll(/^\s+\{\s*$([\s\S]*?)^\s+\}\s*$/gm)) {
+      const f = new Map<string, string>();
+      for (const line of group[1].matchAll(/^\s+([a-z][a-z _]*?):[ \t]?(.*?)\s*$/gm)) {
+        if (!f.has(line[1])) f.set(line[1], line[2]);
+      }
+      const recipient = f.get("recipient");
+      const value = f.get("value");
+      if (!recipient || !value || !/^[\d_]+$/.test(value)) continue;
+      notes.push({ recipient, valueZats: BigInt(value.replace(/_/g, "")), memo: f.get("memo") ?? "" });
+    }
+  }
+  return notes;
 }
 
 /** "2026-10-12 14:23:01 UTC" becomes "2026-10-12T14:23:01.000Z". */

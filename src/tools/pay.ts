@@ -10,7 +10,7 @@ import { MAX_AMOUNT_LENGTH } from "../policy/amount.js";
 import { addressNetwork } from "../chain/network.js";
 import type { PayCode } from "../errors.js";
 import { SendOutcomeUnknownError } from "../chain/outcome.js";
-import type { AuditEntry, Config, PayStatus } from "../types.js";
+import type { AuditEntry, Config, MatchConfidence, PayStatus, PossibleSend, TxSummary } from "../types.js";
 
 /**
  * Live mode is testnet only, so a mainnet or unrecognized recipient is refused by policy
@@ -34,25 +34,54 @@ export const SEND_UNCONFIRMED_GUIDANCE =
   "The payment may have been broadcast. Do not retry yet. Call zcash_history and look for a sent transaction with this amount; retry only if none appears after the wallet has synced.";
 
 /** How far back a history entry may be and still count as a match for an unknown send. */
-const MATCH_WINDOW_MS = 30 * 60_000;
+export const MATCH_WINDOW_MS = 30 * 60_000;
+
+export interface SendTarget {
+  amountZats: bigint;
+  recipient: string;
+  memo?: string;
+}
 
 /**
- * After an unknown send, look in recent wallet history for a sent transaction of the same
- * amount that is newer than the call (or has no time yet). Best effort: a failed lookup
- * returns an empty list and never changes the outcome.
+ * Match one history entry against a send. A match needs a sent, not failed, transaction
+ * with an outgoing note to the same recipient for the same amount, and the same memo when
+ * one was given. Amount alone never matches. Confidence is high when the memo matched too,
+ * medium when no memo was given, and one step lower when the entry has no time yet.
+ * Entries older than the window before `startedAt` never match.
  */
-export async function findPossibleSends(chain: ChainAdapter, amountZats: bigint, startedAt: number): Promise<string[]> {
+export function matchSend(t: TxSummary, target: SendTarget, startedAt: number): PossibleSend | undefined {
+  if (!/sent/i.test(t.kind) || t.status === "failed") return undefined;
+  const memo = target.memo?.trim();
+  const note = (t.outgoing ?? []).find(
+    (n) => n.recipient === target.recipient && n.valueZats === target.amountZats && (!memo || n.memo.trim() === memo)
+  );
+  if (!note) return undefined;
+  const matched = ["recipient", "amount", ...(memo ? ["memo"] : [])];
+  let confidence: MatchConfidence = memo ? "high" : "medium";
+  const ms = t.time ? Date.parse(t.time) : NaN;
+  if (Number.isNaN(ms)) {
+    confidence = confidence === "high" ? "medium" : "low";
+  } else if (ms < startedAt - MATCH_WINDOW_MS) {
+    return undefined;
+  } else {
+    matched.push("time");
+  }
+  return { txid: t.txid, confidence, matched, status: t.status };
+}
+
+/**
+ * After an unknown send, look in recent wallet history for the send. Best effort: a failed
+ * lookup returns an empty list and never changes the outcome.
+ */
+export async function findPossibleSends(chain: ChainAdapter, target: SendTarget, startedAt: number): Promise<PossibleSend[]> {
   try {
     const txs = await chain.getHistory(20);
-    return txs
-      // A failed transaction expired or was rejected, so it did not pay anyone.
-      .filter((t) => /sent/i.test(t.kind) && t.valueZats === amountZats && t.status !== "failed")
-      .filter((t) => {
-        if (!t.time) return true;
-        const ms = Date.parse(t.time);
-        return Number.isNaN(ms) || ms >= startedAt - MATCH_WINDOW_MS;
-      })
-      .map((t) => t.txid);
+    const out: PossibleSend[] = [];
+    for (const t of txs) {
+      const m = matchSend(t, target, startedAt);
+      if (m) out.push(m);
+    }
+    return out;
   } catch {
     return [];
   }
@@ -104,7 +133,7 @@ export async function executePay(
   const callId = randomUUID();
   const startedAt = Date.now();
   let allowlistHit = false;
-  let possibleTxids: string[] | undefined;
+  let possibleSends: PossibleSend[] | undefined;
 
   let status: PayStatus = "ok";
   let error: string | undefined;
@@ -135,7 +164,8 @@ export async function executePay(
     code,
     error,
     memo: input.memo,
-    possible_txids: possibleTxids,
+    possible_txids: possibleSends?.map((p) => p.txid),
+    possible_sends: possibleSends,
   });
 
   let policyPassed = false;
@@ -201,7 +231,11 @@ export async function executePay(
           status = "unknown";
           code = "SEND_UNCONFIRMED";
           error = `${SEND_UNCONFIRMED_GUIDANCE} Detail: ${redactInput(e.message, input)}`;
-          possibleTxids = await findPossibleSends(chain, amountZats, startedAt);
+          possibleSends = await findPossibleSends(
+            chain,
+            { amountZats, recipient: input.recipient, memo: input.memo },
+            startedAt
+          );
         } else {
           status = "error";
           code = "CHAIN_ERROR";
@@ -231,7 +265,8 @@ export async function executePay(
           message: error,
           error,
           call_id: callId,
-          possible_txids: possibleTxids,
+          possible_txids: possibleSends?.map((p) => p.txid),
+          possible_sends: possibleSends,
           audit,
           audit_warning: auditWarning,
         },
