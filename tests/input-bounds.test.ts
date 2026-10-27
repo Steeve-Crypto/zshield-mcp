@@ -196,3 +196,32 @@ describe("chain errors", () => {
     assert.equal(r.text.split("private memo text").length, 2);
   });
 });
+
+describe("oversized amount string", () => {
+  it("is rejected without being echoed, and the row keeps only a short prefix", async () => {
+    const config = tempConfig();
+    const amount = "0." + "1".repeat(100_000);
+    const r = await executePay({ amount_zec: amount, recipient: ALLOWED }, { config, chain: new MockChainAdapter() });
+    assert.equal(r.audit.status, "rejected");
+    assert.match(r.audit.error ?? "", /longer than 32 characters/);
+    assert.ok(!(r.audit.error ?? "").includes("1111"));
+    const lines = auditLines(config);
+    assert.equal(lines.length, 1);
+    assert.ok(bytes(lines[0]) < 1024);
+    assert.equal(JSON.parse(lines[0]).truncated, true);
+    assert.ok(bytes(r.text) < 2048);
+  });
+
+  it("is refused by the input schema", () => {
+    assert.equal(payInputSchema.safeParse({ amount_zec: "1".repeat(33), recipient: ALLOWED }).success, false);
+    assert.equal(payInputSchema.safeParse({ amount_zec: "0.05", recipient: ALLOWED }).success, true);
+  });
+
+  it("amount errors never repeat the caller's text", async () => {
+    for (const amount of ["abc<script>", "-5", "0.123456789", "nan", "99999999"]) {
+      const r = await executePay({ amount_zec: amount, recipient: ALLOWED }, { config: tempConfig(), chain: new MockChainAdapter() });
+      assert.equal(r.audit.status, "rejected", amount);
+      assert.ok(!(r.audit.error ?? "").includes(amount), `${amount} echoed in: ${r.audit.error}`);
+    }
+  });
+});

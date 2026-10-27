@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { MAX_AUDIT_ROW_BYTES, MAX_RECIPIENT_LENGTH } from "../policy/limits.js";
+import { MAX_AMOUNT_LENGTH } from "../policy/amount.js";
 import type { AuditEntry } from "../types.js";
 
 export function fingerprintViewKey(material: string, salt: string): string {
@@ -19,7 +20,8 @@ function cut(s: string, max: number): string {
 
 /**
  * Returns a copy of the row that fits in MAX_AUDIT_ROW_BYTES. An oversized recipient is
- * replaced by a short prefix plus its sha256, so the row still identifies it. If the row is
+ * replaced by a short prefix plus its sha256, so the row still identifies it. An amount
+ * string longer than MAX_AMOUNT_LENGTH is cut. If the row is
  * still too large, long string fields are cut, and as a last resort only the identifying
  * fields are kept. A row that changed carries `truncated: true`.
  */
@@ -29,6 +31,10 @@ export function boundAuditEntry<T extends object>(entry: T): T {
   if (typeof row.recipient === "string" && row.recipient.length > MAX_RECIPIENT_LENGTH) {
     row.recipient_sha256 = createHash("sha256").update(row.recipient).digest("hex");
     row.recipient = cut(row.recipient, RECIPIENT_PREFIX);
+    truncated = true;
+  }
+  if (typeof row.amount_zec === "string" && row.amount_zec.length > MAX_AMOUNT_LENGTH) {
+    row.amount_zec = cut(row.amount_zec, MAX_AMOUNT_LENGTH);
     truncated = true;
   }
   const size = (r: object) => Buffer.byteLength(JSON.stringify(r), "utf8");
