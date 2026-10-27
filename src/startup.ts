@@ -1,4 +1,4 @@
-import { defaultWalletDir } from "./chain/live.js";
+import { resolveWalletDir } from "./chain/live.js";
 import { assertWalletPrivate } from "./chain/perms.js";
 import type { Config } from "./types.js";
 
@@ -13,7 +13,7 @@ export function startupChecks(config: Config, platform: string = process.platfor
   if (config.chainNetwork !== "testnet") {
     throw new Error("zshield-mcp: live mode requires CHAIN_MODE=testnet. Mainnet is refused.");
   }
-  return assertWalletPrivate(config.zingoDataDir ?? defaultWalletDir(), platform);
+  return assertWalletPrivate(resolveWalletDir(config.zingoDataDir), platform);
 }
 
 /**

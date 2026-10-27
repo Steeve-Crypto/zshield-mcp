@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import { homedir } from "node:os";
+import { isAbsolute, join } from "node:path";
 import type { ChainAdapter } from "./types.js";
 import type { PaymentReceipt, PaymentRequest, TxSummary, WalletBalance } from "../types.js";
 import { assertTestnetAddress, NetworkError } from "./network.js";
@@ -53,9 +55,41 @@ export const defaultRunner: CliRunner = (bin, args, opts = {}) =>
     }
   });
 
-/** Where the testnet wallet lives when ZINGO_DATA_DIR is not set. */
-export function defaultWalletDir(): string {
-  return `${process.env.HOME}/.zshield-testnet/wallet`;
+export class WalletDirError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WalletDirError";
+  }
+}
+
+/**
+ * Where the testnet wallet lives when ZINGO_DATA_DIR is not set: .zshield-testnet/wallet
+ * under the OS home directory. Uses os.homedir(), which also works when HOME is unset.
+ * Throws WalletDirError rather than return a relative path, so zingo-cli and the
+ * permission check never point at a folder under the working directory by accident.
+ */
+export function defaultWalletDir(home: () => string = homedir): string {
+  let dir = "";
+  try {
+    dir = home();
+  } catch {
+    dir = "";
+  }
+  if (!dir || !isAbsolute(dir)) {
+    throw new WalletDirError(
+      "zshield-mcp: no home directory found for the testnet wallet. Set ZINGO_DATA_DIR to an absolute path."
+    );
+  }
+  return join(dir, ".zshield-testnet", "wallet");
+}
+
+/** The wallet directory for live mode: ZINGO_DATA_DIR when set, which must be absolute, else the default. */
+export function resolveWalletDir(dataDir: string | undefined, home: () => string = homedir): string {
+  if (dataDir === undefined || dataDir === "") return defaultWalletDir(home);
+  if (!isAbsolute(dataDir)) {
+    throw new WalletDirError("zshield-mcp: ZINGO_DATA_DIR must be an absolute path.");
+  }
+  return dataDir;
 }
 
 export interface LiveOptions {
@@ -84,7 +118,7 @@ export class LiveChainAdapter implements ChainAdapter {
       throw new NetworkError("Live mode requires CHAIN_MODE=testnet. Mainnet is not supported.", "mode");
     }
     this.bin = opts.zingoBin ?? "zingo-cli";
-    this.dataDir = opts.dataDir ?? defaultWalletDir();
+    this.dataDir = resolveWalletDir(opts.dataDir);
     this.server = opts.server ?? "https://testnet.zec.rocks:443";
     this.runner = opts.runner ?? defaultRunner;
   }

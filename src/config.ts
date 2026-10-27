@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { parseZecToZats } from "./policy/amount.js";
+import { resolveWalletDir } from "./chain/live.js";
 import { parseRateLimit, RATE_LIMIT_DEFAULT_PER_MIN } from "./policy/rate.js";
 import type { Config, ChainMode } from "./types.js";
 
@@ -60,7 +61,8 @@ export function loadConfig(cwd = process.cwd()): Config {
     ),
     chainNetwork: rawMode === "testnet" ? "testnet" : undefined,
     zingoBin: process.env.ZINGO_BIN,
-    zingoDataDir: process.env.ZINGO_DATA_DIR,
+    // Live mode needs an absolute wallet path; loading fails here rather than fall back to a relative one.
+    zingoDataDir: chainMode === "live" ? resolveWalletDir(process.env.ZINGO_DATA_DIR) : process.env.ZINGO_DATA_DIR,
     lightwalletd: process.env.LIGHTWALLETD_URL,
     rateLimitPerMin: parseRateLimit(
       envOr<number | string>("RATE_LIMIT_PER_MIN", fromFile.rate_limit_per_min ?? RATE_LIMIT_DEFAULT_PER_MIN, (v) => v)
