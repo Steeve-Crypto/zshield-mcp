@@ -15,7 +15,7 @@ The audit log is the human trail. Payment state lives in the payment store in th
 - The `pending` row of a call with a key carries `idempotency_key` and `params_sha256`, the hash of the amount in zatoshis, recipient, and memo.
 - A repeat call with the same key writes its own row with status `replayed`, its own `call_id`, and `replay_of` set to the first call's `call_id`. It sends nothing. It copies `allowlist_hit` and `view_key_fingerprint` from the first call, so the row says which wallet and which allow-list decision it repeats.
 - Before sending, a call with a key re-reads the store under the wallet lock and binds the key with an exclusive create. If another server process bound the key first, the call is a replay (or `IDEMPOTENCY_CONFLICT`) and sends nothing.
-- At startup, every unsettled call gets a recovery row: `tool` `zcash_pay_recovery`, the original `call_id`, `status` (`confirmed`, `not_found`, or `unknown`), `txid`, `block_height`, and `confidence` when a match was found, `possible_sends` when there were candidates but no single mined match, `idempotency_key` when the call had one, and a plain `note` saying why. `not_found` means proven never sent. `confirmed` and `not_found` are final; `unknown` is checked again on the next start. A later run writes a row only when the state moves forward, or stays `unknown`.
+- At startup, every unsettled call gets a recovery row: `tool` `zcash_pay_recovery`, the original `call_id`, `status` (`confirmed`, `not_found`, or `unknown`), `txid`, `block_height`, and `confidence` when a match was found, `possible_sends` when there were candidates but no single mined match, `idempotency_key` when the call had one, and a plain `note` saying why. `not_found` means proven never sent: synced, whole history, a trustworthy tip, past the expiry height plus margin, and at least two hours old. `confirmed` and `not_found` are final; `unknown` is checked again on the next start. A later run writes a row only when the state moves forward, or stays `unknown`.
 
 ## File safety
 
@@ -45,6 +45,8 @@ At startup the audit dir and the fallback file are checked. A symlink or a file 
 | `idempotency_key` | string? | The key the caller passed |
 | `params_sha256` | string? | `pending` rows with a key: the hash the key is bound to |
 | `replay_of` | string? | `replayed` rows: the `call_id` of the first call |
+| `chain_tip` | number? | Testnet `pending` rows: the height an expiry is proven from, the highest of the server tip, the wallet height, and the recorded tip mark |
+| `wallet_height` | number? | Testnet `pending` rows: the wallet's own scanned height at the pre-send check |
 | `truncated` | boolean? | Present when the row was shortened to fit the size limit |
 
 Each row is capped at 8 KiB (8192 bytes of UTF-8 JSON). If a row would be larger, string fields over 1024 characters are cut and marked `...[truncated]`. If it is still too large, only the identifying fields are kept (`ts`, `tool`, `call_id`, `status`, `mock_txid`, `recipient_sha256`, `view_key_fingerprint`, `code`, `possible_txids`, `possible_sends`, `txid`, `block_height`, and `idempotency_key`). The tool response carries the same bounded row.
