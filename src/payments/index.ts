@@ -47,9 +47,29 @@ export class PaymentIndex {
   private readonly byCall = new Map<string, PaymentRecord>();
   private readonly byKey = new Map<string, string>();
   private readonly reserved = new Map<string, Reservation>();
+  private target?: { auditDir: string; auditFallbackPath?: string };
+
+  /**
+   * Re-read the audit log, to pick up rows written by other processes on the same log.
+   * What is on disk wins; calls known only in memory (a row that failed to write) and
+   * reservations held in this process are kept.
+   */
+  reload(): void {
+    if (!this.target) return;
+    const fresh = PaymentIndex.load(this.target);
+    for (const [k, v] of fresh.byCall) {
+      const mine = this.byCall.get(k);
+      // Keep a result or recovery this process knows that the disk copy lacks.
+      if (mine?.result && !v.result) v.result = mine.result;
+      if (mine?.recovery && !v.recovery) v.recovery = mine.recovery;
+      this.byCall.set(k, v);
+    }
+    for (const [k, v] of fresh.byKey) if (!this.byKey.has(k)) this.byKey.set(k, v);
+  }
 
   static load(target: { auditDir: string; auditFallbackPath?: string }): PaymentIndex {
     const index = new PaymentIndex();
+    index.target = { auditDir: target.auditDir, auditFallbackPath: target.auditFallbackPath };
     const files: string[] = [];
     try {
       if (existsSync(target.auditDir)) {

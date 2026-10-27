@@ -92,7 +92,7 @@ describe("pre-send health check", () => {
     await withEnv("ZINGO_WAITSYNC", "1", async () => {
       await withEnv("ZINGO_HEALTH_TIMEOUT_MS", "4000", async () => {
         const c = new LiveChainAdapter({ network: "testnet", runner, dataDir: "/w" });
-        assert.deepEqual(await c.checkHealth(), { walletHeight: 7, chainTip: 7, spendableZats: 5n });
+        assert.deepEqual(await c.checkHealth(), { walletHeight: 7, chainTip: 7, spendableZats: 5n, synced: true });
       });
     });
     assert.equal(calls.length, 3);

@@ -9,7 +9,7 @@ import { boundAuditEntry } from "../audit/log.js";
 import { MAX_AMOUNT_LENGTH } from "../policy/amount.js";
 import { addressNetwork } from "../chain/network.js";
 import type { PayCode } from "../errors.js";
-import { BusyError, sendLockFor, SEND_QUEUE_WAIT_DEFAULT_MS } from "../payments/lock.js";
+import { acquireWalletLock, BusyError, SEND_QUEUE_WAIT_DEFAULT_MS } from "../payments/lock.js";
 import { paymentIndexFor, paymentParamsHash, type PaymentRecord } from "../payments/index.js";
 import { ChainUnreachableError, SendOutcomeUnknownError } from "../chain/outcome.js";
 import type { AuditEntry, ChainHealth, Config, MatchConfidence, PayStatus, PossibleSend, TxSummary } from "../types.js";
@@ -160,6 +160,14 @@ export async function preSendProblem(
     };
   }
   const needed = amountZats + ESTIMATED_FEE_ZATS;
+  if (health.spendableZats < needed && health.synced === false) {
+    // A sync that did not finish leaves new blocks unscanned, and zingo-cli then reports
+    // too little spendable (often 0). That is not proof the funds are missing.
+    return {
+      code: "WALLET_NOT_SYNCED",
+      message: `The wallet sync did not finish (${health.syncDetail ?? "no detail"}), and the spendable balance reads ${health.spendableZats} zats, below the ${needed} zats this payment needs. It may be low only because the sync is incomplete. Try again once the wallet has synced. Nothing was sent.`,
+    };
+  }
   if (health.spendableZats < needed) {
     return {
       code: "INSUFFICIENT_FUNDS",
@@ -271,8 +279,12 @@ function refuseKey(input: PayInput, deps: PayDeps, callId: string, code: PayCode
 function replay(input: PayInput, deps: PayDeps, callId: string, originalCallId: string, record?: PaymentRecord): PayResult {
   const { config } = deps;
   const result = record?.result;
+  // Copy what the first call learned, so the replay row is not read as a refused call.
+  const first = result ?? record?.intent;
   const { audit, auditWarning } = finish(config, {
     ...baseRow(input, config, callId),
+    allowlist_hit: first?.allowlist_hit ?? false,
+    view_key_fingerprint: first?.view_key_fingerprint ?? null,
     status: "replayed",
     idempotency_key: input.idempotency_key,
     replay_of: originalCallId,
@@ -431,23 +443,48 @@ async function runPay(
   let release: (() => void) | undefined;
   if (policyPassed && amountZats !== undefined) {
     try {
-      release = await sendLockFor(chain).acquire(config.sendQueueWaitMs ?? SEND_QUEUE_WAIT_DEFAULT_MS);
+      release = await acquireWalletLock(chain, config.sendQueueWaitMs ?? SEND_QUEUE_WAIT_DEFAULT_MS, "zcash_pay");
     } catch (e) {
-      if (!(e instanceof BusyError)) throw e;
       policyPassed = false;
       status = "error";
-      code = "BUSY";
-      error = e.message;
+      if (e instanceof BusyError) {
+        code = "BUSY";
+        error = e.message;
+      } else {
+        code = "CHAIN_ERROR";
+        error = `The wallet lock could not be taken: ${e instanceof Error ? e.message : String(e)}. Nothing was sent.`;
+      }
     }
   }
 
   let audit: AuditEntry;
   let final: ReturnType<typeof writeAuditRow>;
   try {
+    // Another process on this wallet may have bound the key since this call started.
+    // Holding the wallet lock, re-read the audit log; if the key is taken, this call
+    // becomes a replay or a conflict and sends nothing.
+    if (release && keyFields.idempotency_key) {
+      index.reload();
+      const other = index.byIdempotencyKey(keyFields.idempotency_key);
+      if (other && other.callId !== callId) {
+        release();
+        release = undefined;
+        return other.paramsSha256 === keyFields.params_sha256
+          ? replay(input, deps, callId, other.callId, other.record)
+          : refuseKey(
+              input,
+              deps,
+              callId,
+              "IDEMPOTENCY_CONFLICT",
+              `idempotency_key was already used by call ${other.callId} with different parameters. Nothing was sent.`
+            );
+      }
+    }
+
     // Live mode: check the wallet and server before writing the intent. A failure here
     // sends nothing and leaves no pending row.
     if (policyPassed && amountZats !== undefined && config.chainMode === "live" && chain.checkHealth) {
-      const problem = await preSendProblem(chain.checkHealth.bind(chain), amountZats, config.healthMaxLagBlocks ?? HEALTH_MAX_LAG_DEFAULT);
+      const problem = await preSendProblem(() => chain.checkHealth!(), amountZats, config.healthMaxLagBlocks ?? HEALTH_MAX_LAG_DEFAULT);
       if (problem) {
         policyPassed = false;
         status = "error";
