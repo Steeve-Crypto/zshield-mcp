@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { withWalletRead } from "../payments/lock.js";
 import { formatZats } from "../policy/amount.js";
 import type { WalletBalance } from "../types.js";
 import { runReadTool, type ReadDeps } from "./read.js";
@@ -10,7 +11,7 @@ export async function executeBalance(deps: ReadDeps) {
   return runReadTool<WalletBalance>(
     "zcash_balance",
     deps.config,
-    () => deps.chain.getBalance(),
+    () => withWalletRead(deps.chain, "zcash_balance", (offline) => deps.chain.getBalance({ offline })),
     (b) => ({
       confirmed_zats: b.confirmedZats.toString(),
       confirmed_zec: formatZats(b.confirmedZats),

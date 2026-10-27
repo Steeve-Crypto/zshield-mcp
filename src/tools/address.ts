@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { withWalletRead } from "../payments/lock.js";
 import { runReadTool, type ReadDeps } from "./read.js";
 
 export const receiveAddressInputSchema = z.object({});
@@ -8,7 +9,7 @@ export async function executeReceiveAddress(deps: ReadDeps) {
   return runReadTool<string>(
     "zcash_receive_address",
     deps.config,
-    () => deps.chain.getReceiveAddress(),
+    () => withWalletRead(deps.chain, "zcash_receive_address", (offline) => deps.chain.getReceiveAddress({ offline })),
     (address) => ({ address, network: deps.config.chainMode === "live" ? "testnet" : "mock" })
   );
 }
