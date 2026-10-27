@@ -51,10 +51,25 @@ export function textOf(res: unknown): string {
 /** A fake testnet UFVK for tests. Not a real key. */
 export const TEST_UFVK = "uviewtest1" + "q".repeat(80);
 
-/** Wraps a fake CLI runner so `export_ufvk` answers with TEST_UFVK and is not passed on. */
-export function withUfvk(runner: CliRunner): CliRunner {
-  return async (bin, args, opts) =>
-    args.includes("export_ufvk") ? JSON.stringify({ ufvk: TEST_UFVK, birthday: 1 }) : runner(bin, args, opts);
+/** Healthy answers for the pre-send check: wallet at the tip, plenty spendable. */
+export const HEALTHY = { info: '{ "latest_block_height": 1000 }', height: '{ "height": 1000 }', spendable_balance: '{ "spendable_balance": 100000000 }' };
+
+/**
+ * Wraps a fake CLI runner so `export_ufvk` answers with TEST_UFVK and the pre-send check
+ * (`info`, offline `height` and `spendable_balance`) answers HEALTHY. None of these reach
+ * `runner`, so tests that count CLI calls only see sends and reads.
+ */
+export function withUfvk(runner: CliRunner, health: Partial<typeof HEALTHY> = {}): CliRunner {
+  const answers = { ...HEALTHY, ...health };
+  return async (bin, args, opts) => {
+    if (args.includes("export_ufvk")) return JSON.stringify({ ufvk: TEST_UFVK, birthday: 1 });
+    const last = args.at(-1);
+    const offline = args.includes("--offline");
+    if (last === "info" || (offline && (last === "height" || last === "spendable_balance"))) {
+      return answers[last as keyof typeof HEALTHY];
+    }
+    return runner(bin, args, opts);
+  };
 }
 
 /** Read methods for fake chain adapters in pay tests. They fail if a test reaches them. */

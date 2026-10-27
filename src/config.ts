@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { parseZecToZats } from "./policy/amount.js";
 import { resolveWalletDir } from "./chain/live.js";
+import { HEALTH_MAX_LAG_DEFAULT } from "./tools/pay.js";
 import { parseSendQueueWait, SEND_QUEUE_WAIT_DEFAULT_MS } from "./payments/lock.js";
 import { parseRateLimit, RATE_LIMIT_DEFAULT_PER_MIN } from "./policy/rate.js";
 import type { Config, ChainMode } from "./types.js";
@@ -11,6 +12,14 @@ function envOr<T>(key: string, fallback: T, parse: (v: string) => T): T {
   const v = process.env[key];
   if (v === undefined || v === "") return fallback;
   return parse(v);
+}
+
+function parseMaxLag(value: unknown): number {
+  const n = typeof value === "string" && /^\d+$/.test(value.trim()) ? Number(value.trim()) : value;
+  if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > 10_000) {
+    throw new Error("HEALTH_MAX_LAG_BLOCKS must be a whole number from 0 to 10000.");
+  }
+  return n;
 }
 
 const KNOWN_MODES = ["mock", "live", "testnet"];
@@ -26,6 +35,7 @@ export function loadConfig(cwd = process.cwd()): Config {
     view_key_fingerprint_salt: string;
     rate_limit_per_min: number | string;
     send_queue_wait_ms: number | string;
+    health_max_lag_blocks: number | string;
   }> = {};
 
   if (existsSync(yamlPath)) {
@@ -70,6 +80,9 @@ export function loadConfig(cwd = process.cwd()): Config {
     // Live mode needs an absolute wallet path; loading fails here rather than fall back to a relative one.
     zingoDataDir: chainMode === "live" ? resolveWalletDir(process.env.ZINGO_DATA_DIR) : process.env.ZINGO_DATA_DIR,
     lightwalletd: process.env.LIGHTWALLETD_URL,
+    healthMaxLagBlocks: parseMaxLag(
+      envOr<number | string>("HEALTH_MAX_LAG_BLOCKS", fromFile.health_max_lag_blocks ?? HEALTH_MAX_LAG_DEFAULT, (v) => v)
+    ),
     sendQueueWaitMs: parseSendQueueWait(
       envOr<number | string>("SEND_QUEUE_WAIT_MS", fromFile.send_queue_wait_ms ?? SEND_QUEUE_WAIT_DEFAULT_MS, (v) => v)
     ),

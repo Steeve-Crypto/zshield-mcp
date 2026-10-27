@@ -19,3 +19,11 @@ export class SendOutcomeUnknownError extends Error {
     this.name = "SendOutcomeUnknownError";
   }
 }
+
+/** The lightwalletd server did not answer the pre-send check in time. */
+export class ChainUnreachableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ChainUnreachableError";
+  }
+}

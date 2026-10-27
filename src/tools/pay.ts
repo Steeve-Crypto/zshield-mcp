@@ -11,8 +11,8 @@ import { addressNetwork } from "../chain/network.js";
 import type { PayCode } from "../errors.js";
 import { BusyError, sendLockFor, SEND_QUEUE_WAIT_DEFAULT_MS } from "../payments/lock.js";
 import { paymentIndexFor, paymentParamsHash, type PaymentRecord } from "../payments/index.js";
-import { SendOutcomeUnknownError } from "../chain/outcome.js";
-import type { AuditEntry, Config, MatchConfidence, PayStatus, PossibleSend, TxSummary } from "../types.js";
+import { ChainUnreachableError, SendOutcomeUnknownError } from "../chain/outcome.js";
+import type { AuditEntry, ChainHealth, Config, MatchConfidence, PayStatus, PossibleSend, TxSummary } from "../types.js";
 
 /**
  * Live mode is testnet only, so a mainnet or unrecognized recipient is refused by policy
@@ -131,6 +131,42 @@ export function redactInput(message: string, input: { recipient: string; memo?: 
     if (value && value.length >= 4) out = out.split(value).join(label);
   }
   return out;
+}
+
+/** Fee assumed by the pre-send check: the ZIP-317 minimum for a two-action shielded send. */
+export const ESTIMATED_FEE_ZATS = 10_000n;
+/** How many blocks the wallet may be behind the chain tip and still send. */
+export const HEALTH_MAX_LAG_DEFAULT = 10;
+
+/** Returns why a live send should not start, or undefined when the wallet looks ready. */
+export async function preSendProblem(
+  check: () => Promise<ChainHealth>,
+  amountZats: bigint,
+  maxLagBlocks: number
+): Promise<{ code: PayCode; message: string } | undefined> {
+  let health: ChainHealth;
+  try {
+    health = await check();
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    if (e instanceof ChainUnreachableError) return { code: "CHAIN_UNREACHABLE", message: `${detail}. Nothing was sent.` };
+    return { code: "CHAIN_ERROR", message: `Pre-send check failed: ${detail}. Nothing was sent.` };
+  }
+  const lag = health.chainTip - health.walletHeight;
+  if (lag > maxLagBlocks) {
+    return {
+      code: "WALLET_NOT_SYNCED",
+      message: `Wallet is at height ${health.walletHeight}, ${lag} blocks behind the chain tip ${health.chainTip} (limit ${maxLagBlocks}). Sync the wallet, then try again. Nothing was sent.`,
+    };
+  }
+  const needed = amountZats + ESTIMATED_FEE_ZATS;
+  if (health.spendableZats < needed) {
+    return {
+      code: "INSUFFICIENT_FUNDS",
+      message: `Spendable balance is ${health.spendableZats} zats; this payment needs about ${needed} zats including the fee. Nothing was sent.`,
+    };
+  }
+  return undefined;
 }
 
 /** Fingerprint of each adapter's wallet once read, so refused calls can carry it without running zingo-cli. */
@@ -408,6 +444,18 @@ async function runPay(
   let audit: AuditEntry;
   let final: ReturnType<typeof writeAuditRow>;
   try {
+    // Live mode: check the wallet and server before writing the intent. A failure here
+    // sends nothing and leaves no pending row.
+    if (policyPassed && amountZats !== undefined && config.chainMode === "live" && chain.checkHealth) {
+      const problem = await preSendProblem(chain.checkHealth.bind(chain), amountZats, config.healthMaxLagBlocks ?? HEALTH_MAX_LAG_DEFAULT);
+      if (problem) {
+        policyPassed = false;
+        status = "error";
+        code = problem.code;
+        error = problem.message;
+      }
+    }
+
     if (policyPassed && amountZats !== undefined) {
       // Record intent before broadcast, fsynced to the main log or the fallback file.
       // If it cannot be made durable anywhere, nothing is sent.
