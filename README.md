@@ -16,9 +16,9 @@ Spend keys never belong in the model. Mock chain by default. A live adapter send
 
 ## Purpose
 
-Agents need a payment tool they can call safely. This server enforces policy *before* any payment attempt, records an audit row for every call (success or reject), and fingerprints viewing-key material so auditors can correlate receipts without storing raw keys in the log.
+Agents need a payment tool they can call safely. This server enforces policy *before* any payment attempt, records an audit row for every call (success or reject), and stores only a short fingerprint in place of key material.
 
-Built as a concrete, minimal artifact for design-partner review of shielded agent-payment MCP surfaces (see Zcash Community Grants discussions around agent/MCP payment tooling).
+Built as a concrete, minimal artifact for design-partner review of shielded agent-payment MCP surfaces (see Zcash Community Grants discussions around agent payment tooling over MCP).
 
 ## Demo
 
@@ -246,7 +246,11 @@ JSONL per day: `audits/YYYY-MM-DD.jsonl`. A call that passes policy writes a `pe
 {"ts":"2026-10-05T19:00:00.000Z","tool":"zcash_pay","call_id":"3f0c…","amount_zec":0.05,"amount_zats":"5000000","recipient":"u1…","allowlist_hit":true,"cap_zec":0.1,"status":"ok","mock_txid":"mock_…","view_key_fingerprint":"a1b2c3d4e5f60718","memo":"test"}
 ```
 
-Raw viewing-key material is **never** written, only a short fingerprint. See [docs/AUDIT.md](docs/AUDIT.md).
+Raw viewing-key material is **never** written, only a short fingerprint. See [docs/AUDIT.md](docs/AUDIT.md). Today that fingerprint comes from the txid and recipient, not from the wallet's real viewing key, in both mock and testnet mode. [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md) explains what that means.
+
+## Security model
+
+[docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md) covers where keys live, what the server can and cannot do, the trust boundaries, threats and mitigations, and what is out of scope. Read it before pointing this at a funded wallet. The short version: the cap is per call only, so many small payments can still drain the wallet, and the audit log is not tamper-evident.
 
 ## Layout
 
@@ -300,10 +304,14 @@ One real shielded 0.001 TAZ payment through `zcash_pay`, plus a blocked over-cap
 
 ![Live testnet demo](docs/images/testnet-demo.gif)
 
-## Status / non-goals
+## Status and non-goals
 
 - ✅ Mock payments, policy enforcement, audit
 - ✅ Testnet shielded sends via zingo-cli
+- ✅ Read-only balance, receive address, and history tools
+- ✅ Stable rejection codes
+- ❌ Daily or rolling spend limits (per call only for now)
+- ❌ Fingerprint from the wallet's real viewing key
 - ❌ Mainnet (refused by design)
 - ❌ Custody of user spend keys
 
