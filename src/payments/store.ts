@@ -139,14 +139,14 @@ export class PaymentStore {
     this.dir = dir;
   }
 
-  private sub(name: "keys" | "calls" | "pending" | "txids"): string {
+  private sub(name: "keys" | "calls" | "pending" | "txids" | "imports"): string {
     return join(this.dir, name);
   }
 
   /** Create the folders (0700) if needed and repair loose modes. Returns repair notes. */
   ensureLayout(): string[] {
     const notes: string[] = [];
-    for (const d of [this.dir, this.sub("keys"), this.sub("calls"), this.sub("pending"), this.sub("txids")]) {
+    for (const d of [this.dir, this.sub("keys"), this.sub("calls"), this.sub("pending"), this.sub("txids"), this.sub("imports")]) {
       const n = ensurePrivateDir(d);
       if (n) notes.push(n);
     }
@@ -155,6 +155,15 @@ export class PaymentStore {
 
   get initialized(): boolean {
     return readPrivate(join(this.dir, "meta.json"), MAX_FILE_BYTES) !== undefined;
+  }
+
+  /** Whether the audit log with this tag was already imported. */
+  hasImported(tag: string): boolean {
+    return fs.existsSync(join(this.sub("imports"), safeName(tag, "import tag")));
+  }
+
+  markImported(tag: string, note: string): void {
+    createExclusive(this.sub("imports"), safeName(tag, "import tag"), JSON.stringify({ ts: new Date().toISOString(), note }));
   }
 
   markInitialized(note: string): void {
@@ -334,17 +343,23 @@ export function storeFor(config: Pick<Config, "auditDir" | "auditFallbackPath">,
   return store;
 }
 
+/**
+ * Open a store: create and check its folders, then import this config's audit log if no
+ * process with the same audit paths has done so. Each audit dir is imported once, so a
+ * second server on the wallet with its own older audit log brings its keys along too.
+ */
 function openStore(dir: string, config: Pick<Config, "auditDir" | "auditFallbackPath">): PaymentStore {
-  {
-    const store = new PaymentStore(dir);
-    store.ensureLayout();
-    if (!store.initialized) {
-      const n = importAuditLog(store, config);
-      store.markInitialized(`imported ${n} payments from the audit log`);
-    }
-    stores.set(dir, store);
-    return store;
+  const store = new PaymentStore(dir);
+  store.ensureLayout();
+  const auditDir = resolve(config.auditDir);
+  const tag = sha(`${auditDir}\0${fallbackAuditPath(auditDir, config.auditFallbackPath)}`).slice(0, 32);
+  if (!store.hasImported(tag)) {
+    const n = importAuditLog(store, config);
+    store.markImported(tag, `imported ${n} payments`);
   }
+  if (!store.initialized) store.markInitialized("created");
+  stores.set(dir, store);
+  return store;
 }
 
 /** Forget opened stores, as a restart would. For tests. */
