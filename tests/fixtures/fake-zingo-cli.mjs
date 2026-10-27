@@ -6,7 +6,7 @@
 // can stall a process inside its pre-send health check.
 // FAKE_ZINGO_SEND=hang: a quicksend is recorded, then the process never answers.
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
@@ -14,6 +14,30 @@ const state = process.env.FAKE_ZINGO_STATE;
 if (!state) {
   process.stderr.write("FAKE_ZINGO_STATE is not set\n");
   process.exit(2);
+}
+// Two live fakes at once would be two wallet processes on one wallet: say so in overlap.log.
+{
+  const running = join(state, "running");
+  const alive = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (existsSync(running)) {
+    const other = Number(readFileSync(running, "utf8"));
+    if (other && other !== process.pid && alive(other)) appendFileSync(join(state, "overlap.log"), `${process.pid} overlaps ${other}\n`);
+  }
+  writeFileSync(running, String(process.pid));
+  process.on("exit", () => {
+    try {
+      if (readFileSync(running, "utf8") === String(process.pid)) unlinkSync(running);
+    } catch {
+      // gone
+    }
+  });
 }
 const sendsFile = join(state, "sends.jsonl");
 const HEIGHT = 1000;

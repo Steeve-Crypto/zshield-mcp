@@ -22,6 +22,7 @@ import {
   type PaymentStore,
 } from "../payments/store.js";
 import { ChainUnreachableError, SendOutcomeUnknownError } from "../chain/outcome.js";
+import { WalletBusyError } from "../chain/walletlock.js";
 import type { AuditEntry, ChainHealth, Config, MatchConfidence, PayStatus, PossibleSend, TxSummary } from "../types.js";
 
 /**
@@ -246,6 +247,7 @@ export async function preSendProblem(
     health = await check();
   } catch (e) {
     const detail = e instanceof Error ? e.message : String(e);
+    if (e instanceof WalletBusyError) return { code: "BUSY", message: `${detail} Nothing was sent.` };
     if (e instanceof ChainUnreachableError) return { code: "CHAIN_UNREACHABLE", message: `${detail}. Nothing was sent.` };
     return { code: "CHAIN_ERROR", message: `Pre-send check failed: ${detail}. Nothing was sent.` };
   }
@@ -521,6 +523,7 @@ async function runPay(
   // Rows for calls refused before that use the fingerprint from an earlier call, if any.
   let viewKeyFingerprint: string | null = knownFingerprints.get(chain) ?? null;
   let viewKeyError: string | undefined;
+  let viewKeyBusy = false;
   let chainTip: number | undefined;
   let walletHeight: number | undefined;
 
@@ -574,7 +577,9 @@ async function runPay(
     } catch (e) {
       viewKeyFingerprint = null;
       viewKeyError = e instanceof Error ? e.message : String(e);
+      viewKeyBusy = e instanceof WalletBusyError;
     }
+    if (viewKeyFingerprint === null && viewKeyBusy) throw new WalletBusyError(viewKeyError ?? "The wallet is busy.", "busy");
     if (viewKeyFingerprint === null) {
       throw new ViewKeyUnavailable(`Wallet viewing key could not be read, so the payment was not sent: ${viewKeyError}`);
     }
@@ -582,6 +587,7 @@ async function runPay(
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     if (e instanceof PolicyError) fail("rejected", e.code, message);
+    else if (e instanceof WalletBusyError) fail("error", "BUSY", `${message} Nothing was sent.`);
     else if (e instanceof ViewKeyUnavailable) fail("error", "VIEWKEY_UNAVAILABLE", message);
     else fail("error", "CONFIG_ERROR", message);
   }
@@ -775,7 +781,9 @@ async function runPay(
               callId
             );
             recordSafely(store, { ts: now(), call_id: callId, state: "unknown", code, error, possible_sends: possibleSends, by: "send" }, warnings);
-          } else if (e instanceof FenceError) {
+          } else if (e instanceof FenceError || e instanceof WalletBusyError) {
+            // Neither started zingo-cli: the lease was lost at the fence, or the wallet's OS
+            // lock was held by another zingo-cli past the wait or the start deadline.
             fail("error", "BUSY", e.message);
             recordSafely(store, { ts: now(), call_id: callId, state: "not_sent", code, error, by: "send" }, warnings);
           } else {

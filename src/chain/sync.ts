@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { READ_LOCK_WAIT_MS, lockWaitWithin, missingPerl, wrapForWallet, wrapperRefusal, type Wrapped } from "./walletlock.js";
 
 /** What a bounded sync achieved. */
 export interface SyncResult {
@@ -17,6 +18,8 @@ export interface SyncOptions {
   pollMs?: number;
   /** How long `quit` may take to save the wallet before the process is killed. */
   quitGraceMs?: number;
+  /** Run under the OS wallet lock on this file (see walletlock.ts). */
+  lockFile?: string;
 }
 
 /**
@@ -85,7 +88,16 @@ export const defaultSyncer: WalletSyncer = (bin, args, opts) =>
     let detail: string | undefined;
     let settled = false;
     let killTimer: NodeJS.Timeout | undefined;
-    const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"] });
+    let wrapped: Wrapped | undefined;
+    if (opts.lockFile) {
+      try {
+        wrapped = wrapForWallet(bin, args, { lockFile: opts.lockFile, waitMs: lockWaitWithin(READ_LOCK_WAIT_MS, opts.timeoutMs) });
+      } catch (e) {
+        resolve({ complete: false, elapsedMs: 0, detail: e instanceof Error ? e.message : String(e) });
+        return;
+      }
+    }
+    const child = spawn(wrapped?.bin ?? bin, wrapped?.args ?? args, { stdio: ["pipe", "pipe", "pipe"] });
     const write = (line: string) => {
       if (child.stdin.writable) child.stdin.write(`${line}\n`);
     };
@@ -106,6 +118,8 @@ export const defaultSyncer: WalletSyncer = (bin, args, opts) =>
       clearTimeout(deadline);
       if (killTimer) clearTimeout(killTimer);
       const last = parseSyncStatuses(out).at(-1);
+      const refusal = wrapped ? wrapperRefusal(wrapped.nonce, out) : undefined;
+      if (refusal) detail = refusal.message;
       resolve({
         complete,
         scannedHeight: last?.scannedHeight,
@@ -130,7 +144,7 @@ export const defaultSyncer: WalletSyncer = (bin, args, opts) =>
       // The prompt exited first; the exit handler reports it.
     });
     child.on("error", (e) => {
-      detail = `zingo-cli could not start: ${e.message}`;
+      detail = (wrapped ? missingPerl(e as NodeJS.ErrnoException)?.message : undefined) ?? `zingo-cli could not start: ${e.message}`;
       finish();
     });
     child.on("close", finish);

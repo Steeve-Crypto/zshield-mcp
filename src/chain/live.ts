@@ -9,6 +9,7 @@ import { defaultSyncer, type SyncResult, type WalletSyncer } from "./sync.js";
 import { displayUrl, redact, registerServerUrl } from "../redact.js";
 import { memoProblem } from "../policy/limits.js";
 import { walletStateDir } from "../payments/store.js";
+import { READ_LOCK_WAIT_MS, lockWaitWithin, SEND_LOCK_WAIT_MS, SEND_START_WINDOW_MS, WalletBusyError, missingPerl, wrapForWallet, wrapperRefusal, type Wrapped } from "./walletlock.js";
 
 /** Used when a test injects a runner and no syncer: no process is started. */
 const skipSync: WalletSyncer = async () => ({ complete: true, elapsedMs: 0 });
@@ -26,6 +27,14 @@ export interface RunOptions {
    * because the prompt reports command errors there and still exits 0.
    */
   input?: string;
+  /**
+   * Run under the OS wallet lock on this file (see walletlock.ts). The wrapper waits up to
+   * lockWaitMs for it, and refuses to start after lockDeadlineMs. A refusal rejects with
+   * WalletBusyError, which means nothing was started.
+   */
+  lockFile?: string;
+  lockWaitMs?: number;
+  lockDeadlineMs?: number;
 }
 
 /** Runs a zingo-cli invocation and returns stdout. Injectable for tests. */
@@ -116,13 +125,35 @@ export const RUNNER_KILL_GRACE_MS = 5_000;
 export const defaultRunner: CliRunner = (bin, args, opts = {}) =>
   new Promise((resolve, reject) => {
     const timeout = opts.timeoutMs ?? SEND_TIMEOUT_MS;
+    let wrapped: Wrapped | undefined;
+    if (opts.lockFile) {
+      try {
+        wrapped = wrapForWallet(bin, args, {
+          lockFile: opts.lockFile,
+          waitMs: lockWaitWithin(opts.lockWaitMs ?? READ_LOCK_WAIT_MS, timeout),
+          deadlineMs: opts.lockDeadlineMs,
+        });
+      } catch (e) {
+        reject(e);
+        return;
+      }
+    }
     // execFile's own timeout only sends SIGTERM, and a process can ignore it and keep the
     // call, and the wallet lock above it, waiting forever. This timer makes the bound hard.
     const hardKill = setTimeout(() => child.kill("SIGKILL"), timeout + (opts.killGraceMs ?? RUNNER_KILL_GRACE_MS));
-    const child = execFile(bin, args, { maxBuffer: 16 * 1024 * 1024, timeout }, (err, stdout, stderr) => {
+    const child = execFile(wrapped?.bin ?? bin, wrapped?.args ?? args, { maxBuffer: 16 * 1024 * 1024, timeout }, (err, stdout, stderr) => {
       clearTimeout(hardKill);
+      if (err && wrapped) {
+        const refusal = wrapperRefusal(wrapped.nonce, stderr.toString()) ?? missingPerl(err as NodeJS.ErrnoException);
+        if (refusal) {
+          reject(refusal);
+          return;
+        }
+      }
       if (err) {
-        const detail = (stderr || err.message).toString().slice(0, 500);
+        // With the wrapper, err.message holds the whole wrapper command line, so it is not
+        // used: only what the process printed, or its exit status.
+        const detail = (stderr || (wrapped ? `exit ${String((err as { code?: unknown }).code ?? err.signal ?? "unknown")}` : err.message)).toString().slice(0, 500);
         // execFile sets killed and signal when the timeout fires or the process is killed.
         if (err.killed || err.signal) {
           reject(new CliTimeoutError(`zingo-cli was stopped (${err.signal ?? "killed"}) after ${timeout} ms: ${detail}`));
@@ -234,6 +265,15 @@ export class LiveChainAdapter implements ChainAdapter {
     this.syncer = opts.syncer ?? (opts.runner ? skipSync : defaultSyncer);
     this.stateDir = opts.stateDir ?? (opts.runner ? undefined : walletStateDir(this.dataDir));
     this.now = opts.now ?? Date.now;
+    this.lockFile = this.stateDir ? join(this.stateDir, "zingo.flock") : undefined;
+  }
+
+  /** The OS lock file every zingo-cli process on this wallet runs under. None for a test adapter without a store. */
+  private readonly lockFile?: string;
+
+  /** Runs zingo-cli with the OS wallet lock options added. */
+  private exec(args: string[], opts: RunOptions = {}): Promise<string> {
+    return this.runner(this.bin, args, this.lockFile ? { lockFile: this.lockFile, ...opts } : opts);
   }
 
   baseArgs(): string[] {
@@ -245,7 +285,7 @@ export class LiveChainAdapter implements ChainAdapter {
   }
 
   async run(cmd: string[], opts: RunOptions = {}): Promise<string> {
-    return this.runner(this.bin, [...this.baseArgs(), ...cmd], opts);
+    return this.exec([...this.baseArgs(), ...cmd], opts);
   }
 
   /**
@@ -255,8 +295,8 @@ export class LiveChainAdapter implements ChainAdapter {
   async getBalance(opts: { offline?: boolean } = {}): Promise<WalletBalance> {
     const timeoutMs = readTimeoutMs();
     const args = (cmd: string) => (opts.offline ? this.offline(cmd) : [...this.baseArgs(), cmd]);
-    const pools = parseBalance(await this.runner(this.bin, args("balance"), { timeoutMs }));
-    const spendableZats = parseSpendable(await this.runner(this.bin, args("spendable_balance"), { timeoutMs }));
+    const pools = parseBalance(await this.exec(args("balance"), { timeoutMs }));
+    const spendableZats = parseSpendable(await this.exec(args("spendable_balance"), { timeoutMs }));
     return { ...pools, spendableZats };
   }
 
@@ -269,7 +309,7 @@ export class LiveChainAdapter implements ChainAdapter {
     if (timeoutMs <= 0) return { complete: false, elapsedMs: 0, detail: "sync skipped (timeout is 0)" };
     const args = ["--chain", "testnet", "--server", this.server, "--data-dir", this.dataDir];
     try {
-      const r = await this.syncer(this.bin, args, { timeoutMs });
+      const r = await this.syncer(this.bin, args, { timeoutMs, ...(this.lockFile ? { lockFile: this.lockFile } : {}) });
       return r.detail ? { ...r, detail: redact(r.detail) } : r;
     } catch (e) {
       return { complete: false, elapsedMs: 0, detail: redact(e instanceof Error ? e.message : String(e)) };
@@ -298,14 +338,15 @@ export class LiveChainAdapter implements ChainAdapter {
       // --nosync: a sync cut short by this one-shot run leaves new blocks marked unscanned,
       // and zingo-cli then reports a spendable balance of 0 until the next full sync.
       const args = ["--chain", "testnet", "--server", this.server, "--data-dir", this.dataDir, "--nosync", "info"];
-      chainTip = parseLatestBlockHeight(await this.runner(this.bin, args, { timeoutMs }));
+      chainTip = parseLatestBlockHeight(await this.exec(args, { timeoutMs }));
     } catch (e) {
+      if (e instanceof WalletBusyError) throw e;
       throw new ChainUnreachableError(
         `lightwalletd at ${displayUrl(this.server)} did not report the chain tip: ${redact(e instanceof Error ? e.message : String(e))}`
       );
     }
-    const walletHeight = parseWalletHeight(await this.runner(this.bin, this.offline("height"), { timeoutMs }));
-    const spendableZats = parseSpendable(await this.runner(this.bin, this.offline("spendable_balance"), { timeoutMs }));
+    const walletHeight = parseWalletHeight(await this.exec(this.offline("height"), { timeoutMs }));
+    const spendableZats = parseSpendable(await this.exec(this.offline("spendable_balance"), { timeoutMs }));
     return { walletHeight, chainTip, spendableZats, ...(synced === undefined ? {} : { synced }), ...(syncDetail ? { syncDetail } : {}) };
   }
 
@@ -316,7 +357,7 @@ export class LiveChainAdapter implements ChainAdapter {
   /** Read-only, offline: the height the wallet has synced to. */
   async walletHeight(): Promise<number> {
     const args = ["--chain", "testnet", "--data-dir", this.dataDir, "--offline", "height"];
-    return parseWalletHeight(await this.runner(this.bin, args, { timeoutMs: healthTimeoutMs() }));
+    return parseWalletHeight(await this.exec(args, { timeoutMs: healthTimeoutMs() }));
   }
 
   /**
@@ -326,14 +367,14 @@ export class LiveChainAdapter implements ChainAdapter {
    */
   async getHistory(limit: number, opts: { offline?: boolean } = {}): Promise<TxSummary[]> {
     const args = opts.offline ? this.offline("transactions") : [...this.baseArgs(), "transactions"];
-    const all = parseTransactions(await this.runner(this.bin, args, { timeoutMs: readTimeoutMs() }));
+    const all = parseTransactions(await this.exec(args, { timeoutMs: readTimeoutMs() }));
     return all.slice(0, limit);
   }
 
   /** Read-only: runs `addresses` and returns the newest unified address. Refuses a mainnet one. */
   async getReceiveAddress(opts: { offline?: boolean } = {}): Promise<string> {
     const args = opts.offline ? this.offline("addresses") : [...this.baseArgs(), "addresses"];
-    const address = parseReceiveAddress(await this.runner(this.bin, args, { timeoutMs: readTimeoutMs() }));
+    const address = parseReceiveAddress(await this.exec(args, { timeoutMs: readTimeoutMs() }));
     assertTestnetAddress(address);
     return address;
   }
@@ -354,7 +395,7 @@ export class LiveChainAdapter implements ChainAdapter {
         );
       }
       const args = ["--chain", "testnet", "--data-dir", this.dataDir, "--offline", "export_ufvk"];
-      const p = this.runner(this.bin, args, { timeoutMs: readTimeoutMs() }).then(parseUfvk);
+      const p = this.exec(args, { timeoutMs: readTimeoutMs() }).then(parseUfvk);
       // Do not cache a failure. Back off instead: 1s, 2s, 4s, and so on, up to 60s.
       p.then(
         () => {
@@ -363,6 +404,8 @@ export class LiveChainAdapter implements ChainAdapter {
         },
         (e: unknown) => {
           if (this.viewingKey === p) this.viewingKey = undefined;
+          // A wallet that is merely busy is not a failing export: no backoff.
+          if (e instanceof WalletBusyError) return;
           this.viewKeyFailures++;
           this.viewKeyLastError = e instanceof Error ? e.message : String(e);
           const delay = Math.min(VIEWKEY_BACKOFF_MAX_MS, VIEWKEY_BACKOFF_BASE_MS * 2 ** (this.viewKeyFailures - 1));
@@ -390,7 +433,14 @@ export class LiveChainAdapter implements ChainAdapter {
     try {
       // The last check, with nothing between it and the start of the wallet process.
       req.fence?.();
-      out = await this.runner(this.bin, this.baseArgs(), { timeoutMs: SEND_TIMEOUT_MS, input });
+      // The wallet lock is taken by the wrapper in front of zingo-cli: if another zingo-cli
+      // holds it past the wait, or the start deadline passes, the send never starts.
+      out = await this.exec(this.baseArgs(), {
+        timeoutMs: SEND_TIMEOUT_MS,
+        input,
+        lockWaitMs: SEND_LOCK_WAIT_MS,
+        lockDeadlineMs: this.now() + SEND_START_WINDOW_MS,
+      });
     } catch (e) {
       // A send that was cut off may still have been broadcast.
       if (e instanceof CliTimeoutError) throw new SendOutcomeUnknownError(e.message);

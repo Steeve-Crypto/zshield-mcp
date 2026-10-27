@@ -60,7 +60,7 @@ function proc(w: World, name: string, args: string[], env: Record<string, string
   child.stdout!.on("data", (d) => (out += d));
   child.stderr!.on("data", (d) => (err += d));
   const done = new Promise<any>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error(`${name} timed out: ${err}`)), 30_000);
+    const t = setTimeout(() => reject(new Error(`${name} timed out: ${err} OUT:${out}`)), 30_000);
     child.on("exit", () => {
       clearTimeout(t);
       const line = out.trim().split("\n").at(-1);
@@ -124,7 +124,7 @@ describe("two server processes on one wallet", { timeout: 120_000 }, () => {
     assert.equal(b.txid, a.txid);
   });
 
-  it("a holder stalled past its lease never sends after another process took over (V12 F-14)", async () => {
+  it("a holder frozen with its wallet process: another process takes the lease but cannot start a wallet process beside it (V12 F-14)", async () => {
     const w = world();
     const hold = join(w.root, "hold");
     const a = proc(w, "a", ["pay", "race-2"], { FAKE_ZINGO_HOLD: hold });
@@ -132,14 +132,33 @@ describe("two server processes on one wallet", { timeout: 120_000 }, () => {
     killGroup(a.child, "SIGSTOP");
     await new Promise((r) => setTimeout(r, 1500));
     ageLocks(w);
-    const b = await proc(w, "b", ["pay", "race-2"]).done;
+    // A's wallet process is frozen and still holds the OS wallet lock, so B's wallet
+    // process is never started: B's pre-send check is refused as BUSY, and nothing is sent.
+    const b = await proc(w, "b", ["pay", "race-2"], { ZINGO_HEALTH_TIMEOUT_MS: "2500", ZINGO_READ_TIMEOUT_MS: "2500", HEALTH_SYNC_TIMEOUT_MS: "1000" }).done;
+    assert.equal(b.code, "BUSY", JSON.stringify(b));
+    assert.equal(sends(w).length, 0);
     writeFileSync(`${hold}.go`, "");
     killGroup(a.child, "SIGCONT");
     const ra = await a.done;
-    assert.equal(sends(w).length, 1, `A: ${JSON.stringify(ra)} B: ${JSON.stringify(b)}`);
-    assert.equal(b.status, "ok", JSON.stringify(b));
-    assert.notEqual(ra.status, "ok", JSON.stringify(ra));
-    if (process.env.RACE_LOG) console.log("stall: A", ra.code, ra.message, "| B", b.status, b.txid);
+    // A woke after its lease was taken over: it stops at the fence and sends nothing.
+    assert.equal(ra.code, "BUSY", JSON.stringify(ra));
+    assert.equal(sends(w).length, 0, `A: ${JSON.stringify(ra)} B: ${JSON.stringify(b)}`);
+    const retry = await proc(w, "c", ["pay", "race-2"]).done;
+    assert.equal(retry.status, "ok", JSON.stringify(retry));
+    assert.equal(sends(w).length, 1);
+    const again = await proc(w, "d", ["pay", "race-2"]).done;
+    assert.equal(again.idempotent_replay, true, JSON.stringify(again));
+    assert.equal(again.txid, retry.txid);
+    assert.equal(sends(w).length, 1);
+  });
+
+  it("four processes pay with different keys at once (and one with none): no two wallet processes ever run together", async () => {
+    const w = world();
+    const env = { SEND_QUEUE_WAIT_MS: "60000", ZINGO_READ_TIMEOUT_MS: "60000", ZINGO_HEALTH_TIMEOUT_MS: "60000" };
+    const all = await Promise.all(["k1", "k2", "k3", "k4"].map((k, i) => proc(w, `p${i}`, ["pay", k, `0.00${i + 1}`], env).done));
+    assert.deepEqual(all.map((r) => r.status), ["ok", "ok", "ok", "ok"], JSON.stringify(all.map((r) => r.code)));
+    assert.equal(sends(w).length, 4);
+    assert.equal(existsSync(join(w.chain, "overlap.log")), false, existsSync(join(w.chain, "overlap.log")) ? readFileSync(join(w.chain, "overlap.log"), "utf8") : "");
   });
 
   it("concurrent recovery after a crash mid-send settles the call once, and the key is never paid again", async () => {
