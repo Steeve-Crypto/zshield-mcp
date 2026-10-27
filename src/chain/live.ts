@@ -2,9 +2,9 @@ import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { ChainAdapter } from "./types.js";
-import type { OutgoingNote, PaymentReceipt, PaymentRequest, TxSummary, WalletBalance } from "../types.js";
+import type { ChainHealth, OutgoingNote, PaymentReceipt, PaymentRequest, TxSummary, WalletBalance } from "../types.js";
 import { assertTestnetAddress, NetworkError } from "./network.js";
-import { CliTimeoutError, SendOutcomeUnknownError } from "./outcome.js";
+import { ChainUnreachableError, CliTimeoutError, SendOutcomeUnknownError } from "./outcome.js";
 
 export const TESTNET_EXPLORER = "https://blockexplorer.one/zcash/testnet/tx/";
 
@@ -26,6 +26,14 @@ export type CliRunner = (bin: string, args: string[], opts?: RunOptions) => Prom
 export const SEND_TIMEOUT_MS = 15 * 60_000;
 /** Reads should answer fast or fail. Override with ZINGO_READ_TIMEOUT_MS. */
 export const DEFAULT_READ_TIMEOUT_MS = 120_000;
+
+/** Default limit for each zingo-cli run in the pre-send check. */
+export const DEFAULT_HEALTH_TIMEOUT_MS = 30_000;
+
+export function healthTimeoutMs(): number {
+  const v = Number(process.env.ZINGO_HEALTH_TIMEOUT_MS);
+  return Number.isFinite(v) && v > 0 ? v : DEFAULT_HEALTH_TIMEOUT_MS;
+}
 
 export function readTimeoutMs(): number {
   const v = Number(process.env.ZINGO_READ_TIMEOUT_MS);
@@ -156,6 +164,28 @@ export class LiveChainAdapter implements ChainAdapter {
     const pools = parseBalance(await this.run(["balance"], { timeoutMs }));
     const spendableZats = parseSpendable(await this.run(["spendable_balance"], { timeoutMs }));
     return { ...pools, spendableZats };
+  }
+
+  /**
+   * Read-only pre-send check. `info` asks the server for the chain tip, without --waitsync
+   * so it cannot block on a sync. `height` and `spendable_balance` read the wallet file in
+   * offline sessions. Every run has a short timeout.
+   */
+  async checkHealth(): Promise<ChainHealth> {
+    const timeoutMs = healthTimeoutMs();
+    let chainTip: number;
+    try {
+      const args = ["--chain", "testnet", "--server", this.server, "--data-dir", this.dataDir, "info"];
+      chainTip = parseLatestBlockHeight(await this.runner(this.bin, args, { timeoutMs }));
+    } catch (e) {
+      throw new ChainUnreachableError(
+        `lightwalletd at ${this.server} did not report the chain tip: ${e instanceof Error ? e.message : String(e)}`
+      );
+    }
+    const offline = (cmd: string) => ["--chain", "testnet", "--data-dir", this.dataDir, "--offline", cmd];
+    const walletHeight = parseWalletHeight(await this.runner(this.bin, offline("height"), { timeoutMs }));
+    const spendableZats = parseSpendable(await this.runner(this.bin, offline("spendable_balance"), { timeoutMs }));
+    return { walletHeight, chainTip, spendableZats };
   }
 
   /** Read-only: runs `transactions` and returns the newest `limit` entries. */
@@ -299,6 +329,20 @@ export function parseBalance(out: string): { confirmedZats: bigint; unconfirmedZ
 }
 
 /** Parse `zingo-cli spendable_balance`, which prints `{ "spendable_balance": 0 }`. */
+/** `info` prints JSON with "latest_block_height". */
+export function parseLatestBlockHeight(out: string): number {
+  const m = out.match(/"latest_block_height"\s*:\s*(\d+)/);
+  if (!m) throw new Error("zingo-cli info printed no latest_block_height");
+  return Number(m[1]);
+}
+
+/** `height` prints JSON with "height": the wallet's scanned height. */
+export function parseWalletHeight(out: string): number {
+  const m = out.match(/"height"\s*:\s*(\d+)/);
+  if (!m) throw new Error("zingo-cli height printed no height");
+  return Number(m[1]);
+}
+
 export function parseSpendable(out: string): bigint {
   const m = out.match(/"?spendable_balance"?\s*:\s*([\d_]+)/i);
   if (!m) throw new Error(`zingo-cli spendable_balance returned no value: ${out.trim().slice(0, 300)}`);

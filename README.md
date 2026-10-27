@@ -146,6 +146,9 @@ Branch on `code`. It is stable. `message` is for people and may change. `error` 
 | `VIEWKEY_UNAVAILABLE` | The wallet's viewing key could not be read for the audit fingerprint, so the payment was not sent |
 | `CHAIN_ERROR` | Policy passed and the send was attempted, but `zingo-cli` reported an error, so nothing was broadcast. A `pending` row exists |
 | `BUSY` | Another payment from the same wallet was still running after `SEND_QUEUE_WAIT_MS`. Nothing was sent and there is no `pending` row. Try again shortly |
+| `WALLET_NOT_SYNCED` | Testnet mode: the wallet is more than `HEALTH_MAX_LAG_BLOCKS` blocks behind the chain tip. Nothing was sent. Sync the wallet first |
+| `INSUFFICIENT_FUNDS` | Testnet mode: spendable balance is below the amount plus the estimated fee. Nothing was sent |
+| `CHAIN_UNREACHABLE` | Testnet mode: the lightwalletd server did not report the chain tip within `ZINGO_HEALTH_TIMEOUT_MS`. Nothing was sent |
 | `CONFIG_ERROR` | The server is misconfigured, for example testnet mode without the testnet adapter. Nothing was sent |
 
 `status` is `unknown` when the send was started but its result is not known:

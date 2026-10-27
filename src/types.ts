@@ -19,6 +19,8 @@ export interface Config {
   chainNetwork?: string;
   zingoBin?: string;
   zingoDataDir?: string;
+  /** Live mode: how many blocks behind the tip the wallet may be and still send. Default 10 */
+  healthMaxLagBlocks?: number;
   /** How long a send waits for another send on the same wallet before BUSY. Default 10000 */
   sendQueueWaitMs?: number;
   /** Where audit rows go when auditDir cannot be written. Default: audit-fallback.jsonl beside auditDir. */
@@ -167,4 +169,13 @@ export interface PaymentReceipt {
   recipient: string;
   memo?: string;
   mode: ChainMode;
+}
+
+/** What the pre-send check reads from the wallet and server. */
+export interface ChainHealth {
+  /** Height the wallet has scanned to */
+  walletHeight: number;
+  /** Latest block height reported by the server */
+  chainTip: number;
+  spendableZats: bigint;
 }

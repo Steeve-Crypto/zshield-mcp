@@ -1,4 +1,4 @@
-import type { PaymentReceipt, PaymentRequest, TxSummary, WalletBalance } from "../types.js";
+import type { ChainHealth, PaymentReceipt, PaymentRequest, TxSummary, WalletBalance } from "../types.js";
 
 export interface ChainAdapter {
   readonly mode: "mock" | "live";
@@ -16,4 +16,9 @@ export interface ChainAdapter {
    * audit fingerprint. Callers must never log, store, or return it.
    */
   getViewingKey(): Promise<string>;
+  /**
+   * Read-only. Wallet height, chain tip from the server, and spendable zatoshis, for the
+   * pre-send check. Throws ChainUnreachableError when the server does not answer in time.
+   */
+  checkHealth?(): Promise<ChainHealth>;
 }
