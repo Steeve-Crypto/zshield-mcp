@@ -41,7 +41,7 @@ export const payInputSchema = z.object({
     .max(MAX_MEMO_BYTES)
     .refine((m) => memoProblem(m) === undefined, `INVALID_MEMO: memo is longer than ${MAX_MEMO_BYTES} bytes`)
     .optional()
-    .describe(`Optional memo, at most ${MAX_MEMO_BYTES} UTF-8 bytes (the Zcash memo size)`),
+    .describe(`Optional memo, at most ${MAX_MEMO_BYTES} UTF-8 bytes (the Zcash memo size). Sent to the recipient and written to the audit log`),
 });
 
 export type PayInput = z.infer<typeof payInputSchema>;

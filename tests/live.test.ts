@@ -15,8 +15,9 @@ const TM = "tmBsTi2xWTjUdEXnuTceL7fecEQKeWaPDJd";
 const TXID = "ab".repeat(32);
 
 const okRunner = (calls: string[][]): CliRunner =>
-  withUfvk(async (_bin, args) => {
-    calls.push(args);
+  withUfvk(async (_bin, args, opts) => {
+    // Stdin, when used, is recorded as a final pseudo-argument so tests can inspect it.
+    calls.push(opts?.input === undefined ? args : [...args, opts.input]);
     return JSON.stringify({ txids: [TXID] });
   });
 
@@ -50,7 +51,8 @@ describe("LiveChainAdapter", () => {
     assert.equal(r.txid, TXID);
     const args = calls[0];
     assert.deepEqual(args.slice(0, 2), ["--chain", "testnet"]);
-    assert.deepEqual(args.slice(-4), ["quicksend", UTEST, "100000", "hi"]);
+    assert.ok(!args.slice(0, -1).includes("hi") && !args.slice(0, -1).includes(UTEST), "payment details stay out of argv");
+    assert.match(args.at(-1) ?? "", /"memo":"hi"/);
   });
   it("never calls the CLI for a mainnet recipient", async () => {
     const calls: string[][] = [];
@@ -107,7 +109,7 @@ describe("policy runs before chain in live mode", () => {
     const r = await executePay({ amount_zec: "0.00012345", recipient: UTEST }, { config: cfg(), chain });
     assert.equal(r.audit.status, "ok");
     assert.equal(r.audit.amount_zats, "12345");
-    assert.deepEqual(calls[0].slice(-3), ["quicksend", UTEST, "12345"]);
+    assert.ok(calls[0].at(-1)?.startsWith(`quicksend '[{"address":"${UTEST}","amount":12345}]'`));
   });
   it("rejects sub-zatoshi amounts before any CLI call", async () => {
     const calls: string[][] = [];
