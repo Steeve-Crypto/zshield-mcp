@@ -66,7 +66,7 @@ agent and model  ->  MCP client  ->  zshield-mcp  ->  zingo-cli + wallet file  -
 
 ## Audit log
 
-- Every tool call that reaches the server's handler writes at least one JSONL row. A call whose arguments have the wrong JSON type, such as a boolean `amount_zec`, is refused by the MCP SDK's schema check before the handler runs, so it gets an error but no audit row. A payment that passes policy writes a `pending` row before the send and a result row after it, linked by `call_id`. If the `pending` row cannot be written, nothing is sent and the call fails with `AUDIT_WRITE_FAILED`.
+- Every tool call that reaches the server's handler writes at least one JSONL row. A call whose arguments have the wrong JSON type, such as a boolean `amount_zec`, or a recipient, memo, or amount string over its size limit, is refused by the MCP SDK's schema check before the handler runs, so it gets an error but no audit row. This is on purpose: those calls never reach policy or the chain, and writing them down would give a hostile caller a cheap way to grow the log. A payment that passes policy writes a `pending` row before the send and a result row after it, linked by `call_id`. If the `pending` row cannot be written, nothing is sent and the call fails with `AUDIT_WRITE_FAILED`.
 - If the result row cannot be written after a send, the tool still returns the txid with an `audit_warning`. Throwing there would hide a real payment and invite a retry that pays twice. The `pending` row remains as the record.
 - Rejected and failed calls record a stable `code`, such as `CAP_EXCEEDED` or `NOT_ALLOWLISTED`.
 - Read-only tool rows hold no balances, addresses, or transaction details.
@@ -75,6 +75,7 @@ Limits today:
 
 - "Append-only" is a convention, not an enforcement. The files are plain JSONL. Anyone who can write to `AUDIT_DIR` can edit or delete rows, and nothing would detect it. There is no hash chain, signature, or remote copy.
 - Payment rows store the recipient address, the amount, and the memo in plaintext. Treat the audit directory as sensitive.
+- Each row is at most 8 KiB. A recipient too long to be an address is stored as a 64-character prefix plus its SHA-256.
 
 ## The viewing-key fingerprint
 
@@ -99,7 +100,8 @@ So today the fingerprint works as a salted tag for each transaction. It does not
 | Payment lands on mainnet | Seven layers listed under "Mainnet refusal" | Prefix checks only, no checksum decode |
 | Payment with no audit trail | `pending` row is written before the send; the send is refused if that write fails | Rows can be edited afterwards by anyone with file access |
 | Retry after a timeout pays twice | Post-send audit failures return the txid instead of throwing. `CHAIN_ERROR` is documented as "check history before retrying" | A `zingo-cli` timeout can hide a send that did go out. There is no idempotency key |
-| Memo leaks data | Memo is capped at 512 characters | The agent chooses the memo text. Anything in it reaches an allow-listed recipient and the audit log. Memos also appear briefly in the local process list as a `zingo-cli` argument |
+| Memo leaks data | Memo is capped at 512 UTF-8 bytes | The agent chooses the memo text. Anything in it reaches an allow-listed recipient and the audit log. Memos also appear briefly in the local process list as a `zingo-cli` argument |
+| Oversized arguments fill the disk or memory | Recipient is capped at 256 characters, memo at 512 bytes, amount strings at 32 characters, all in the input schema and again in the handler. Each audit row is capped at 8 KiB. Errors do not repeat the caller's text | A caller can still make many small calls. There is no rate limit and no log rotation |
 | Key theft from disk | Keys stay in the `zingo-cli` wallet file, outside the repo | The file is not encrypted by zshield-mcp and its permissions are not checked |
 | Lying or stale lightwalletd | None in the server | Balances and history are only as good as the server `zingo-cli` talks to |
 | Hostile allow-list or config edit | None in the server | Whoever can write those files sets policy. The allow-list is re-read on every call, so an edit takes effect at once |
