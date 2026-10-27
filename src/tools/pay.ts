@@ -6,11 +6,12 @@ import { assertWithinCap, PolicyError } from "../policy/caps.js";
 import { assertRecipientAllowed, isRecipientAllowed, loadAllowlist } from "../policy/allowlist.js";
 import { assertPayInputBounded, MAX_MEMO_BYTES, MAX_RECIPIENT_LENGTH, memoProblem } from "../policy/limits.js";
 import { boundAuditEntry } from "../audit/log.js";
+import { MAX_AMOUNT_LENGTH } from "../policy/amount.js";
 import type { AuditEntry, Config, PayStatus } from "../types.js";
 
 export const payInputSchema = z.object({
   amount_zec: z
-    .union([z.string(), z.number()])
+    .union([z.string().max(MAX_AMOUNT_LENGTH), z.number()])
     .describe('Amount of ZEC to pay as a decimal string like "0.05" or a number, at most 8 decimals (must be <= spending cap)'),
   recipient: z
     .string()

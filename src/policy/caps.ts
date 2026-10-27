@@ -10,7 +10,7 @@ export function assertWithinCap(amountZec: number | string, capZec: number | str
   try {
     amountZats = parseZecToZats(amountZec, "Amount");
   } catch (e) {
-    throw new PolicyError(e instanceof AmountError ? e.message : `Invalid amount: ${amountZec}.`);
+    throw new PolicyError(e instanceof AmountError ? e.message : "Invalid amount.");
   }
   try {
     capZats = parseZecToZats(capZec, "Spending cap");

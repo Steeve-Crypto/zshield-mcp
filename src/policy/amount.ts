@@ -32,41 +32,48 @@ function numberToDecimalString(n: number): string {
  * Parse a ZEC amount given as a decimal string or a number into zatoshis.
  * Rejects non-finite, zero, negative, malformed, more-than-8-decimal, and above-supply amounts.
  */
+/** Longest amount string accepted. "21000000.00000000" is 17 characters. */
+export const MAX_AMOUNT_LENGTH = 32;
+
 export function parseZecToZats(value: unknown, label = "Amount"): bigint {
   let text: string;
   if (typeof value === "number") {
     if (!Number.isFinite(value)) {
-      throw new AmountError(`${label} must be a finite number, got ${value}.`);
+      throw new AmountError(`${label} must be a finite number.`);
     }
     text = numberToDecimalString(value);
   } else if (typeof value === "string") {
+    // Bound before any other work. Messages below never repeat the caller's text.
+    if (value.length > MAX_AMOUNT_LENGTH) {
+      throw new AmountError(`${label} is longer than ${MAX_AMOUNT_LENGTH} characters.`);
+    }
     text = value.trim();
   } else {
     throw new AmountError(`${label} must be a decimal string or number, got ${typeof value}.`);
   }
 
   if (/^[+-]?(nan|infinity)$/i.test(text)) {
-    throw new AmountError(`${label} must be a finite number, got "${text}".`);
+    throw new AmountError(`${label} must be a finite number.`);
   }
   if (text.startsWith("-")) {
-    throw new AmountError(`${label} must be positive, got ${text}.`);
+    throw new AmountError(`${label} must be positive.`);
   }
   const m = text.match(/^(\d+)(?:\.(\d+))?$/);
   if (!m) {
-    throw new AmountError(`${label} must be a plain decimal ZEC value like "0.05", got "${text}".`);
+    throw new AmountError(`${label} must be a plain decimal ZEC value like "0.05".`);
   }
   const [, intPart, fracPart = ""] = m;
   if (fracPart.length > MAX_DECIMALS) {
     throw new AmountError(
-      `${label} ${text} has more than ${MAX_DECIMALS} decimal places; ZEC amounts must be whole zatoshis.`
+      `${label} has more than ${MAX_DECIMALS} decimal places; ZEC amounts must be whole zatoshis.`
     );
   }
   const zats = BigInt(intPart) * ZATS_PER_ZEC + BigInt(fracPart.padEnd(MAX_DECIMALS, "0"));
   if (zats <= 0n) {
-    throw new AmountError(`${label} must be greater than zero, got ${text}.`);
+    throw new AmountError(`${label} must be greater than zero.`);
   }
   if (zats > MAX_MONEY_ZATS) {
-    throw new AmountError(`${label} ${text} is more than the 21,000,000 ZEC supply.`);
+    throw new AmountError(`${label} is more than the 21,000,000 ZEC supply.`);
   }
   return zats;
 }
