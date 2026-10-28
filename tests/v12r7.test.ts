@@ -143,3 +143,37 @@ describe("staged live send binds the txid before it is transmitted", () => {
     assert.notEqual(row.status, "broadcast", JSON.stringify(row));
   });
 });
+
+// The memo checked by policy, logged, recorded in the intent, and handed to the wallet is
+// one string. Nothing trims, normalizes, or re-encodes it on the way.
+describe("the memo sent is exactly the memo checked and logged", () => {
+  it("inner spacing, quotes, and non-ASCII reach zingo-cli, the audit rows, and the intent unchanged", async () => {
+    const { LiveChainAdapter } = await import("../src/chain/live.ts");
+    const { storeFor } = await import("../src/payments/store.ts");
+    const { withUfvk } = await import("./helpers.ts");
+    const memo = 'inv  42: "caf\u00e9" \\ \u{1F600} \u4e2d';
+    const config = liveConfig();
+    const d = mkdtempSync(join(tmpdir(), "zshield-r7m-"));
+    const TX = "5c".repeat(32);
+    let sentLine = "";
+    const runner = async (_b: string, _a: string[], opts?: { input?: string }) => {
+      const input = opts?.input ?? "";
+      if (/^(quicksend|send) /.test(input)) {
+        sentLine = input;
+        return `{\n  "fee": 10000\n}\n{\n  "txids": [\n    "${TX}"\n  ]\n}\n`;
+      }
+      return "";
+    };
+    const chain = new LiveChainAdapter({ network: "testnet", runner: withUfvk(runner as never, {}, false), dataDir: d, stateDir: join(d, ".zshield-state") });
+    const r = await executePay({ idempotency_key: "r7-memo-exact", amount_zec: "0.0001", recipient: R, memo }, { config, chain });
+    const body = JSON.parse(r.text);
+    assert.ok(sentLine.length > 0, "a send line was built");
+    const m = /^send '(.*)'$/s.exec(sentLine.split("\n")[0]);
+    assert.ok(m, sentLine);
+    const outputs = JSON.parse(m![1]);
+    assert.equal(outputs.length, 1);
+    assert.equal(outputs[0].memo, memo);
+    for (const row of readAuditRows(config).filter((x) => x.tool === "zcash_pay")) assert.equal(row.memo, memo);
+    assert.equal(storeFor(config, chain).readCall(body.call_id)?.intent?.memo, memo);
+  });
+});
