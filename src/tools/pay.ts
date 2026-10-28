@@ -469,6 +469,8 @@ function replay(input: PayInput, deps: PayDeps, callId: string, originalCallId: 
       mode: config.chainMode,
       view_key_fingerprint: intent?.view_key_fingerprint,
       confirmed: state === "mined" ? true : undefined,
+      // A replay does not read the wallet: this is the last sighting, not the current state.
+      confirmed_as_of: state === "mined" ? record.top?.ts : undefined,
       block_height: record.blockHeight,
     });
   }

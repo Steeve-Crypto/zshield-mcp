@@ -28,6 +28,10 @@ export interface PaymentStatus {
   block_height?: number;
   confirmations?: number;
   wallet_height?: number;
+  /** This server saw the payment mined, and the wallet no longer shows it mined (a reorg or rescan). The stored history keeps the earlier sighting. */
+  reorged?: boolean;
+  /** With `reorged`: the height it was mined at when last seen. */
+  last_mined_height?: number;
   amount_zats?: string;
   code?: string;
   possible_sends?: PossibleSend[];
@@ -222,15 +226,17 @@ async function fromChain(
     if (s.state === "failed" && record.state !== "mined") return failedStatus(base, amount, record.txid, s.message);
     if (s.state === "mined") safely(() => store.advance({ ts: new Date(now).toISOString(), call_id: record.callId, state: "mined", txid: record.txid, block_height: s.block_height, by: "status" }));
     if (record.state === "mined" && s.state !== "mined") {
-      // Seen mined before. A read that no longer shows it (a reorg, or a wallet rescan)
-      // never moves the call back; report what was recorded and why it may look different.
+      // Seen mined before; the wallet no longer shows it mined. The record stays (it is the
+      // history) but the answer is the wallet's now: never "mined" or "failed" from here, and
+      // nothing is sent.
       return {
         ...base,
         amount_zats: amount,
-        state: "mined",
+        state: s.state === "broadcast" ? "broadcast" : "unknown",
         txid: record.txid,
-        block_height: record.blockHeight,
-        message: `Mined${record.blockHeight !== undefined ? ` at height ${record.blockHeight}` : ""} when last seen; the wallet now reports it as ${s.state}. Check the explorer. Do not pay again.`,
+        reorged: true,
+        last_mined_height: record.blockHeight,
+        message: `This was mined${record.blockHeight !== undefined ? ` at height ${record.blockHeight}` : ""} when last seen, but the wallet no longer shows it mined (a reorg, or a rescan): ${s.message} Check the explorer. Do not pay again.`,
       };
     }
     // A txid the send itself returned was broadcast; never report it as anything less.

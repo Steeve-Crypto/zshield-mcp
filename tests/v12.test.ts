@@ -13,6 +13,7 @@ import { executeHistory } from "../src/tools/history.ts";
 import { executePay, findPossibleSends } from "../src/tools/pay.ts";
 import { paymentStatus } from "../src/tools/status.ts";
 import type { AuditEntry, Config, TxSummary } from "../src/types.ts";
+import { storeFor } from "../src/payments/store.ts";
 import { connect, tempConfig, walletJson, withEnv, withUfvk } from "./helpers.ts";
 
 // One regression test (or more) per V12 finding on ff2254b. They only use entry points
@@ -90,13 +91,15 @@ describe("V12 F-18: truncated history never proves a payment was not sent", () =
 });
 
 describe("V12 F-20: settled state never moves backwards", () => {
-  it("mined stays mined when a later read no longer shows the transaction", async () => {
+  it("the record stays mined when a later read no longer shows the transaction, and the status says so (F-30)", async () => {
     const config = liveConfig();
     pendingRow(config, "c1");
     assert.equal((await paymentStatus(config, wallet([sentTx()]), { call_id: "c1" }, T0 + 60_000)).state, "mined");
     reset();
     const later = await paymentStatus(config, wallet([]), { call_id: "c1" }, T0 + 10 * 3600_000);
-    assert.equal(later.state, "mined", JSON.stringify(later));
+    assert.notEqual(later.state, "mined", JSON.stringify(later));
+    assert.equal(later.reorged, true);
+    assert.equal(storeFor(config, wallet([])).readCall("c1")?.state, "mined", "the stored history is not rewritten");
   });
 });
 
