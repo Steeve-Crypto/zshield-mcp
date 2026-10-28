@@ -61,4 +61,4 @@ Calls refused with `RATE_LIMITED` do not get a row each, so a flood of calls can
 
 ## Retention
 
-Rotate or archive `audits/*.jsonl` as your compliance needs require. Do not commit live audit files (gitignored).
+Rotate or archive `audits/*.jsonl` as your compliance needs require. Do not commit live audit files (gitignored). Payment state (keys, calls, txids) lives in the payment store in the wallet directory, not in these files. Idempotency, status, and recovery never read the audit log, apart from a one-time import of an audit dir the store has not seen before, so rotating or deleting old files cannot change a payment's state and a long log does not slow any call. The import trusts that dir on first sight: keep it private (startup checks its mode and owner).
