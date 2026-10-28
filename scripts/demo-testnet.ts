@@ -17,6 +17,8 @@ const server = process.env.LIGHTWALLETD_URL ?? "https://testnet.zec.rocks:443";
 
 async function main() {
   mkdirSync(base, { recursive: true, mode: 0o700 });
+  // The adapter refuses a wallet directory that does not exist, so make both first.
+  for (const dir of [join(base, "recipient"), join(base, "wallet")]) mkdirSync(dir, { recursive: true, mode: 0o700 });
   const recipientWallet = new LiveChainAdapter({ network: "testnet", zingoBin: bin, server, dataDir: join(base, "recipient") });
   const addrOut = await recipientWallet.run(["addresses"]);
   // zingo-cli creates wallets with the default umask. Lock both down, as the server requires.
@@ -29,7 +31,7 @@ async function main() {
   if (!recipient) throw new Error(`No utest address found in: ${addrOut.slice(0, 300)}`);
 
   const allowPath = join(base, "demo-allowlist.json");
-  writeFileSync(allowPath, JSON.stringify({ recipients: [{ address: recipient, label: "demo recipient" }] }, null, 2));
+  writeFileSync(allowPath, JSON.stringify({ recipients: [{ address: recipient, label: "demo recipient" }] }, null, 2), { mode: 0o600 });
 
   const config: Config = {
     spendingCapZec: 0.01,

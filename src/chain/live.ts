@@ -10,6 +10,7 @@ import { defaultSyncer, type SyncResult, type WalletSyncer } from "./sync.js";
 import { displayUrl, redact, registerServerUrl } from "../redact.js";
 import { memoProblem } from "../policy/limits.js";
 import { walletStateDir } from "../payments/store.js";
+import { checkPin, pinDir, type DirPin } from "./pin.js";
 import { READ_LOCK_WAIT_MS, lockWaitWithin, SEND_LOCK_WAIT_MS, SEND_START_WINDOW_MS, WalletBusyError, missingPerl, wrapForWallet, wrapperRefusal, type Wrapped } from "./walletlock.js";
 
 /** Used when a test injects a runner and no syncer: no process is started. */
@@ -247,6 +248,9 @@ export class LiveChainAdapter implements ChainAdapter {
   readonly mode = "live" as const;
   readonly bin: string;
   readonly dataDir: string;
+  /** The wallet's pinned real path, which is what zingo-cli is given. */
+  private readonly walletPath: string;
+  private readonly pin?: DirPin;
   /** The payment store, inside the wallet directory, shared by every process on the wallet. */
   readonly stateDir?: string;
   readonly server: string;
@@ -265,13 +269,31 @@ export class LiveChainAdapter implements ChainAdapter {
     }
     this.bin = opts.zingoBin ?? "zingo-cli";
     this.dataDir = resolveWalletDir(opts.dataDir);
+    // Pinned at startup (or here, for an adapter built without it). A missing wallet is
+    // refused rather than created later; a test adapter with a fake runner may have none.
+    try {
+      this.pin = pinDir(this.dataDir);
+    } catch (e) {
+      if (!opts.runner) throw new WalletDirError("zshield-mcp: the wallet directory does not exist or cannot be resolved. Create it with zingo-cli first.");
+    }
+    this.walletPath = this.pin?.path ?? this.dataDir;
     this.server = opts.server ?? "https://testnet.zec.rocks:443";
     registerServerUrl(this.server);
     this.runner = redactingRunner(opts.runner ?? defaultRunner);
     this.syncer = opts.syncer ?? (opts.runner ? skipSync : defaultSyncer);
-    this.stateDir = opts.stateDir ?? (opts.runner ? undefined : walletStateDir(this.dataDir));
+    this.stateDir = opts.stateDir ?? (opts.runner ? undefined : walletStateDir(this.walletPath));
     this.now = opts.now ?? Date.now;
     this.lockFile = this.stateDir ? join(this.stateDir, "zingo.flock") : undefined;
+  }
+
+  /** Throws, before anything starts, unless the wallet path still leads to the pinned directory. */
+  private assertPinned(): void {
+    if (!this.pin) return;
+    try {
+      checkPin(this.dataDir, this.pin);
+    } catch (e) {
+      throw new WalletBusyError(`${(e as Error).message} Nothing was started.`, "unavailable");
+    }
   }
 
   /** The OS lock file every zingo-cli process on this wallet runs under. None for a test adapter without a store. */
@@ -285,7 +307,7 @@ export class LiveChainAdapter implements ChainAdapter {
   baseArgs(): string[] {
     // --waitsync can block past the runner timeout (background sync never reports done),
     // so it is opt-in via ZINGO_WAITSYNC=1. One-shot commands still sync at startup.
-    const args = ["--chain", "testnet", "--server", this.server, "--data-dir", this.dataDir];
+    const args = ["--chain", "testnet", "--server", this.server, "--data-dir", this.walletPath];
     if (process.env.ZINGO_WAITSYNC === "1") args.push("--waitsync");
     return args;
   }
@@ -313,7 +335,7 @@ export class LiveChainAdapter implements ChainAdapter {
    */
   async syncWallet(timeoutMs: number): Promise<SyncResult> {
     if (timeoutMs <= 0) return { complete: false, elapsedMs: 0, detail: "sync skipped (timeout is 0)" };
-    const args = ["--chain", "testnet", "--server", this.server, "--data-dir", this.dataDir];
+    const args = ["--chain", "testnet", "--server", this.server, "--data-dir", this.walletPath];
     try {
       const r = await this.syncer(this.bin, args, { timeoutMs, ...(this.lockFile ? { lockFile: this.lockFile } : {}) });
       return r.detail ? { ...r, detail: redact(r.detail) } : r;
@@ -343,7 +365,7 @@ export class LiveChainAdapter implements ChainAdapter {
     try {
       // --nosync: a sync cut short by this one-shot run leaves new blocks marked unscanned,
       // and zingo-cli then reports a spendable balance of 0 until the next full sync.
-      const args = ["--chain", "testnet", "--server", this.server, "--data-dir", this.dataDir, "--nosync", "info"];
+      const args = ["--chain", "testnet", "--server", this.server, "--data-dir", this.walletPath, "--nosync", "info"];
       chainTip = parseLatestBlockHeight(await this.exec(args, { timeoutMs }));
     } catch (e) {
       if (e instanceof WalletBusyError) throw e;
@@ -357,12 +379,12 @@ export class LiveChainAdapter implements ChainAdapter {
   }
 
   private offline(cmd: string): string[] {
-    return ["--chain", "testnet", "--data-dir", this.dataDir, "--offline", cmd];
+    return ["--chain", "testnet", "--data-dir", this.walletPath, "--offline", cmd];
   }
 
   /** Read-only, offline: the height the wallet has synced to. */
   async walletHeight(): Promise<number> {
-    const args = ["--chain", "testnet", "--data-dir", this.dataDir, "--offline", "height"];
+    const args = ["--chain", "testnet", "--data-dir", this.walletPath, "--offline", "height"];
     return parseWalletHeight(await this.exec(args, { timeoutMs: healthTimeoutMs() }));
   }
 
@@ -447,7 +469,7 @@ export class LiveChainAdapter implements ChainAdapter {
           `export_ufvk failed ${this.viewKeyFailures} time(s) in a row (${this.viewKeyLastError}); next try in ${Math.ceil(wait / 1000)}s`
         );
       }
-      const args = ["--chain", "testnet", "--data-dir", this.dataDir, "--offline", "export_ufvk"];
+      const args = ["--chain", "testnet", "--data-dir", this.walletPath, "--offline", "export_ufvk"];
       const p = this.exec(args, { timeoutMs: readTimeoutMs() }).then(parseUfvk);
       // Do not cache a failure. Back off instead: 1s, 2s, 4s, and so on, up to 60s.
       p.then(
@@ -498,6 +520,7 @@ export class LiveChainAdapter implements ChainAdapter {
     try {
       // The last check, with nothing between it and the start of the wallet process.
       req.fence?.();
+      this.assertPinned();
       // The wallet lock is taken by the wrapper in front of zingo-cli: if another zingo-cli
       // holds it past the wait, or the start deadline passes, nothing starts.
       const built = await this.exec(this.baseArgs(), {
@@ -517,6 +540,7 @@ export class LiveChainAdapter implements ChainAdapter {
     req.fence?.();
     let sent: string;
     try {
+      this.assertPinned();
       sent = await this.exec(this.baseArgs(), {
         timeoutMs: SEND_TIMEOUT_MS,
         input: `transmit ${txid}\nquit\n`,

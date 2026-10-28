@@ -1,10 +1,12 @@
 import { resolveWalletDir } from "./chain/live.js";
 import { assertWalletPrivate } from "./chain/perms.js";
 import type { Config } from "./types.js";
-import { readdirSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fallbackAuditPath } from "./audit/log.js";
-import { checkPrivateFile, ensurePrivateDir } from "./fsafe.js";
+import { assertSafeAncestors, checkPrivateFile, ensurePrivateDir } from "./fsafe.js";
+import { pinDir } from "./chain/pin.js";
+import { assertAllowlistFileSafe } from "./policy/allowlist.js";
 import { resolveStateDir, walletStateDir } from "./payments/store.js";
 
 export interface StartupDeps {
@@ -30,6 +32,10 @@ export function checkRecordPaths(config: Config, stateDir: string, platform: str
   const note = (n: string | undefined) => {
     if (n) notes.push(`zshield-mcp: repaired permissions: ${n}`);
   };
+  // No directory above these paths may let another user swap them. The allow-list file
+  // itself must not be a symlink, another user's, or writable by group or other.
+  for (const p of [config.auditDir, stateDir, config.allowlistPath]) assertSafeAncestors(p);
+  assertAllowlistFileSafe(config.allowlistPath);
   for (const dir of [config.auditDir, stateDir]) {
     note(ensurePrivateDir(dir));
   }
@@ -37,7 +43,7 @@ export function checkRecordPaths(config: Config, stateDir: string, platform: str
     if (name.endsWith(".jsonl")) note(checkPrivateFile(join(config.auditDir, name)));
   }
   note(checkPrivateFile(fallbackAuditPath(config.auditDir, config.auditFallbackPath)));
-  for (const sub of ["keys", "calls", "pending", "txids", "imports"]) note(ensurePrivateDir(join(stateDir, sub)));
+  for (const sub of ["keys", "calls", "pending", "txids"]) note(ensurePrivateDir(join(stateDir, sub)));
   note(checkPrivateFile(join(stateDir, "wallet.lock")));
   note(checkPrivateFile(join(stateDir, "meta.json")));
   return notes;
@@ -61,8 +67,15 @@ export function startupChecks(config: Config, platform: string = process.platfor
     throw new Error("zshield-mcp: testnet mode is not supported on Windows. Use mock mode there, or run testnet mode on Linux or macOS.");
   }
   const dataDir = resolveWalletDir(config.zingoDataDir);
-  const stateDir = deps.stateDir ?? walletStateDir(dataDir);
-  const warnings = assertWalletPrivate(dataDir, platform);
+  // The wallet must already exist: a missing path could be planted before it is created.
+  if (!existsSync(dataDir)) {
+    throw new Error("zshield-mcp: the wallet directory does not exist. Create the wallet with zingo-cli first, then start the server.");
+  }
+  // Pin its real path, and judge the directories above that path, not above a symlink to it.
+  const pin = pinDir(dataDir);
+  assertSafeAncestors(pin.path);
+  const stateDir = deps.stateDir ?? walletStateDir(pin.path);
+  const warnings = assertWalletPrivate(pin.path, platform);
   warnings.push(...checkRecordPaths(config, stateDir, platform));
   return warnings;
 }

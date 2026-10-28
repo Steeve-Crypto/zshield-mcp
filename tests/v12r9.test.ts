@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, it } from "node:test";
@@ -12,11 +12,17 @@ import type { PaymentReceipt, PaymentRequest } from "../src/types.ts";
 import { startupChecks } from "../src/startup.ts";
 import { LiveChainAdapter, type CliRunner } from "../src/chain/live.ts";
 import { executeHistory } from "../src/tools/history.ts";
-import { ALLOWED, tempConfig, walletJson } from "./helpers.ts";
+import { assertSafeAncestors } from "../src/fsafe.ts";
+import { hooks, loadAllowlist } from "../src/policy/allowlist.ts";
+import { resetPins } from "../src/chain/pin.ts";
+import { ALLOWED, tempConfig, walletJson, withUfvk } from "./helpers.ts";
 
 // V12 run 6 decision tests (F-24 to F-25, F-29 to F-33, F-35, F-36).
 
-beforeEach(() => resetPaymentStores());
+beforeEach(() => {
+  resetPaymentStores();
+  resetPins();
+});
 
 /** A mock chain bound to a wallet dir, counting sends. */
 function walletChain(walletDir: string) {
@@ -158,5 +164,202 @@ describe("F-35: zcash_history does not return recipients or memos", () => {
     const [tx] = await chain.getHistory(10, { offline: true });
     assert.equal(tx.outgoing?.[0].recipient, RCPT);
     assert.equal(tx.outgoing?.[0].memo, MEMO);
+  });
+});
+
+const UTEST = "utest1" + "q".repeat(100);
+const TXID = "ab".repeat(32);
+const posix = process.platform === "win32" ? { skip: "POSIX only" } : {};
+const tmp = () => mkdtempSync(join(tmpdir(), "zshield-posix-"));
+const list = (dir: string, mode = 0o600) => {
+  const f = join(dir, "allow.json");
+  writeFileSync(f, JSON.stringify({ recipients: [{ address: ALLOWED }] }));
+  chmodSync(f, mode);
+  return f;
+};
+
+describe("F-24, F-31: the allow-list file", posix, () => {
+  it("loads a private regular file", () => {
+    assert.equal(loadAllowlist(list(tmp())).length, 1);
+  });
+  it("refuses a symlink, even to a good file", () => {
+    const dir = tmp();
+    const real = list(dir);
+    const link = join(dir, "link.json");
+    symlinkSync(real, link);
+    assert.throws(() => loadAllowlist(link), /symlink/);
+  });
+  it("refuses a group- or world-writable file", () => {
+    for (const mode of [0o620, 0o602, 0o666]) {
+      assert.throws(() => loadAllowlist(list(tmp(), mode)), /writable by group or other/);
+    }
+  });
+  it("refuses a file owned by another user", { skip: process.getuid?.() === 0 }, () => {
+    const f = list(tmp());
+    // Pretend the process is a different user by checking the same rule through the owner field.
+    const uid = process.getuid!();
+    const real = process.getuid;
+    (process as { getuid: () => number }).getuid = () => uid + 1;
+    try {
+      assert.throws(() => loadAllowlist(f), /owned by another user/);
+    } finally {
+      (process as { getuid: typeof real }).getuid = real;
+    }
+  });
+  it("refuses a file swapped for another between the check and the open", () => {
+    const dir = tmp();
+    const f = list(dir);
+    const other = join(dir, "other.json");
+    writeFileSync(other, JSON.stringify({ recipients: [{ address: "u1evil" }] }));
+    chmodSync(other, 0o600);
+    hooks.beforeOpen = () => renameSync(other, f);
+    try {
+      assert.throws(() => loadAllowlist(f), /changed while it was being opened/);
+    } finally {
+      hooks.beforeOpen = undefined;
+    }
+  });
+  it("is checked at startup, in mock and live mode", () => {
+    const bad = tempConfig();
+    chmodSync(bad.allowlistPath, 0o666);
+    assert.throws(() => startupChecks(bad), /writable by group or other/);
+    const dir = tmp();
+    const link = join(dir, "link.json");
+    symlinkSync(list(dir), link);
+    assert.throws(() => startupChecks(tempConfig({ allowlistPath: link })), /symlink/);
+    const walletDir = wallet();
+    chmodSync(walletDir, 0o700);
+    const live = tempConfig({ chainMode: "live", chainNetwork: "testnet", zingoDataDir: walletDir });
+    chmodSync(live.allowlistPath, 0o666);
+    assert.throws(() => startupChecks(live), /writable by group or other/);
+  });
+  it("a missing allow-list still starts and fails at call time", () => {
+    const config = tempConfig();
+    rmSync(config.allowlistPath);
+    assert.doesNotThrow(() => startupChecks(config));
+  });
+});
+
+describe("F-24, F-31: directories above the paths", posix, () => {
+  it("refuses an ancestor writable by group or other without the sticky bit", () => {
+    const root = tmp();
+    mkdirSync(join(root, "sub"));
+    for (const mode of [0o770, 0o707, 0o777]) {
+      chmodSync(root, mode);
+      assert.throws(() => assertSafeAncestors(join(root, "sub", "x")), /writable by other users and not sticky/);
+    }
+    chmodSync(root, 0o700);
+  });
+  it("allows a sticky shared directory and a path that does not exist yet", () => {
+    const root = tmp();
+    chmodSync(root, 0o1777);
+    assert.doesNotThrow(() => assertSafeAncestors(join(root, "new", "deeper", "x")));
+    chmodSync(root, 0o700);
+  });
+  it("follows symlinks to judge the real parents", () => {
+    const open = tmp();
+    chmodSync(open, 0o777);
+    const real = join(open, "real");
+    mkdirSync(real, { mode: 0o700 });
+    const via = tmp();
+    symlinkSync(real, join(via, "link"));
+    assert.throws(() => assertSafeAncestors(join(via, "link", "x")), /not sticky/);
+    chmodSync(open, 0o700);
+  });
+  it("refuses an ancestor owned by another non-root user", { skip: process.getuid?.() === 0 }, () => {
+    const root = tmp();
+    assert.throws(() => assertSafeAncestors(join(root, "x"), process.getuid!() + 1), /owned by uid/);
+    assert.doesNotThrow(() => assertSafeAncestors(join(root, "x")));
+  });
+  it("startup checks the state, audit, allow-list, and wallet paths", () => {
+    const open = tmp();
+    chmodSync(open, 0o777);
+    const audit = tempConfig({ auditDir: join(open, "audits") });
+    assert.throws(() => startupChecks(audit), /not sticky/);
+    const allow = tempConfig();
+    const moved = join(open, "allow.json");
+    writeFileSync(moved, readFileSync(allow.allowlistPath));
+    chmodSync(moved, 0o600);
+    assert.throws(() => startupChecks({ ...allow, allowlistPath: moved }), /not sticky/);
+    const w = join(open, "wallet");
+    mkdirSync(w, { mode: 0o700 });
+    assert.throws(() => startupChecks(tempConfig({ chainMode: "live", chainNetwork: "testnet", zingoDataDir: w })), /not sticky/);
+    chmodSync(open, 0o700);
+  });
+});
+
+describe("F-24, F-31: the wallet path is pinned", posix, () => {
+  const runner = (calls: string[][], onCall?: () => void): CliRunner =>
+    withUfvk(async (_bin, args, opts) => {
+      calls.push(opts?.input === undefined ? args : [...args, opts.input]);
+      onCall?.();
+      return JSON.stringify({ txids: [TXID] });
+    });
+  const pair = () => {
+    const root = tmp();
+    const a = join(root, "a");
+    const b = join(root, "b");
+    mkdirSync(a, { mode: 0o700 });
+    mkdirSync(b, { mode: 0o700 });
+    const link = join(root, "wallet");
+    symlinkSync(a, link);
+    return { root, a, b, link };
+  };
+
+  it("passes zingo-cli the real path, not the symlink", async () => {
+    const { a, link } = pair();
+    const calls: string[][] = [];
+    const chain = new LiveChainAdapter({ network: "testnet", dataDir: link, runner: runner(calls), stateDir: tmp() });
+    await chain.pay({ amountZats: 100_000n, recipient: UTEST });
+    assert.ok(calls.length > 0);
+    for (const args of calls) assert.equal(args[args.indexOf("--data-dir") + 1], realpathSync(a));
+  });
+  it("refuses a send when the path now leads to another directory, and starts nothing", async () => {
+    const { b, link } = pair();
+    const calls: string[][] = [];
+    const chain = new LiveChainAdapter({ network: "testnet", dataDir: link, runner: runner(calls), stateDir: tmp() });
+    rmSync(link);
+    symlinkSync(b, link);
+    await assert.rejects(chain.pay({ amountZats: 100_000n, recipient: UTEST }), /no longer resolves to the directory pinned/);
+    assert.equal(calls.length, 0);
+  });
+  it("refuses a send when the directory was replaced by a new one at the same path", async () => {
+    const root = tmp();
+    const dir = join(root, "w");
+    mkdirSync(dir, { mode: 0o700 });
+    const calls: string[][] = [];
+    const chain = new LiveChainAdapter({ network: "testnet", dataDir: dir, runner: runner(calls), stateDir: tmp() });
+    renameSync(dir, join(root, "old"));
+    mkdirSync(dir, { mode: 0o700 });
+    await assert.rejects(chain.pay({ amountZats: 100_000n, recipient: UTEST }), /no longer resolves to the directory pinned/);
+    assert.equal(calls.length, 0);
+  });
+  it("re-checks before the transmit step as well", async () => {
+    const { b, link } = pair();
+    const calls: string[][] = [];
+    const chain = new LiveChainAdapter({
+      network: "testnet",
+      dataDir: link,
+      runner: runner(calls, () => {
+        if (calls.length === 1) {
+          rmSync(link);
+          symlinkSync(b, link);
+        }
+      }),
+      stateDir: tmp(),
+    });
+    await assert.rejects(chain.pay({ amountZats: 100_000n, recipient: UTEST }), /no longer resolves to the directory pinned/);
+    assert.equal(calls.length, 1, "only the build step ran; nothing was transmitted");
+    assert.ok(!calls.some((c) => /transmit/.test(c.at(-1) ?? "")));
+  });
+  it("refuses a missing wallet directory in live mode", () => {
+    const config = tempConfig({ chainMode: "live", chainNetwork: "testnet", zingoDataDir: join(tmp(), "nope") });
+    assert.throws(() => startupChecks(config), /wallet directory does not exist/);
+    assert.throws(() => new LiveChainAdapter({ network: "testnet", dataDir: join(tmp(), "nope") }), /does not exist/);
+  });
+  it("startup pins the wallet and returns no warnings for a clean setup", () => {
+    const { link } = pair();
+    const config = tempConfig({ chainMode: "live", chainNetwork: "testnet", zingoDataDir: link });
+    assert.deepEqual(startupChecks(config), []);
   });
 });

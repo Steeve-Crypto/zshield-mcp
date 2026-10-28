@@ -86,7 +86,7 @@ describe("startupChecks", () => {
     assert.throws(() => startupChecks(config), /Mainnet is refused/);
   });
   it("does not check anything in mock mode", () => {
-    const config = tempConfig({ zingoDataDir: wallet(0o777, 0o666) });
+    const config = tempConfig({ zingoDataDir: wallet(0o700, 0o666) });
     assert.deepEqual(startupChecks(config), []);
   });
 });

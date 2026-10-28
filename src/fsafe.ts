@@ -187,3 +187,25 @@ export function replaceAtomic(dir: string, name: string, data: string): void {
   fs.renameSync(tmp, join(dir, name));
   fsyncDir(dir);
 }
+
+/**
+ * Refuse to rely on `path` when a directory above it lets another local user swap what it
+ * names: a group- or other-writable directory without the sticky bit, or one owned by a
+ * user who is neither root nor this one. Symlinks are resolved first, and a path that does
+ * not exist yet is judged by its nearest existing parent. A no-op on Windows. `me` is for tests.
+ */
+export function assertSafeAncestors(path: string, me: number | undefined = myUid()): void {
+  if (process.platform === "win32" || me === undefined) return;
+  let d = dirname(path);
+  while (!fs.existsSync(d) && dirname(d) !== d) d = dirname(d);
+  for (let cur = fs.realpathSync(d); ; cur = dirname(cur)) {
+    const st = fs.statSync(cur);
+    if ((st.mode & 0o022) !== 0 && (st.mode & 0o1000) === 0) {
+      throw new UnsafePathError(`${cur} is writable by other users and not sticky (mode ${(st.mode & 0o7777).toString(8)}), so ${path} could be swapped. Run: chmod go-w '${cur}'`);
+    }
+    if (st.uid !== 0 && st.uid !== me) {
+      throw new UnsafePathError(`${cur} is owned by uid ${st.uid}, who could swap ${path}. Use a path under a directory you own.`);
+    }
+    if (dirname(cur) === cur) break;
+  }
+}

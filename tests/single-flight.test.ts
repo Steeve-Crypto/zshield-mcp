@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, describe, it } from "node:test";
 import { MockChainAdapter } from "../src/chain/mock.ts";
 import { LiveChainAdapter } from "../src/chain/live.ts";
@@ -75,9 +78,13 @@ describe("single-flight sends", () => {
   });
 
   it("two live adapters on one wallet share the lock", () => {
-    const one = new LiveChainAdapter({ network: "testnet", dataDir: "/tmp/w1" });
-    const two = new LiveChainAdapter({ network: "testnet", dataDir: "/tmp/w1" });
-    const other = new LiveChainAdapter({ network: "testnet", dataDir: "/tmp/w2" });
+    const root = mkdtempSync(join(tmpdir(), "zshield-sf-"));
+    const [w1, w2] = [join(root, "w1"), join(root, "w2")];
+    mkdirSync(w1);
+    mkdirSync(w2);
+    const one = new LiveChainAdapter({ network: "testnet", dataDir: w1 });
+    const two = new LiveChainAdapter({ network: "testnet", dataDir: w1 });
+    const other = new LiveChainAdapter({ network: "testnet", dataDir: w2 });
     assert.equal(sendLockFor(one.stateDir!), sendLockFor(two.stateDir!));
     assert.notEqual(sendLockFor(one.stateDir!), sendLockFor(other.stateDir!));
   });

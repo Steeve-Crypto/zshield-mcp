@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -16,6 +16,7 @@ export function tempConfig(overrides: Partial<Config> = {}): Config {
   const root = mkdtempSync(join(tmpdir(), "zshield-test-"));
   const allowPath = join(root, "allow.json");
   writeFileSync(allowPath, JSON.stringify({ recipients: [{ address: ALLOWED, label: "Demo" }] }));
+  chmodSync(allowPath, 0o600);
   return {
     spendingCapZec: 0.1,
     allowlistPath: allowPath,
