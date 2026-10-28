@@ -4,7 +4,10 @@
 // `transactions` prints them back as confirmed sends in zingo-cli's format.
 // FAKE_ZINGO_HOLD=<path>: `info` writes <path>.reached and waits for <path>.go, so a test
 // can stall a process inside its pre-send health check.
-// FAKE_ZINGO_SEND=hang: a quicksend is recorded, then the process never answers.
+// A send is two steps like the real CLI: `send` + `calculate` builds a transaction (staged.jsonl,
+// listed as "calculated", never broadcast) and `transmit <txid>` broadcasts it (sends.jsonl).
+// FAKE_ZINGO_SEND=hang: a transmit is recorded, then the process never answers.
+// FAKE_ZINGO_STAGE_EXIT=1: the process fails right after building, so nothing is transmitted.
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -40,25 +43,31 @@ if (!state) {
   });
 }
 const sendsFile = join(state, "sends.jsonl");
+const stagedFile = join(state, "staged.jsonl");
 const HEIGHT = 1000;
 const args = process.argv.slice(2);
 const cmd = args.at(-1);
 const out = (s) => process.stdout.write(s);
 
-function sends() {
-  if (!existsSync(sendsFile)) return [];
-  return readFileSync(sendsFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+function readLines(file) {
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
 }
+const sends = () => readLines(sendsFile);
+// A transmitted transaction is no longer merely calculated.
+const staged = () => readLines(stagedFile).filter((x) => !sends().some((t) => t.txid === x.txid));
+const pretty = (v) => JSON.stringify(v, null, 2) + "\n";
 
 const utc = (ms) => new Date(ms).toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
 
 function block(s) {
+  const calculated = s.state === "calculated";
   return [
     "{",
     `    txid: ${s.txid}`,
     `    datetime: ${utc(s.at)}`,
-    "    status: confirmed",
-    `    blockheight: ${HEIGHT - 1}`,
+    `    status: ${calculated ? "calculated" : "confirmed"}`,
+    ...(calculated ? [] : [`    blockheight: ${HEIGHT - 1}`]),
     "    kind: sent",
     `    value: ${s.amount}`,
     "    fee: 10000",
@@ -99,7 +108,32 @@ async function oneShot() {
     case "export_ufvk":
       return out(JSON.stringify({ ufvk: "uviewtest1" + "q".repeat(80), birthday: 1 }) + "\n");
     case "transactions":
-      return out("Launching save task...\n\n" + sends().reverse().map(block).join("\n") + "\n");
+      return out("Launching save task...\n\n" + [...staged().map((x) => ({ ...x, state: "calculated" })), ...sends()].sort((a, b) => b.at - a.at).map(block).join("\n") + "\n");
+    case "all": {
+      const all = [...staged().map((x) => ({ ...x, state: "calculated" })), ...sends()];
+      if (args.at(-2) === "notes")
+        return out(
+          pretty({
+            orchard_notes: {
+              note_summaries: all.map((x) => ({
+                txid: x.txid,
+                status: x.state === "calculated" ? "calculated" : `confirmed at block height ${HEIGHT - 1}`,
+                spend_status: "unspent",
+                memo: null,
+              })),
+            },
+          })
+        );
+      return out(pretty({ transparent_coins: [] }));
+    }
+    case "messages":
+      return out(
+        pretty({
+          value_transfers: sends()
+            .filter((x) => x.memo)
+            .map((x) => ({ txid: x.txid, recipient_address: x.address, memos: [x.memo] })),
+        })
+      );
     default:
       process.stderr.write(`fake zingo-cli: unknown command ${cmd}\n`);
       process.exit(1);
@@ -109,19 +143,28 @@ async function oneShot() {
 function prompt() {
   out("Launching sync task...\nLaunching save task...\n");
   let asked = 0;
+  let pending;
   const rl = createInterface({ input: process.stdin });
   rl.on("line", (line) => {
-    const send = line.match(/^quicksend '(.*)'$/);
+    const send = line.match(/^send '(.*)'$/);
+    const transmit = line.match(/^transmit ([0-9a-f]{64})$/);
     if (send) {
-      const [entry] = JSON.parse(send[1]);
-      const n = sends().length;
-      const txid = createHash("sha256").update(`${process.pid}:${n}:${Date.now()}:${line}`).digest("hex");
-      appendFileSync(sendsFile, JSON.stringify({ txid, at: Date.now(), pid: process.pid, ...entry }) + "\n");
+      pending = JSON.parse(send[1])[0];
+    } else if (line === "calculate") {
+      const n = staged().length + sends().length;
+      const txid = createHash("sha256").update(`${process.pid}:${n}:${Date.now()}:${JSON.stringify(pending)}`).digest("hex");
+      appendFileSync(stagedFile, JSON.stringify({ txid, at: Date.now(), pid: process.pid, ...pending }) + "\n");
+      out(`{\n  "fee": 10000\n}\n{\n  "txids": [\n    "${txid}"\n  ]\n}\n`);
+      if (process.env.FAKE_ZINGO_STAGE_EXIT === "1") process.exit(1);
+    } else if (transmit) {
+      const entry = staged().find((x) => x.txid === transmit[1]);
+      if (!entry) return out(`{\n  "error": "no such calculated transaction"\n}\n`);
+      appendFileSync(sendsFile, JSON.stringify({ ...entry, at: Date.now() }) + "\n");
       if (process.env.FAKE_ZINGO_SEND === "hang") {
         setInterval(() => {}, 1000);
         return;
       }
-      out(`{\n  "txids": [\n    "${txid}"\n  ]\n}\n`);
+      out(`{\n  "txids": [\n    "${entry.txid}"\n  ]\n}\n`);
     } else if (line === "sync status") {
       asked++;
       out(`(test) Block:0 [Syncing] >> ${asked >= 2 ? done[2] : done[0]}\n`);

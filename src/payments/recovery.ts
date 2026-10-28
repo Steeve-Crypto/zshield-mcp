@@ -40,7 +40,7 @@ export const RECOVERY_LOCK_ATTEMPTS = 5;
 export const RECOVERY_LOCK_PAUSE_MS = 5_000;
 
 /** Recovery outcome for a call with no settled result. */
-export type RecoveryStatus = "confirmed" | "not_found" | "unknown";
+export type RecoveryStatus = "confirmed" | "broadcast" | "failed" | "not_found" | "unknown";
 
 export interface RecoveryAuditEntry {
   ts: string;
@@ -128,6 +128,7 @@ export async function reconcile(record: CallRecord, chain: ChainAdapter, opts: R
     return { ...base, status: "unknown", note: "The call has no recorded amount in zatoshis; check by hand." };
   }
   const startedAt = Date.parse(intent.ts);
+  if (record.stagedTxid) return reconcileStaged(base, record, record.stagedTxid, intent, chain, opts, now, startedAt);
   const target = { amountZats: BigInt(intent.amount_zats), recipient: intent.recipient, memo: intent.memo, notBeforeHeight: intent.wallet_height ?? intent.chain_tip };
   let matches: PossibleSend[];
   let lookalikes: PossibleSend[] = [];
@@ -179,6 +180,17 @@ export async function reconcile(record: CallRecord, chain: ChainAdapter, opts: R
       note: "No transaction matches the recipient and memo, but a sent transaction of the same amount near this time belongs to no call. It could be this send, listed in a different form. Check by hand. Do not pay again.",
     };
   }
+  return proveNotSent(base, intent, now, startedAt, opts);
+}
+
+type Base = Pick<RecoveryAuditEntry, "ts" | "tool" | "call_id" | "idempotency_key">;
+
+/**
+ * Nothing in the history is this call's send. Say "not sent" only with proof: live, the
+ * wallet is synced, the tip is trusted, enough time and blocks have passed that a
+ * transaction built for this call would have been mined or expired.
+ */
+async function proveNotSent(base: Base, intent: NonNullable<CallRecord["intent"]>, now: number, startedAt: number, opts: ReconcileOptions): Promise<RecoveryAuditEntry> {
   if (!opts.live) {
     if (now - startedAt < RECOVERY_EXPIRY_MS) {
       return { ...base, status: "unknown", note: "No match yet, and the send has not passed its expiry window." };
@@ -222,12 +234,62 @@ export async function reconcile(record: CallRecord, chain: ChainAdapter, opts: R
   return { ...base, status: "not_found", note: NOT_SENT_NOTE };
 }
 
+/**
+ * A call whose transaction id was bound before it was transmitted: the txid is the call's
+ * identity, so no amount or recipient guessing is involved. Only that txid counts, and only
+ * when the wallet's own JSON vouches for its listing entry. Anything else stays unknown.
+ */
+async function reconcileStaged(
+  base: Base,
+  record: CallRecord,
+  txid: string,
+  intent: NonNullable<CallRecord["intent"]>,
+  chain: ChainAdapter,
+  opts: ReconcileOptions,
+  now: number,
+  startedAt: number
+): Promise<RecoveryAuditEntry> {
+  let txs;
+  try {
+    txs = await chain.getHistory(Infinity, { offline: opts.offline });
+  } catch (e) {
+    return { ...base, status: "unknown", note: `Wallet history could not be read: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  const entries = txs.filter((t) => t.txid === txid);
+  const candidate = (status: string): PossibleSend[] => [{ txid, confidence: "high", matched: ["txid"], status }];
+  if (entries.length > 1) {
+    return { ...base, status: "unknown", txid, possible_sends: candidate("listed twice"), note: "The wallet listing shows this call's transaction id more than once, which a real wallet never does. Check by hand. Do not pay again." };
+  }
+  const e = entries[0];
+  if (e && e.verified === false) {
+    return { ...base, status: "unknown", txid, possible_sends: candidate(e.status), note: "This call's transaction id is listed, but the wallet's machine-readable output does not agree with the listing. Check by hand. Do not pay again." };
+  }
+  if (e && e.status === "failed") {
+    return { ...base, status: "failed", txid, note: "The wallet marks this call's transaction failed." };
+  }
+  if (e && e.status === "confirmed") {
+    const note = (e.outgoing ?? []).find((n) => (n.recipient === intent.recipient || n.unifiedAddress === intent.recipient) && n.valueZats === BigInt(intent.amount_zats ?? "-1") && n.memo === (intent.memo ?? ""));
+    if (e.outgoing && e.outgoing.length > 0 && !note) {
+      return { ...base, status: "unknown", txid, possible_sends: candidate(e.status), note: "This call's transaction id is mined, but its listed outputs differ from the call. Check by hand. Do not pay again." };
+    }
+    return { ...base, status: "confirmed", txid, block_height: e.blockHeight, confidence: "high", note: "Mined. This is the transaction signed for this call before it was transmitted." };
+  }
+  if (e && e.status !== "calculated") {
+    return { ...base, status: "broadcast", txid, confidence: "high", note: `Transmitted; the wallet reports it as ${e.status}. Do not pay again.` };
+  }
+  // Absent, or built and never transmitted as far as this wallet knows: the same proof as
+  // for any call that has no sent transaction.
+  return proveNotSent(base, intent, now, startedAt, opts);
+}
+
+
 const NOT_SENT_NOTE =
   "No matching transaction in the whole history of a synced wallet, scanned past the expiry height. It was not sent; a new payment needs a new idempotency key.";
 
 /** The store event a recovery result moves the call to. */
 export function eventFor(row: RecoveryAuditEntry, by: CallEvent["by"]): CallEvent {
-  const state: CallState = row.status === "confirmed" ? "mined" : row.status === "not_found" ? "expired" : "unknown";
+  const state: CallState =
+    row.status === "confirmed" ? "mined" : row.status === "broadcast" ? "sent" : row.status === "failed" ? "failed" : row.status === "not_found" ? "expired" : "unknown";
   return {
     ts: row.ts,
     call_id: row.call_id,
@@ -236,13 +298,14 @@ export function eventFor(row: RecoveryAuditEntry, by: CallEvent["by"]): CallEven
     block_height: row.block_height,
     possible_sends: row.possible_sends,
     note: row.note,
+    ...(row.status === "failed" ? { code: "PAYMENT_FAILED" } : {}),
     by,
   };
 }
 
 /** Record a reconcile result in the store: claim the txid and move the call forward. */
 export function recordReconcile(store: PaymentStore, row: RecoveryAuditEntry, by: CallEvent["by"]): CallRecord {
-  if (row.status === "confirmed" && row.txid && !store.claimTxid(row.txid, row.call_id)) {
+  if ((row.status === "confirmed" || row.status === "broadcast" || row.status === "failed") && row.txid && !store.claimTxid(row.txid, row.call_id)) {
     // Credited to another call since the history was read: this call cannot have it.
     return store.advance({ ...eventFor({ ...row, status: "unknown", txid: undefined, note: "The matching transaction belongs to another call." }, by) });
   }

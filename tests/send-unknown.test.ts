@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defaultRunner, LiveChainAdapter, parseTxid, type CliRunner } from "../src/chain/live.ts";
+import { defaultRunner, LiveChainAdapter, parseStaged, transmitted, type CliRunner } from "../src/chain/live.ts";
 import { CliTimeoutError, SendOutcomeUnknownError } from "../src/chain/outcome.ts";
 import type { ChainAdapter } from "../src/chain/types.ts";
 import { PAY_UNKNOWN_CODES } from "../src/errors.ts";
@@ -14,6 +14,7 @@ import { readAuditRows, tempConfig, TEST_UFVK, withUfvk } from "./helpers.ts";
 const UTEST = "utest1" + "q".repeat(100);
 const TXID = "cd".repeat(32);
 const OTHER = "ef".repeat(32);
+const STAGED = "12".repeat(32);
 
 function liveConfig(): Config {
   const config = tempConfig({ chainMode: "live", chainNetwork: "testnet", spendingCapZec: "0.01" });
@@ -46,16 +47,18 @@ function utcNow(offsetMs = 0): string {
 }
 
 /** Live adapter whose send fails with `sendError` and whose history prints `history`. */
-function chainWith(sendError: Error, history: string | Error, calls: string[][] = []) {
-  const runner: CliRunner = async (_bin, args) => {
+function chainWith(sendError: Error, history: string | Error, calls: string[][] = [], at: "stage" | "transmit" = "transmit") {
+  const runner: CliRunner = async (_bin, args, opts) => {
     calls.push(args);
     if (args.at(-1) === "transactions") {
       if (history instanceof Error) throw history;
       return history;
     }
+    // Step one builds the transaction and prints its txid; step two is the transmit that fails.
+    if (at === "transmit" && opts?.input?.startsWith("send '")) return `{\n  "fee": 10000\n}\n{\n  "txids": [\n    "${STAGED}"\n  ]\n}\n`;
     throw sendError;
   };
-  return new LiveChainAdapter({ network: "testnet", runner: withUfvk(runner) });
+  return new LiveChainAdapter({ network: "testnet", runner: withUfvk(runner, {}, false) });
 }
 
 describe("send timeout", () => {
@@ -75,14 +78,34 @@ describe("send timeout", () => {
     await assert.rejects(defaultRunner(bin, []), (e: unknown) => !(e instanceof CliTimeoutError) && /boom/.test(String(e)));
   });
 
-  it("the live adapter turns a timed out send into SendOutcomeUnknownError", async () => {
+  it("a timed out transmit is SendOutcomeUnknownError carrying the bound txid", async () => {
     const chain = chainWith(new CliTimeoutError("stopped"), "");
-    await assert.rejects(chain.pay({ amountZats: 100_000n, recipient: UTEST }), SendOutcomeUnknownError);
+    await assert.rejects(chain.pay({ amountZats: 100_000n, recipient: UTEST }), (e: unknown) => e instanceof SendOutcomeUnknownError && e.txid === STAGED);
   });
 
-  it("output with neither a txid nor an error is unknown, not a failure", () => {
-    assert.throws(() => parseTxid("Syncing...\n"), SendOutcomeUnknownError);
-    assert.throws(() => parseTxid("Error: insufficient balance"), (e: unknown) => !(e instanceof SendOutcomeUnknownError));
+  it("a timeout while building the transaction is a plain failure: nothing was broadcast", async () => {
+    const runner: CliRunner = async () => {
+      throw new CliTimeoutError("stopped");
+    };
+    const chain = new LiveChainAdapter({ network: "testnet", runner: withUfvk(runner, {}, false) });
+    await assert.rejects(chain.pay({ amountZats: 100_000n, recipient: UTEST }), (e: unknown) => !(e instanceof SendOutcomeUnknownError) && /Nothing was sent/.test(String(e)));
+  });
+
+  it("step one output must hold one fee and one txid, in order, and no error", () => {
+    const ok = `{\n  "fee": 10000\n}\n{\n  "txids": [\n    "${STAGED}"\n  ]\n}\n`;
+    assert.equal(parseStaged(ok), STAGED);
+    assert.throws(() => parseStaged("Syncing...\n"), (e: unknown) => !(e instanceof SendOutcomeUnknownError));
+    assert.throws(() => parseStaged("Error: insufficient balance"), (e: unknown) => !(e instanceof SendOutcomeUnknownError));
+    // calculate alone, with no proposal from this run, is not accepted
+    assert.throws(() => parseStaged(`{\n  "txids": ["${STAGED}"]\n}`), /exactly one/);
+    assert.throws(() => parseStaged(`{\n  "fee": 1\n}\n{\n  "txids": ["${STAGED}", "${TXID}"]\n}`), /exactly one/);
+  });
+
+  it("a transmit is reported only when it names the bound txid", () => {
+    assert.equal(transmitted(`{\n  "txids": ["${STAGED}"]\n}`, STAGED), true);
+    assert.equal(transmitted(`{\n  "txids": ["${TXID}"]\n}`, STAGED), false);
+    assert.equal(transmitted("Error: rejected", STAGED), false);
+    assert.equal(transmitted("", STAGED), false);
   });
 });
 
@@ -110,12 +133,13 @@ describe("SEND_UNCONFIRMED", () => {
     assert.equal(body.code, "SEND_UNCONFIRMED");
     assert.match(body.message, /may have been broadcast/);
     assert.match(body.message, /zcash_payment_status/);
-    assert.deepEqual(body.possible_txids, [TXID]);
-    assert.equal(body.possible_sends[0].confidence, "medium");
+    // The transaction was signed before it was transmitted, so its txid is the candidate.
+    assert.deepEqual(body.possible_txids, [STAGED]);
+    assert.equal(body.possible_sends[0].confidence, "high");
     const rows = readAuditRows(config);
     assert.deepEqual(rows.map((x) => x.status), ["pending", "unknown"]);
     assert.equal(rows[1].code, "SEND_UNCONFIRMED");
-    assert.deepEqual(rows[1].possible_txids, [TXID]);
+    assert.deepEqual(rows[1].possible_txids, [STAGED]);
     assert.equal(rows[0].call_id, rows[1].call_id);
   });
 
@@ -127,7 +151,7 @@ describe("SEND_UNCONFIRMED", () => {
     );
     const body = JSON.parse(r.text);
     assert.equal(body.code, "SEND_UNCONFIRMED");
-    assert.deepEqual(body.possible_txids, []);
+    assert.deepEqual(body.possible_txids, [STAGED]);
   });
 
   it("a plain CLI error stays CHAIN_ERROR and skips the history lookup", async () => {
@@ -135,7 +159,7 @@ describe("SEND_UNCONFIRMED", () => {
     const calls: string[][] = [];
     const r = await executePay(
       { idempotency_key: "t-su-3", amount_zec: "0.001", recipient: UTEST },
-      { config, chain: chainWith(new Error("zingo-cli failed: insufficient funds"), "", calls) }
+      { config, chain: chainWith(new Error("zingo-cli failed: insufficient funds"), "", calls, "stage") }
     );
     assert.equal(r.code, "CHAIN_ERROR");
     assert.equal(JSON.parse(r.text).status, "error");

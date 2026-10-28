@@ -59,7 +59,7 @@ export const HEALTHY = { info: '{ "latest_block_height": 1000 }', height: '{ "he
  * (`info`, offline `height` and `spendable_balance`) answers HEALTHY. None of these reach
  * `runner`, so tests that count CLI calls only see sends and reads.
  */
-export function withUfvk(runner: CliRunner, health: Partial<typeof HEALTHY> = {}): CliRunner {
+export function withUfvk(runner: CliRunner, health: Partial<typeof HEALTHY> = {}, translate = true): CliRunner {
   const answers = { ...HEALTHY, ...health };
   return async (bin, args, opts) => {
     if (args.includes("export_ufvk")) return JSON.stringify({ ufvk: TEST_UFVK, birthday: 1 });
@@ -68,6 +68,17 @@ export function withUfvk(runner: CliRunner, health: Partial<typeof HEALTHY> = {}
     if (last === "info" || (offline && (last === "height" || last === "spendable_balance"))) {
       return answers[last as keyof typeof HEALTHY];
     }
+    // A live send is two steps: `send` + `calculate`, then `transmit <txid>`. The inner
+    // runner plays the old one-step `quicksend`: its answer is the built txid, and the
+    // transmit step answers by itself.
+    const input = translate ? opts?.input : undefined;
+    if (input?.startsWith("send '")) {
+      const line = input.split("\n")[0].replace(/^send /, "quicksend ");
+      const out = await runner(bin, args, { ...opts, input: `${line}\nquit\n` });
+      return /"txids"/.test(out) ? `{\n  "fee": 10000\n}\n${out}` : out;
+    }
+    const transmit = input?.match(/^transmit ([0-9a-f]{64})\n/);
+    if (transmit) return JSON.stringify({ txids: [transmit[1]] });
     return runner(bin, args, opts);
   };
 }
@@ -102,3 +113,37 @@ export async function withEnv<T>(name: string, value: string | undefined, fn: ()
     else delete process.env[name];
   }
 }
+
+/**
+ * Answers for the wallet's JSON commands (`notes all`, `coins all`, `messages`) in tests
+ * that need a listing entry to be vouched for. `txs` gives each txid's status and height.
+ * Returns undefined for any other command.
+ */
+export function walletJson(
+  args: string[],
+  txs: { txid: string; status?: string; height?: number; memos?: { recipient: string; memo: string }[] }[]
+): string | undefined {
+  const last = args.at(-1);
+  const prev = args.at(-2);
+  if (prev === "notes" && last === "all") {
+    return pretty({
+      orchard_notes: {
+        note_summaries: txs.map((t) => ({
+          txid: t.txid,
+          status: `${t.status ?? "confirmed"}${t.height !== undefined || (t.status ?? "confirmed") === "confirmed" ? ` at block height ${t.height ?? 999}` : ""}`,
+          spend_status: "unspent",
+          memo: null,
+        })),
+      },
+    });
+  }
+  if (prev === "coins" && last === "all") return pretty({ transparent_coins: [] });
+  if (last === "messages") {
+    return pretty({
+      value_transfers: txs.filter((t) => t.memos?.length).map((t) => ({ txid: t.txid, recipient_address: t.memos![0].recipient, memos: t.memos!.map((m) => m.memo) })),
+    });
+  }
+  return undefined;
+}
+
+const pretty = (v: unknown) => JSON.stringify(v, null, 2) + "\n";

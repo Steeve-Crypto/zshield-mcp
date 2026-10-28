@@ -141,6 +141,13 @@ export interface TxSummary {
   feeZats?: bigint;
   /** Notes this wallet sent, with recipient and memo, when the wallet output lists them */
   outgoing?: OutgoingNote[];
+  /**
+   * Set by a chain that cross-checks its listing against machine-readable wallet output.
+   * False: the wallet's JSON does not agree with this entry (or it was listed twice), so it
+   * may be forged by a memo and never confirms a payment. Undefined: the chain has no
+   * second source (mock).
+   */
+  verified?: boolean;
 }
 
 export interface OutgoingNote {
@@ -174,6 +181,12 @@ export interface PaymentRequest {
    * not started. The live adapter honors it; the mock chain has nothing to fence.
    */
   fence?: () => void;
+  /**
+   * Live sends are two steps: build and sign the transaction (nothing is broadcast), then
+   * transmit it by txid. This is called between them with the txid that will be sent, and
+   * must record it durably. If it throws, nothing is transmitted.
+   */
+  stage?: (txid: string) => void;
 }
 
 export interface PaymentReceipt {

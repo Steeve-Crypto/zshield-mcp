@@ -97,14 +97,18 @@ describe("send matching (V12 F-8)", () => {
     const config = tempConfig({ chainMode: "live", chainNetwork: "testnet", spendingCapZec: "0.01" });
     writeFileSync(config.allowlistPath, JSON.stringify({ recipients: [{ address: RECIPIENT }] }));
     const history = [sentBlock(UNRELATED, OTHER, "rent", utc(Date.now())), sentBlock("cd".repeat(32), RECIPIENT, "other memo", utc(Date.now()))].join("\n");
-    const runner: CliRunner = async (_bin, args) => {
+    // Signing works; the transmit step times out, so the call is unknown.
+    const STAGED = "34".repeat(32);
+    const runner: CliRunner = async (_bin, args, opts) => {
       if (args.at(-1) === "transactions") return history;
+      if (opts?.input?.startsWith("send '")) return `{ "fee": 10000 }\n{ "txids": ["${STAGED}"] }`;
       throw new CliTimeoutError("stopped after 900000 ms");
     };
-    const chain = new LiveChainAdapter({ network: "testnet", runner: withUfvk(runner) });
+    const chain = new LiveChainAdapter({ network: "testnet", runner: withUfvk(runner, {}, false) });
     const r = await pay.executePay({ idempotency_key: "t-send-match-1", amount_zec: "0.001", recipient: RECIPIENT, memo: "zshield-mcp testnet demo" }, { config, chain });
     const body = JSON.parse(r.text);
     assert.equal(body.code, "SEND_UNCONFIRMED");
-    assert.deepEqual(body.possible_txids, []);
+    // Only the transaction signed for this call: the unrelated same-amount payment is not listed.
+    assert.deepEqual(body.possible_txids, [STAGED]);
   });
 });
