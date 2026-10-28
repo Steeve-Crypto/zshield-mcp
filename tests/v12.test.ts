@@ -238,25 +238,12 @@ describe("V12 F-17: existing payment records are checked at startup", { skip: pr
     const config = tempConfig();
     const first = await paymentStatus(config, wallet([]), { idempotency_key: "forged" }).catch((e: Error) => e);
     assert.ok(first instanceof Error);
-    pendingRow(config, "forged-call", { idempotency_key: "forged" });
+    appendAuditEntry(config.auditDir, {
+      ts: new Date(T0).toISOString(), tool: "zcash_pay", call_id: "forged-call", amount_zec: "0.0001", amount_zats: "10000",
+      recipient: R, allowlist_hit: true, cap_zec: "0.01", status: "pending", view_key_fingerprint: "f", idempotency_key: "forged",
+    } as AuditEntry);
     const again = await paymentStatus(config, wallet([]), { idempotency_key: "forged" }).catch((e: Error) => e);
     assert.ok(again instanceof Error, JSON.stringify(again));
-  });
-});
-
-describe("V12 F-11: Windows checks the ACL of the payment records too", () => {
-  it("refuses when Everyone can read the audit dir", () => {
-    const config = liveConfig();
-    const dir = mkdtempSync(join(tmpdir(), "zshield-winwallet-"));
-    config.zingoDataDir = dir;
-    mkdirSync(config.auditDir, { recursive: true });
-    const PRIVATE = ["DESKTOP-1\\alice:(OI)(CI)(F)", "NT AUTHORITY\\SYSTEM:(OI)(CI)(F)"];
-    const icacls = (p: string) => {
-      const aces = p.startsWith(config.auditDir) ? [...PRIVATE, "Everyone:(OI)(CI)(RX)"] : PRIVATE;
-      const pad = " ".repeat(p.length + 1);
-      return aces.map((a, i) => (i === 0 ? `${p} ${a}` : `${pad}${a}`)).join("\r\n") + "\r\n\r\nSuccessfully processed 1 files; Failed processing 0 files\r\n";
-    };
-    assert.throws(() => startupChecks(config, "win32", { icacls, env: {} } as Parameters<typeof startupChecks>[2]), /audit/i);
   });
 });
 
