@@ -61,8 +61,7 @@ export async function executeHistory(input: HistoryInput, deps: ReadDeps) {
         value_zats: t.valueZats.toString(),
         value_zec: formatZats(t.valueZats),
         fee_zats: t.feeZats?.toString(),
-        // Who a send paid, so a caller can tell two sends of one amount apart.
-        outgoing: t.outgoing?.map((n) => ({ recipient: n.recipient, value_zats: n.valueZats.toString(), memo: n.memo || undefined })),
+        // No recipients or memos here. TxSummary.outgoing stays inside the server.
         explorer_url: live ? `${TESTNET_EXPLORER}${t.txid}` : undefined,
       })),
     }),

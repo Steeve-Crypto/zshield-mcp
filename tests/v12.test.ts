@@ -133,12 +133,12 @@ describe("V12 F-8: possible sends are matched on the whole history and the recip
     assert.deepEqual(await unknownSend(block(TX, OTHER), [TX]), []);
   });
 
-  it("zcash_history shows the recipient and memo of a send", async () => {
+  it("zcash_history leaves out the recipient and memo of a send (F-35)", async () => {
     const config = liveConfig();
     const chain = { mode: "live", getHistory: async () => [sentTx({ outgoing: [{ recipient: R, valueZats: 10000n, memo: "rent" }] } as Partial<TxSummary>)] } as unknown as ChainAdapter;
     const text = (await executeHistory({ limit: 5 }, { config, chain })).text;
-    assert.match(text, new RegExp(R));
-    assert.match(text, /rent/);
+    assert.doesNotMatch(text, new RegExp(R));
+    assert.doesNotMatch(text, /rent/);
   });
 });
 
