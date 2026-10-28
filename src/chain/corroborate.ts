@@ -19,8 +19,8 @@ export interface TxFacts {
 
 export interface WalletFacts {
   byTxid: Map<string, TxFacts>;
-  /** From `messages`: per txid, the recipient and memos of each memo-bearing transfer */
-  messages: Map<string, { recipient?: string; memos: string[] }[]>;
+  /** From `messages`: per txid, the kind, amount, recipient and memos of each memo-bearing transfer */
+  messages: Map<string, { kind?: string; value?: bigint; recipient?: string; memos: string[] }[]>;
 }
 
 /** The JSON value a zingo-cli command printed: from its first `{` line to the last `}` line. */
@@ -84,7 +84,7 @@ export function addNoteFacts(out: unknown, byTxid: Map<string, TxFacts>): void {
   }
 }
 
-/** Fold the JSON of `messages` into per-txid recipient and memos. */
+/** Fold the JSON of `messages` into per-txid kind, amount, recipient and memos. */
 export function messageFacts(out: unknown): WalletFacts["messages"] {
   const map: WalletFacts["messages"] = new Map();
   const list = (out as { value_transfers?: unknown })?.value_transfers;
@@ -94,8 +94,10 @@ export function messageFacts(out: unknown): WalletFacts["messages"] {
     if (typeof o?.txid !== "string" || !TXID.test(o.txid)) continue;
     const memos = Array.isArray(o.memos) ? o.memos.filter((m): m is string => typeof m === "string") : [];
     const recipient = typeof o.recipient_address === "string" ? o.recipient_address : undefined;
+    const kind = typeof o.kind === "string" ? o.kind : undefined;
+    const value = typeof o.value === "number" && Number.isSafeInteger(o.value) && o.value >= 0 ? BigInt(o.value) : undefined;
     const key = o.txid.toLowerCase();
-    map.set(key, [...(map.get(key) ?? []), { recipient, memos }]);
+    map.set(key, [...(map.get(key) ?? []), { kind, value, recipient, memos }]);
   }
   return map;
 }
@@ -126,7 +128,10 @@ export function corroborate(t: TxSummary, wallet: WalletFacts | undefined, liste
   for (const n of t.outgoing ?? []) {
     if (!n.memo) continue;
     const seen = wallet.messages.get(t.txid) ?? [];
-    const ok = seen.some((m) => m.memos.includes(n.memo) && (m.recipient === n.recipient || m.recipient === n.unifiedAddress));
+    // The JSON must call it a send, with this amount, to this recipient, carrying this memo.
+    const ok = seen.some(
+      (m) => m.kind === "sent" && m.value === n.valueZats && m.memos.includes(n.memo) && (m.recipient === n.recipient || m.recipient === n.unifiedAddress)
+    );
     if (!ok) return false;
   }
   return true;

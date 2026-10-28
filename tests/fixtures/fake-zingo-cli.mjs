@@ -133,7 +133,7 @@ async function oneShot() {
         pretty({
           value_transfers: sends()
             .filter((x) => x.memo)
-            .map((x) => ({ txid: x.txid, recipient_address: x.address, memos: [x.memo] })),
+            .map((x) => ({ txid: x.txid, status: "confirmed", blockheight: HEIGHT - 1, kind: "sent", value: x.amount, recipient_address: x.address, memos: [x.memo] })),
         })
       );
     default:
