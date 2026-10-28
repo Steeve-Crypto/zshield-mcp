@@ -49,7 +49,7 @@ At startup the audit dir and the fallback file are checked. A symlink or a file 
 | `wallet_height` | number? | Testnet `pending` rows: the wallet's own scanned height at the pre-send check |
 | `truncated` | boolean? | Present when the row was shortened to fit the size limit |
 
-Each row is capped at 8 KiB (8192 bytes of UTF-8 JSON). If a row would be larger, string fields over 1024 characters are cut and marked `...[truncated]`. If it is still too large, only the identifying fields are kept (`ts`, `tool`, `call_id`, `status`, `mock_txid`, `recipient_sha256`, `view_key_fingerprint`, `code`, `possible_txids`, `possible_sends`, `txid`, `block_height`, and `idempotency_key`). The tool response carries the same bounded row.
+Each row is capped at 8 KiB (8192 bytes of UTF-8 JSON). If a row would be larger, string fields over 1024 characters are cut and marked `...[truncated]`. If it is still too large, only the identifying fields are kept (`ts`, `tool`, `call_id`, `status`, `mock_txid`, `recipient_sha256`, `view_key_fingerprint`, `code`, `possible_txids`, `possible_sends`, `txid`, `block_height`, and `idempotency_key`). The tool response carries the same bounded row. A last check drops `possible_sends` and `possible_txids` (and sets `truncated`) if the row is still too large. Those lists hold at most 10 entries.
 
 ## Read-only tool rows
 

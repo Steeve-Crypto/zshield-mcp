@@ -187,7 +187,7 @@ Any tool call over the rate limit is refused before the tool runs:
 |------|---------|
 | `RATE_LIMITED` | More than `RATE_LIMIT_PER_MIN` tool calls this minute in this server process. Nothing was sent or read. Wait and try again. These calls get no audit row each; their count goes into one summary row per minute |
 
-Read-only tools use the same shape. `zcash_history` returns `INVALID_LIMIT` with status `rejected` for a bad `limit`. A wallet read failure is `CHAIN_ERROR`, and a wallet that reports a mainnet address is `MAINNET_REFUSED`. `zcash_payment_status` returns `INVALID_LOOKUP` unless exactly one of `call_id` or `idempotency_key` is given, and `PAYMENT_NOT_FOUND` when the wallet's payment store has no such call.
+Read-only tools use the same shape. `zcash_history` returns `INVALID_LIMIT` with status `rejected` for a bad `limit`. A wallet read failure is `CHAIN_ERROR`, a second `zcash_history` call while one is running is `BUSY`, and a wallet that reports a mainnet address is `MAINNET_REFUSED`. `zcash_payment_status` returns `INVALID_LOOKUP` unless exactly one of `call_id` or `idempotency_key` is given, and `PAYMENT_NOT_FOUND` when the wallet's payment store has no such call.
 
 ## Read-only tools
 
@@ -235,7 +235,7 @@ In testnet mode it comes from `zingo-cli addresses`, and a mainnet address is re
 |-----|------|----------|-------------|
 | `limit` | integer | no | How many recent transactions to return. Default `10`, allowed `1` to `50` |
 
-Returns recent transactions, newest first. Ones that are not confirmed yet come first.
+Returns recent transactions, newest first. Ones that are not confirmed yet come first. Only entries the wallet's own JSON vouches for are returned, so a memo that imitates a transaction line never shows up, and a txid listed twice is left out. If that JSON cannot be read the call fails with `CHAIN_ERROR` instead of showing unchecked entries. It reads the wallet file offline, as last synced, and takes no payment lock, so it never delays a send. One call per wallet runs at a time: a second gets `BUSY`.
 
 `status` is what `zingo-cli` reports. `confirmed` means mined, and `block_height` is the block it was mined in. `transmitted` means the wallet sent it but has not seen it in a block yet, which can simply mean the wallet has not synced that far. `mempool` and `calculated` are also not mined yet. `failed` means it expired or was rejected without being mined, so its funds are spendable again. For anything not confirmed, `block_height` is absent and `target_height` is the height it was built for. It expires unmined about 40 blocks after that.
 
@@ -269,7 +269,7 @@ A limit outside `1` to `50`, or one that is not a whole number, is rejected befo
 | `call_id` | string | one of the two | The `call_id` from a `zcash_pay` response |
 | `idempotency_key` | string | one of the two | The key passed to `zcash_pay` |
 
-Looks the call up in the payment store, then in the whole wallet history. Never sends. In testnet mode it first syncs the wallet for at most `STATUS_SYNC_TIMEOUT_MS`, so a payment mined since the last sync shows as `mined` without any manual step. If the sync does not finish, or a send holds the wallet, it does not wait: it answers from what the wallet last knew, with `stale: true`, `wallet_height`, and a `sync_note` saying why.
+Looks the call up in the payment store, then in the whole wallet history. Never sends. In testnet mode it first syncs the wallet for at most `STATUS_SYNC_TIMEOUT_MS`, so a payment mined since the last sync shows as `mined` without any manual step. If the sync does not finish, or a send holds the wallet, it does not wait: it answers from what the wallet last knew, with `stale: true`, `wallet_height`, and a `sync_note` saying why. One call reads the wallet history once, and overlapping reads share one scan. A txid the wallet lists twice, or that its JSON does not vouch for, gives `unknown` and records nothing. At most 10 `possible_sends` are listed. If a payment seen mined is later not mined (a reorg), the answer is `broadcast` or `unknown` with `reorged: true` and `last_mined_height`. The stored record stays `mined` and nothing is sent again. A same-key replay of a mined call adds `confirmed_as_of`, the time the payment was last seen mined.
 
 ```json
 {
@@ -292,10 +292,10 @@ Looks the call up in the payment store, then in the whole wallet history. Never 
 |---------|---------|
 | `pending` | Started and no outcome yet: being sent now, or interrupted and not found in history so far |
 | `broadcast` | Sent, not mined yet |
-| `mined` | In a block. `confirmations` counts from the wallet's synced height |
+| `mined` | In a block. `confirmations` counts from the wallet's synced height. If a later read no longer shows it mined, the answer is `broadcast` or `unknown` with `reorged: true` |
 | `expired` | Proven never sent: not in the whole history of a synced wallet that has scanned past the expiry height. Safe to pay again with a new key |
 | `failed` | Not sent (refused or errored, `code` says why), or the wallet marks the transaction failed (`PAYMENT_FAILED`, with its `txid`). The failed record stays unless the transaction is later seen mined |
-| `unknown` | Cannot tell, for example two matching sends or history that could not be read. `possible_sends` lists candidates |
+| `unknown` | Cannot tell, for example two matching sends or history that could not be read. `possible_sends` lists up to 10 candidates |
 
 ## Config: caps & allow-list
 
@@ -397,7 +397,7 @@ Optional variables:
 - `ZINGO_READ_TIMEOUT_MS` (default `120000`, 1 to 600000): stops a read-only call that takes too long.
 - `ZINGO_HEALTH_TIMEOUT_MS` (default `30000`, 1 to 300000): stops each pre-send health check step after the sync.
 
-The read-only tools never wait for the wallet. When a send or sync holds it, `zcash_balance`, `zcash_history`, and `zcash_receive_address` read the wallet file offline, as last synced, instead of starting a sync that would race the send.
+The read-only tools never wait for the wallet. When a send or sync holds it, `zcash_balance` and `zcash_receive_address` read the wallet file offline, as last synced, instead of starting a sync that would race the send. `zcash_history` always reads offline and takes no payment lock.
 
 At startup the server also checks the audit dir, the fallback file, and the payment store: it refuses a symlink or a path owned by another user, and tightens group or other access to `700` for folders and `600` for files. On Windows it reads the ACL of the wallet directory, the wallet file, the payment store, and the audit dir with `icacls` and refuses to run if Everyone, Users, or another broad group can read them. Set `ZSHIELD_HARDEN_WINDOWS_ACL=1` to have it remove inherited entries and grant only your account, or `ZSHIELD_ALLOW_UNCHECKED_WINDOWS_ACL=1` to start anyway when the ACL cannot be read.
 
