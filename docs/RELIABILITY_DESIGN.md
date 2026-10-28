@@ -15,7 +15,7 @@ How zshield-mcp makes sure one payment request leads to at most one send, even w
 
 Location: `<wallet dir>/.zshield-state`, where the wallet dir is resolved with `realpath`, so two spellings of the same folder find the same store. A chain with no wallet dir (mock mode, test adapters) gets a store beside the audit dir, at `<parent of AUDIT_DIR>/.zshield-state`. If that cannot be created, it falls back to a private folder in the temp dir named after this user and the audit dir. A wallet's store never moves.
 
-The folder is mode `700` and every file in it `600`. Startup refuses a store, audit dir, or audit file that is a symlink or owned by another user, and tightens loose modes. On Windows the same folders go through the `icacls` check.
+The folder is mode `700` and every file in it `600`. Startup refuses a store, audit dir, or audit file that is a symlink or owned by another user, and tightens loose modes. It also refuses a store, audit dir, wallet, or allow-list path with a directory above it that another user could swap (group or other writable without the sticky bit, or owned by another non-root user). Testnet mode does not start on Windows, and mock mode on Windows has no ACL protection.
 
 Layout:
 
@@ -27,7 +27,7 @@ Layout:
 - `zingo.flock`: the file the OS wallet lock (below) is taken on. It is empty.
 - `tip.json`: the highest chain tip seen for this wallet.
 - `meta.json`: store version.
-- `imports/<hash of audit paths>`: one marker per audit dir whose log was imported. The first time a server opens the store with a given `AUDIT_DIR` and fallback file, it imports the payments in that log once, then writes the marker. So a second server with its own older log brings its keys along too, and nothing rebuilds from the log again. Old `not_found` results come in as `unknown`, since they came from a truncated history. An `ok` row with no txid comes in as `sent`. The import costs about 15 seconds per 20,000 rows, once.
+- `imports/`: not created any more. A store from an older version may still have it and the imported calls (`by: "import"`, `imported`); they are read as before and left alone. Nothing is imported again, and the audit log is never read back.
 
 A call's state is the join of its events, not the last one written. The order is `pending` < `unknown` < `not sent` = `expired` < `sent` < `failed` < `mined`. Writers append events and never rewrite them, so two processes racing to settle a call cannot overwrite each other, and a stale `expired` can never hide a `mined`.
 
@@ -50,7 +50,7 @@ Every `zingo-cli` process this server starts (sync, reads, send, transmit) is st
 - The wrapper reports "did not start" with a stderr line that carries a random nonce known only to this process and the wrapper, plus a reserved exit code (75 busy, 76 late, 77 no lock, 78 exec). Only that line counts. Nothing `zingo-cli` prints can pass for it.
 - A wallet held by another process is a `BUSY` refusal: not sent, nothing recorded as sent.
 
-This needs `perl` and a POSIX platform. Without perl, or on Windows, live mode refuses every wallet command and sends nothing. Tests: `tests/v12r6.test.ts` (three processes, a killed parent, the start deadline, the nonce) and `tests/race.test.ts` (four processes, different keys, one frozen holder).
+This needs `perl` and a POSIX platform. Without perl, or on Windows, live mode refuses every wallet command and sends nothing. On Windows, testnet mode also refuses to start. Tests: `tests/v12r6.test.ts` (three processes, a killed parent, the start deadline, the nonce) and `tests/race.test.ts` (four processes, different keys, one frozen holder).
 
 ## A send, step by step
 
@@ -111,4 +111,6 @@ Every timeout comes from a bounded setting. Values outside the range stop the se
 - Lease staleness is judged by the lock file's mtime. All processes on one wallet must share a clock: the same host, or a network share whose clock agrees with theirs.
 - The store needs hard links (`link`) for exclusive creates. On a filesystem without them, such as FAT, the first exclusive write fails and nothing is sent.
 - A call that crashed after its intent but before binding stays `unknown` in status until the expiry proof, even though the unbound key shows it never reached the send. Retrying with the same key is safe.
+- Audit rows are never imported. A store that never had a key imported from an audit log (a very old install) has no record of that key, so the same key can pay again. Keep using the store: its keys and calls stay.
+- The wallet path is checked before each send, not during it. A directory swapped in the moments between that check and zingo-cli opening the path is not caught. A hostile local user with write access to the data directories is out of scope (see SECURITY_MODEL.md).
 - The allow-list cache trusts the file's identity, size, mtime, and ctime. On a filesystem with coarse timestamps, an edit that keeps the size within the same tick is seen on the next change.

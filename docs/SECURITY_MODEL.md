@@ -18,7 +18,7 @@ It is a policy gate for a single local operator. It is not a custody system, it 
 
 Limits today:
 
-- On Windows, POSIX modes mean nothing, so the startup check reads the ACL of the wallet directory, the wallet file, the payment store, and the audit dir with `icacls` instead and refuses to start if Everyone, Users, Authenticated Users, Guests, or a similar broad group has read access, by name or SID. `ZSHIELD_HARDEN_WINDOWS_ACL=1` removes inherited entries and grants only the current user, then checks again. If the ACL cannot be read the server refuses to start unless `ZSHIELD_ALLOW_UNCHECKED_WINDOWS_ACL=1` is set.
+- Testnet mode refuses to start on Windows, where POSIX modes and the `flock` wrapper do not apply. Mock mode still runs there, but its state files have no ACL protection: use it for tests and demos only.
 - zshield-mcp does not encrypt the wallet file. In testnet mode it refuses to start if the wallet directory gives any access to group or other users. It wants `700` on the directory, and the error prints the `chmod` that fixes it. It refuses rather than warns because a warning on stderr is easy to miss when an MCP client starts the server. A file inside a private directory with a mode looser than `600` only gets a warning: other users cannot reach it, and `zingo-cli` rewrites the wallet file with the current umask on every save, so a hard refusal would trip after any manual `zingo-cli` run. The server sets umask `077` in testnet mode so its own `zingo-cli` runs keep the file at `600`. Root and the server's own OS user can still read the file, and the check runs only at startup.
 - The server process runs as the same OS user as the wallet. A bug or compromise in the server process, its npm dependencies, or `zingo-cli` can reach the keys. Nothing in this design isolates them.
 
@@ -74,7 +74,7 @@ agent and model  ->  MCP client  ->  zshield-mcp  ->  zingo-cli + wallet file  -
 - If the result row cannot be written after a send, the tool still returns the txid with an `audit_warning`. Throwing there would hide a real payment and invite a retry that pays twice. The `pending` row remains as the record.
 - Rejected and failed calls record a stable `code`, such as `CAP_EXCEEDED` or `NOT_ALLOWLISTED`.
 - Read-only tool rows hold no balances, addresses, or transaction details.
-- The audit log is the human trail, not the source of truth. Idempotency, status, and recovery read the payment store in the wallet directory (`.zshield-state`), so editing or forging an audit row changes no payment state. Each audit dir's log is imported into the store once, the first time a server opens it with that dir.
+- The audit log is the human trail, not the source of truth. Idempotency, status, and recovery read the payment store in the wallet directory (`.zshield-state`), so editing or forging an audit row changes no payment state. Audit logs are never imported: they stay on disk as a compliance trail and nothing reads them back.
 - At startup the audit dir, the fallback file, and the store are checked: a symlink or another owner stops the server, and loose modes are set to `700` for folders and `600` for files. Writes open files with `O_NOFOLLOW` and check the owner of the open file.
 - A lightwalletd URL with a user, password, query, or fragment is refused unless `ZSHIELD_ALLOW_URL_CREDENTIALS=1`. With it, those parts are replaced in every response, error, and audit row. They are still on the `zingo-cli` command line, because it takes the server only there.
 
@@ -133,7 +133,7 @@ All six are addressed on this branch, each with a regression test that fails on 
 | F-8 `possible_txids` matched on amount alone | Match on recipient, amount, and memo from the wallet's outgoing notes, inside a time window, with a confidence level | `tests/send-match.test.ts` |
 | F-9 The wallet directory came from `$HOME` and could be relative | Use `os.homedir()`, require an absolute `ZINGO_DATA_DIR`, refuse to start otherwise | `tests/wallet-dir.test.ts` |
 | F-10 Every call, even a refused one, ran `export_ufvk`, and a failing one was retried on every call | Read the key after the cheap checks, cache it, and back off on failure | `tests/viewkey-order.test.ts` |
-| F-11 The wallet permission check did nothing on Windows | Check the ACL with `icacls`, with opt-in hardening | `tests/winacl.test.ts` |
+| F-11 The wallet permission check did nothing on Windows | An `icacls` check was added; replaced in run 6 by refusing testnet mode on Windows (see "V12 run 6 decisions") | `tests/v12r9.test.ts` |
 
 ## Out of scope
 
@@ -141,6 +141,7 @@ All six are addressed on this branch, each with a regression test that fails on 
 - Custody of anyone else's keys, or more than one wallet.
 - Multiple users, authentication, or remote access to the MCP server.
 - A compromised host, OS user, Node.js runtime, npm dependency, or `zingo-cli` binary.
+- A hostile local user with write access to the data directories, or one who can run as the same OS user. See "V12 run 6 decisions".
 - Network privacy. Connections to lightwalletd reveal your IP address. There is no Tor or mixnet support in zshield-mcp.
 - The correctness of `zingo-cli`, lightwalletd, and the Zcash protocol.
 - Denial of service against the server or the wallet.
@@ -153,7 +154,7 @@ Eleven findings, all addressed on this branch. Each has a test in `tests/v12.tes
 | Finding | Fix |
 |---------|-----|
 | F-8 History matching saw only recent entries | Recovery and status read the whole history and credit a txid to one call |
-| F-11 The Windows ACL check skipped the new record dirs | The ACL check covers the wallet file, the payment store, and the audit dir |
+| F-11 The Windows ACL check skipped the new record dirs | Replaced in run 6: testnet mode does not start on Windows, so there is no ACL code left |
 | F-12 Processes with different audit dirs kept separate payment records | One payment store inside the wallet directory, found from the wallet path |
 | F-13 Policy reads bypassed the rate limit | `zshield://policy` reads count against `RATE_LIMIT_PER_MIN` |
 | F-14 A fixed lock age could break a live send's lock, and timeouts were unbounded | A renewed lease with token and freshness checks before the bind and the send; every timeout bounded |
@@ -161,7 +162,7 @@ Eleven findings, all addressed on this branch. Each has a test in `tests/v12.tes
 | F-16 Credentials in the lightwalletd URL could leak in errors and rows | Refused by default; redacted when allowed |
 | F-17 Legacy audit files kept loose modes and could be forged or symlinked | Startup checks of owner, symlinks, and modes; state comes from the store, not the log |
 | F-18 `not_found` and `expired` came from a truncated history | Proof required: synced wallet, whole history, past the expiry height. Otherwise `unknown` |
-| F-19 Every key miss rebuilt the index from the whole log | Lookups read one file. The log is imported once per audit dir |
+| F-19 Every key miss rebuilt the index from the whole log | Lookups read one file. The log was imported once per audit dir; in run 6 the import was removed and the log is never read |
 | F-20 A stale recovery could overwrite a newer result | States only move forward; a mined call stays mined |
 
 ## V12 run 5 review of d63f5d8
@@ -203,6 +204,30 @@ Five findings. Tests in `tests/v12r8.test.ts` (plus two updated tests in `tests/
 
 Limits: each `zingo-cli` run may still buffer 16 MiB, the whole listing is parsed per scan, and every run still takes the OS wallet lock.
 
+## V12 run 6 decisions
+
+The owner decided how to handle the rest of run 6. Tests are in `tests/v12r9.test.ts`; each one fails on the code before its commit. Every note is in [V12_CHECKLIST.md](V12_CHECKLIST.md).
+
+| Finding | Decision |
+|---------|----------|
+| F-25, F-29, F-36 Audit import (resources, forged fallback, skipped files) | The audit import is gone, with its marker. Audit logs stay on disk as a compliance trail and are never read back, so the fallback file cannot seed state and a big log costs nothing at start. Data already in the store stays; nothing is imported again |
+| F-24, F-31 Allow-list file and wallet path swaps | See the hostile local user section below |
+| F-32, F-33 Windows ACL checks | Testnet mode refuses to start on Windows. The ACL parser, hardening, and their environment variable are removed. Mock mode runs, with no ACL protection |
+| F-35 History exposed recipients and memos | `zcash_history` no longer returns them, in either mode. `TxSummary.outgoing` stays inside the server |
+
+### The hostile local user
+
+Out of scope: a local user who can write to the data directories (wallet, payment store, audit dir, allow-list), or who can run as the same OS user. Such a user can edit the allow-list, forge payment state, or read the wallet file, and no check in this process can stop that. The server is a policy gate for one operator on a machine they control.
+
+Still checked on POSIX, as defense in depth:
+
+- The allow-list file is not a symlink, is a regular file owned by you or root, and has no group or other write bit. It is opened with `O_NOFOLLOW`, and the opened file's device, inode, owner, and mode must equal what was checked before the open.
+- No directory above the wallet, payment store, audit dir, or allow-list file is group or other writable without the sticky bit, or owned by a user other than root or you. Symlinks are resolved first.
+- The wallet directory must exist in testnet mode. Its real path and its device and inode are pinned at startup. `zingo-cli` gets the real path, and the path must still lead to the same directory before the build step and the transmit step of every send. Otherwise nothing starts and the call is refused.
+- The audit dir, fallback file, payment store, and wallet keep their symlink, owner, and mode checks.
+
+Limits: the checks run at startup and before sends, not continuously. A swap in the moments between the last check and the use is not caught by the server, and a user with the access described above can do much more anyway.
+
 ## Where to look in the code
 
 - Policy checks: `src/policy/caps.ts`, `src/policy/amount.ts`, `src/policy/allowlist.ts`
@@ -217,6 +242,6 @@ Limits: each `zingo-cli` run may still buffer 16 MiB, the whole listing is parse
 - Network checks: `src/chain/network.ts`
 - Testnet adapter and viewing-key read: `src/chain/live.ts`
 - Fingerprint hash, durable writes, and the fallback file: `src/audit/log.ts`
-- Windows ACL check: `src/chain/winacl.ts`
+- Local path hardening: `src/fsafe.ts` (`assertSafeAncestors`), `src/policy/allowlist.ts`, `src/chain/pin.ts`
 - Startup refusal of mainnet and of an exposed wallet: `src/config.ts`, `src/startup.ts`, `src/chain/perms.ts`, `src/index.ts`
 - Stable codes: `src/errors.ts`
