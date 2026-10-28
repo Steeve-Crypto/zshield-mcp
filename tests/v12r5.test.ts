@@ -510,7 +510,7 @@ describe("F-23: failed sends", () => {
   });
 
   it("a transaction seen mined later wins over a failed record, and mined is never moved back to failed", async () => {
-    const { config, chain, setHistory, asTx } = setup();
+    const { config, chain, counts, setHistory, asTx } = setup();
     await pay(config, chain);
     setHistory([asTx("failed")]);
     await paymentStatus(config, chain, { idempotency_key: key });
@@ -520,10 +520,15 @@ describe("F-23: failed sends", () => {
     assert.equal(storeFor(config, chain).readCall(callId)?.state, "mined");
     setHistory([asTx("failed")]);
     const s = await paymentStatus(config, chain, { idempotency_key: key });
-    assert.equal(s.state, "mined");
-    assert.equal(storeFor(config, chain).readCall(callId)?.state, "mined");
+    assert.equal(s.state, "unknown", "the wallet no longer shows it mined (F-30)");
+    assert.equal(s.reorged, true);
+    assert.equal(storeFor(config, chain).readCall(callId)?.state, "mined", "the stored state never moves back");
     const replay = await pay(config, chain);
     assert.equal(replay.ok, true);
+    assert.equal(counts.sent, 1, "a reorged payment is never sent again");
+    const body = JSON.parse(replay.text);
+    assert.equal(body.confirmed, true);
+    assert.match(body.confirmed_as_of, /^\d{4}-/, "the replay says when it was last seen mined");
   });
 
   it("a wallet that has not marked it failed leaves the replay as the original success", async () => {

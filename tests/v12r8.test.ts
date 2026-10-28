@@ -266,3 +266,47 @@ describe("F-34: history scans are shared and capped", () => {
     assert.equal(reads, 1);
   });
 });
+
+describe("F-30: a reorged payment no longer reads as mined", () => {
+  const sent = (status: string, extra: Partial<TxSummary> = {}) =>
+    ({ txid: GOOD, time: new Date(T0 + 2000).toISOString(), status, blockHeight: status === "confirmed" ? 500 : undefined, kind: "sent", valueZats: 10000n, outgoing: [{ recipient: R, valueZats: 10000n, memo: "inv-7" }], ...extra }) as TxSummary;
+  const chainWith = (history: TxSummary[]) =>
+    ({ mode: "live", getHistory: async () => history, walletHeight: async () => 505, checkHealth: async () => ({ walletHeight: 505, chainTip: 505, spendableZats: 0n }) }) as unknown as ChainAdapter;
+  function minedCall() {
+    const config = tempConfig();
+    const base = { tool: "zcash_pay" as const, call_id: "c1", amount_zec: "0.0001", amount_zats: "10000", recipient: R, allowlist_hit: true, cap_zec: "0.01", view_key_fingerprint: "f", memo: "inv-7" };
+    appendAuditEntry(config.auditDir, { ...base, ts: new Date(T0).toISOString(), status: "pending" } as AuditEntry);
+    appendAuditEntry(config.auditDir, { ...base, ts: new Date(T0 + 1000).toISOString(), status: "ok", mock_txid: GOOD } as AuditEntry);
+    return config;
+  }
+  const at = T0 + 60_000;
+
+  it("mined, then listed unconfirmed, failed or not at all: the answer follows the wallet, the record stays mined", async () => {
+    for (const [now, history, want] of [
+      [at, [sent("mempool")], "broadcast"],
+      [at, [], "broadcast"],
+      [T0 + 10 * 3600_000, [], "unknown"],
+      [at, [sent("failed")], "unknown"],
+    ] as const) {
+      const config = minedCall();
+      assert.equal((await paymentStatus(config, chainWith([sent("confirmed")]), { call_id: "c1" }, at)).state, "mined");
+      const s = await paymentStatus(config, chainWith([...history]), { call_id: "c1" }, now);
+      assert.equal(s.state, want);
+      assert.equal(s.reorged, true);
+      assert.equal(s.last_mined_height, 500);
+      assert.equal(s.block_height, undefined);
+      assert.equal(s.confirmations, undefined);
+      assert.equal(storeFor(config, chainWith([])).readCall("c1")?.state, "mined", "the history is append-only");
+    }
+  });
+
+  it("mined again after the reorg reads as mined, with the current height", async () => {
+    const config = minedCall();
+    await paymentStatus(config, chainWith([sent("confirmed")]), { call_id: "c1" }, at);
+    await paymentStatus(config, chainWith([]), { call_id: "c1" }, at);
+    const s = await paymentStatus(config, chainWith([sent("confirmed", { blockHeight: 503 })]), { call_id: "c1" }, at);
+    assert.equal(s.state, "mined");
+    assert.equal(s.block_height, 503);
+    assert.equal(s.reorged, undefined);
+  });
+});
