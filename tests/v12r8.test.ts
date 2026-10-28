@@ -6,11 +6,15 @@ import type { ChainAdapter } from "../src/chain/types.ts";
 import { MAX_AUDIT_ROW_BYTES, MAX_CANDIDATES } from "../src/policy/limits.ts";
 import { recoverPendingPayments } from "../src/payments/recovery.ts";
 import { findPossibleSends } from "../src/tools/pay.ts";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { acquireWalletLock } from "../src/payments/lock.ts";
 import { resetPaymentStores, storeFor } from "../src/payments/store.ts";
 import { executeHistory } from "../src/tools/history.ts";
 import { paymentStatus } from "../src/tools/status.ts";
 import type { AuditEntry, Config, TxSummary } from "../src/types.ts";
-import { readAuditRows, tempConfig } from "./helpers.ts";
+import { readAuditRows, tempConfig, walletJson, withEnv } from "./helpers.ts";
 
 // V12 run 6 regression tests (F-26, F-27, F-28, F-30, F-34).
 
@@ -135,5 +139,69 @@ describe("F-27: candidate lists are bounded", () => {
     const rows = readAuditRows(config).filter((r) => r.call_id === "c1" && r.status === "unknown");
     assert.equal(rows.length, 1);
     assert.ok(Buffer.byteLength(JSON.stringify(rows[0])) <= MAX_AUDIT_ROW_BYTES);
+  });
+});
+
+describe("F-28: history does not hold the payment lease", () => {
+  const wallet = () => mkdtempSync(join(tmpdir(), "zshield-hist-"));
+  const gate = () => {
+    let open!: () => void;
+    const opened = new Promise<void>((r) => (open = r));
+    return { open, opened };
+  };
+  const slowChain = (d: string, runner: CliRunner) => new LiveChainAdapter({ network: "testnet", runner, dataDir: d, stateDir: d });
+
+  it("a payment can take the lease while a history read is still running", async () => {
+    const d = wallet();
+    const g = gate();
+    const runner: CliRunner = async (_b, args) => {
+      await g.opened;
+      return walletJson(args, []) ?? "";
+    };
+    const chain = slowChain(d, runner);
+    const config = liveConfig();
+    const history = executeHistory({}, { config, chain });
+    await new Promise((r) => setTimeout(r, 20));
+    const lease = await acquireWalletLock(storeFor(config, chain), 0, "zcash_pay");
+    lease.release();
+    g.open();
+    await history;
+  });
+
+  it("reads the wallet offline even when nothing else holds it, and allows one history at a time", async () => {
+    const d = wallet();
+    const g = gate();
+    const calls: string[][] = [];
+    const runner: CliRunner = async (_b, args) => {
+      calls.push(args);
+      await g.opened;
+      return walletJson(args, []) ?? "";
+    };
+    const chain = slowChain(d, runner);
+    const config = liveConfig();
+    const first = executeHistory({}, { config, chain });
+    await new Promise((r) => setTimeout(r, 20));
+    const second = await executeHistory({}, { config, chain });
+    assert.equal(second.ok, false);
+    assert.equal(JSON.parse(second.text).code, "BUSY");
+    g.open();
+    assert.equal((await first).ok, true);
+    assert.ok(calls.every((a) => a.includes("--offline") && !a.includes("--server")));
+    assert.equal((await executeHistory({}, { config, chain })).ok, true, "free again once the first is done");
+  });
+
+  it("the whole read shares one deadline instead of four full timeouts", async () => {
+    const d = wallet();
+    let n = 0;
+    const runner: CliRunner = async (_b, args) => {
+      n++;
+      await new Promise((r) => setTimeout(r, 60));
+      return walletJson(args, []) ?? "";
+    };
+    await withEnv("ZINGO_READ_TIMEOUT_MS", "100", async () => {
+      const r = await executeHistory({}, { config: liveConfig(), chain: slowChain(d, runner) });
+      assert.equal(r.ok, false);
+      assert.ok(n < 4, `ran ${n} commands`);
+    });
   });
 });

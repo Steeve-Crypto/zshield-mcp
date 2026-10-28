@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { withWalletRead } from "../payments/lock.js";
 import { storeFor } from "../payments/store.js";
 import { TESTNET_EXPLORER } from "../chain/live.js";
 import { formatZats } from "../policy/amount.js";
@@ -27,7 +26,13 @@ export function checkLimit(limit: unknown): number {
   return limit;
 }
 
-/** Read-only: recent wallet transactions, newest first. */
+/** Wallets with a history read running: one at a time, so reads cannot pile up. */
+const reading = new Set<string>();
+
+/**
+ * Read-only: recent wallet transactions, newest first. It never takes the payment lease: it reads the
+ * wallet file offline, as last synced, under one overall deadline, and only one runs at a time.
+ */
 export async function executeHistory(input: HistoryInput, deps: ReadDeps) {
   const live = deps.config.chainMode === "live";
   return runReadTool<TxSummary[]>(
@@ -35,7 +40,14 @@ export async function executeHistory(input: HistoryInput, deps: ReadDeps) {
     deps.config,
     async () => {
       const limit = checkLimit(input.limit);
-      return withWalletRead(storeFor(deps.config, deps.chain), "zcash_history", (offline) => deps.chain.getHistory(limit, { offline, verifiedOnly: true }));
+      const wallet = storeFor(deps.config, deps.chain).dir;
+      if (reading.has(wallet)) throw new ReadRejection("BUSY", "Another zcash_history call is still running. Try again shortly.");
+      reading.add(wallet);
+      try {
+        return await deps.chain.getHistory(limit, { offline: true, verifiedOnly: true });
+      } finally {
+        reading.delete(wallet);
+      }
     },
     (txs) => ({
       count: txs.length,
