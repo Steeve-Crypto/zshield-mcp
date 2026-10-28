@@ -13,7 +13,7 @@ import { defaultRunner, LiveChainAdapter, type CliRunner } from "../src/chain/li
 import * as filelock from "../src/payments/filelock.ts";
 import * as recovery from "../src/payments/recovery.ts";
 import { acquireWalletLock } from "../src/payments/lock.ts";
-import { readAuditRows } from "./helpers.ts";
+import { readAuditRows, seedCall } from "./helpers.ts";
 import { recoverPendingPayments } from "../src/payments/recovery.ts";
 import { resetPaymentStores, storeFor } from "../src/payments/store.ts";
 import { executePay, matchSend } from "../src/tools/pay.ts";
@@ -32,7 +32,7 @@ const synced: ChainHealth = { walletHeight: 1000, chainTip: 1001, spendableZats:
 beforeEach(() => resetPaymentStores());
 
 function pending(config: Config, callId: string, extra: Partial<AuditEntry> = {}) {
-  appendAuditEntry(config.auditDir, {
+  seedCall(config, {
     ts: new Date(T0).toISOString(), tool: "zcash_pay", call_id: callId, amount_zec: "0.0001", amount_zats: "10000",
     recipient: R, allowlist_hit: true, cap_zec: "0.01", status: "pending", view_key_fingerprint: "abc", chain_tip: 900,
     ...extra,

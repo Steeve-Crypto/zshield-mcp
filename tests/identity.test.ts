@@ -5,7 +5,7 @@ import type { ChainAdapter } from "../src/chain/types.ts";
 import { recoverPendingPayments, RECOVERY_EXPIRY_MS } from "../src/payments/recovery.ts";
 import { resetPaymentStores, storeFor, type CallIntent } from "../src/payments/store.ts";
 import type { AuditEntry, ChainHealth, Config, TxSummary } from "../src/types.ts";
-import { tempConfig } from "./helpers.ts";
+import { tempConfig, seedCall } from "./helpers.ts";
 
 // One history entry is not proof of which payment it was. A call whose transaction id was
 // bound before it was transmitted needs no matching at all; a call without one is matched on
@@ -46,7 +46,7 @@ function legacyCall(config: Config, memo: string | undefined) {
     recipient: R, allowlist_hit: true, cap_zec: "0.01", status: "pending", view_key_fingerprint: "abc",
     memo, chain_tip: 900, wallet_height: 900, idempotency_key: "k-legacy",
   };
-  appendAuditEntry(config.auditDir, row);
+  seedCall(config, row);
 }
 
 /** A call recorded by the two-step send, which stopped before it recorded any transaction id. */

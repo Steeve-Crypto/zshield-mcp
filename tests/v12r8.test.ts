@@ -14,7 +14,7 @@ import { resetPaymentStores, storeFor } from "../src/payments/store.ts";
 import { executeHistory } from "../src/tools/history.ts";
 import { paymentStatus } from "../src/tools/status.ts";
 import type { AuditEntry, Config, TxSummary } from "../src/types.ts";
-import { readAuditRows, tempConfig, walletJson, withEnv } from "./helpers.ts";
+import { readAuditRows, seedCall, tempConfig, walletJson, withEnv } from "./helpers.ts";
 
 // V12 run 6 regression tests (F-26, F-27, F-28, F-30, F-34).
 
@@ -81,8 +81,7 @@ describe("F-26: a forged listing entry is never admitted", () => {
 
   function sentCall(config: Config) {
     const base = { tool: "zcash_pay" as const, call_id: "c1", amount_zec: "0.0001", amount_zats: "10000", recipient: R, allowlist_hit: true, cap_zec: "0.01", view_key_fingerprint: "f", memo: "inv-7" };
-    appendAuditEntry(config.auditDir, { ...base, ts: new Date(T0).toISOString(), status: "pending" } as AuditEntry);
-    appendAuditEntry(config.auditDir, { ...base, ts: new Date(T0 + 1000).toISOString(), status: "ok", mock_txid: GOOD } as AuditEntry);
+    seedCall(config, { ...base, ts: new Date(T0).toISOString(), status: "pending" } as AuditEntry, {}, { ...base, ts: new Date(T0 + 1000).toISOString(), status: "ok", mock_txid: GOOD } as AuditEntry);
   }
   const entry = (extra: Partial<TxSummary>): TxSummary =>
     ({ txid: GOOD, time: new Date(T0 + 2000).toISOString(), status: "confirmed", blockHeight: 500, kind: "sent", valueZats: 10000n, ...extra }) as TxSummary;
@@ -109,7 +108,7 @@ describe("F-27: candidate lists are bounded", () => {
   const chainOf = (history: TxSummary[]) =>
     ({ mode: "live", getHistory: async () => history, walletHeight: async () => 505, checkHealth: async () => ({ walletHeight: 505, chainTip: 505, spendableZats: 0n }) }) as unknown as ChainAdapter;
   const pendingCall = (config: Config) =>
-    appendAuditEntry(config.auditDir, { ts: new Date(T0).toISOString(), tool: "zcash_pay", call_id: "c1", amount_zec: "0.0001", amount_zats: "10000", recipient: R, allowlist_hit: true, cap_zec: "0.01", status: "pending", view_key_fingerprint: "f", memo: "inv-7", chain_tip: 400, wallet_height: 400 } as AuditEntry);
+    seedCall(config, { ts: new Date(T0).toISOString(), tool: "zcash_pay", call_id: "c1", amount_zec: "0.0001", amount_zats: "10000", recipient: R, allowlist_hit: true, cap_zec: "0.01", status: "pending", view_key_fingerprint: "f", memo: "inv-7", chain_tip: 400, wallet_height: 400 } as AuditEntry);
 
   it("status lists at most MAX_CANDIDATES lookalikes and still answers unknown", async () => {
     const config = tempConfig();
@@ -257,7 +256,7 @@ describe("F-34: history scans are shared and capped", () => {
 
   it("one status call reads the history once, even when reconcile then looks the txid up", async () => {
     const config = tempConfig();
-    appendAuditEntry(config.auditDir, { ts: new Date(T0).toISOString(), tool: "zcash_pay", call_id: "c1", amount_zec: "0.0001", amount_zats: "10000", recipient: R, allowlist_hit: true, cap_zec: "0.01", status: "pending", view_key_fingerprint: "f", memo: "inv-7", chain_tip: 400, wallet_height: 400 } as AuditEntry);
+    seedCall(config, { ts: new Date(T0).toISOString(), tool: "zcash_pay", call_id: "c1", amount_zec: "0.0001", amount_zats: "10000", recipient: R, allowlist_hit: true, cap_zec: "0.01", status: "pending", view_key_fingerprint: "f", memo: "inv-7", chain_tip: 400, wallet_height: 400 } as AuditEntry);
     let reads = 0;
     const mined = { txid: GOOD, time: new Date(T0 + 2000).toISOString(), status: "confirmed", blockHeight: 500, kind: "sent", valueZats: 10000n, outgoing: [{ recipient: R, valueZats: 10000n, memo: "inv-7" }], verified: true } as TxSummary;
     const chain = { mode: "live", getHistory: async () => (reads++, [mined]), walletHeight: async () => 505, checkHealth: async () => ({ walletHeight: 505, chainTip: 505, spendableZats: 0n }) } as unknown as ChainAdapter;
@@ -275,8 +274,7 @@ describe("F-30: a reorged payment no longer reads as mined", () => {
   function minedCall() {
     const config = tempConfig();
     const base = { tool: "zcash_pay" as const, call_id: "c1", amount_zec: "0.0001", amount_zats: "10000", recipient: R, allowlist_hit: true, cap_zec: "0.01", view_key_fingerprint: "f", memo: "inv-7" };
-    appendAuditEntry(config.auditDir, { ...base, ts: new Date(T0).toISOString(), status: "pending" } as AuditEntry);
-    appendAuditEntry(config.auditDir, { ...base, ts: new Date(T0 + 1000).toISOString(), status: "ok", mock_txid: GOOD } as AuditEntry);
+    seedCall(config, { ...base, ts: new Date(T0).toISOString(), status: "pending" } as AuditEntry, {}, { ...base, ts: new Date(T0 + 1000).toISOString(), status: "ok", mock_txid: GOOD } as AuditEntry);
     return config;
   }
   const at = T0 + 60_000;

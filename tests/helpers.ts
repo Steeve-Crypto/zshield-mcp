@@ -6,7 +6,9 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../src/server.ts";
 import type { CliRunner } from "../src/chain/live.ts";
 import type { ChainAdapter } from "../src/chain/types.ts";
-import type { Config } from "../src/types.ts";
+import { appendAuditEntry } from "../src/audit/log.ts";
+import { storeFor } from "../src/payments/store.ts";
+import type { AuditEntry, Config } from "../src/types.ts";
 
 export const ALLOWED = "u1mockrecipientaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -147,3 +149,28 @@ export function walletJson(
 }
 
 const pretty = (v: unknown) => JSON.stringify(v, null, 2) + "\n";
+
+/**
+ * Put a call in the payment store the way an interrupted or finished send leaves it, and
+ * write its audit rows. The store, not the audit log, is what recovery and status read.
+ */
+export function seedCall(config: Config, pending: AuditEntry, chain: { stateDir?: string } = {}, result?: AuditEntry): void {
+  appendAuditEntry(config.auditDir, pending);
+  const store = storeFor(config, chain);
+  const i = pending;
+  store.writeIntent({
+    call_id: i.call_id, ts: i.ts, amount_zec: i.amount_zec, amount_zats: i.amount_zats!, recipient: i.recipient, memo: i.memo,
+    allowlist_hit: i.allowlist_hit, cap_zec: i.cap_zec, view_key_fingerprint: i.view_key_fingerprint, idempotency_key: i.idempotency_key,
+    params_sha256: i.params_sha256, chain_tip: i.chain_tip, wallet_height: i.wallet_height,
+  });
+  if (i.idempotency_key && i.params_sha256) store.bindKey(i.idempotency_key, i.call_id, i.params_sha256);
+  if (!result) return;
+  appendAuditEntry(config.auditDir, result);
+  const r = result;
+  const base = { ts: r.ts, call_id: i.call_id, by: "send" as const };
+  if (r.status === "ok") {
+    store.advance({ ...base, state: "sent", txid: r.mock_txid });
+    if (r.mock_txid) store.claimTxid(r.mock_txid, i.call_id);
+  } else if (r.status === "unknown") store.advance({ ...base, state: "unknown", code: r.code, error: r.error, possible_sends: r.possible_sends });
+  else store.advance({ ...base, state: "not_sent", code: r.code, error: r.error });
+}

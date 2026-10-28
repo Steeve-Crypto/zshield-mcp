@@ -3,10 +3,9 @@ import fs from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createExclusive, ensurePrivateDir, readPrivate, replaceAtomic } from "../fsafe.js";
-import { fallbackAuditPath } from "../audit/log.js";
 import { parseZecToZats } from "../policy/amount.js";
 import type { ChainAdapter } from "../chain/types.js";
-import type { AuditEntry, Config, PossibleSend } from "../types.js";
+import type { Config, PossibleSend } from "../types.js";
 
 /**
  * The canonical payment store: idempotency bindings and payment states, shared by every
@@ -57,7 +56,7 @@ export interface CallIntent {
   chain_tip?: number;
   /** The wallet's own scanned height at the pre-send check. A mined send cannot be below it */
   wallet_height?: number;
-  /** Where it came from when imported from an older audit log */
+  /** Only on records an older version imported from an audit log. Nothing imports now */
   imported?: boolean;
   /**
    * Set by a live send, which signs the transaction and records its id before it transmits
@@ -78,7 +77,7 @@ export interface CallEvent {
   note?: string;
   /** The txid of the signed transaction, written before it was transmitted */
   staged_txid?: string;
-  /** Who wrote it */
+  /** Who wrote it. "import" only on events an older version wrote */
   by: "send" | "recovery" | "status" | "import";
 }
 
@@ -159,14 +158,14 @@ export class PaymentStore {
     this.dir = dir;
   }
 
-  private sub(name: "keys" | "calls" | "pending" | "txids" | "imports"): string {
+  private sub(name: "keys" | "calls" | "pending" | "txids"): string {
     return join(this.dir, name);
   }
 
   /** Create the folders (0700) if needed and repair loose modes. Returns repair notes. */
   ensureLayout(): string[] {
     const notes: string[] = [];
-    for (const d of [this.dir, this.sub("keys"), this.sub("calls"), this.sub("pending"), this.sub("txids"), this.sub("imports")]) {
+    for (const d of [this.dir, this.sub("keys"), this.sub("calls"), this.sub("pending"), this.sub("txids")]) {
       const n = ensurePrivateDir(d);
       if (n) notes.push(n);
     }
@@ -175,15 +174,6 @@ export class PaymentStore {
 
   get initialized(): boolean {
     return readPrivate(join(this.dir, "meta.json"), MAX_FILE_BYTES) !== undefined;
-  }
-
-  /** Whether the audit log with this tag was already imported. */
-  hasImported(tag: string): boolean {
-    return fs.existsSync(join(this.sub("imports"), safeName(tag, "import tag")));
-  }
-
-  markImported(tag: string, note: string): void {
-    createExclusive(this.sub("imports"), safeName(tag, "import tag"), JSON.stringify({ ts: new Date().toISOString(), note }));
   }
 
   markInitialized(note: string): void {
@@ -366,8 +356,7 @@ const stores = new Map<string, PaymentStore>();
 
 /**
  * The store for this config and chain, opened on first use in this process: folders
- * created and checked, and, the first time the store is ever created, payments imported
- * from this config's audit log. Every read after that goes to disk; nothing is cached.
+ * created and checked. Every read after that goes to disk; nothing is cached.
  */
 export function storeFor(config: Pick<Config, "auditDir" | "auditFallbackPath">, chain: Pick<ChainAdapter, "stateDir">): PaymentStore {
   const dir = resolveStateDir(config, chain);
@@ -381,29 +370,22 @@ export function storeFor(config: Pick<Config, "auditDir" | "auditFallbackPath">,
       const alt = join(tmpdir(), `zshield-state-${process.getuid?.() ?? "u"}-${sha(resolve(config.auditDir)).slice(0, 16)}`);
       const cached = stores.get(alt);
       if (cached) return cached;
-      return openStore(alt, config);
+      return openStore(alt);
     }
   }
   if (!store) {
-    store = openStore(dir, config);
+    store = openStore(dir);
   }
   return store;
 }
 
 /**
- * Open a store: create and check its folders, then import this config's audit log if no
- * process with the same audit paths has done so. Each audit dir is imported once, so a
- * second server on the wallet with its own older audit log brings its keys along too.
+ * Open a store: create and check its folders. The audit log is a compliance trail and is
+ * never read back into the store, so only the store's own files decide what was sent.
  */
-function openStore(dir: string, config: Pick<Config, "auditDir" | "auditFallbackPath">): PaymentStore {
+function openStore(dir: string): PaymentStore {
   const store = new PaymentStore(dir);
   store.ensureLayout();
-  const auditDir = resolve(config.auditDir);
-  const tag = sha(`${auditDir}\0${fallbackAuditPath(auditDir, config.auditFallbackPath)}`).slice(0, 32);
-  if (!store.hasImported(tag)) {
-    const n = importAuditLog(store, config);
-    store.markImported(tag, `imported ${n} payments`);
-  }
   if (!store.initialized) store.markInitialized("created");
   stores.set(dir, store);
   return store;
@@ -440,92 +422,4 @@ export function recentRefusalByKey(key: string): { callId: string; r: Refusal } 
   let hit: { callId: string; r: Refusal } | undefined;
   for (const [callId, r] of recentRefusals) if (r.idempotency_key === key) hit = { callId, r };
   return hit;
-}
-
-/**
- * One-time import of zcash_pay calls that reached their pending row, from the audit log
- * of the process that creates the store. Every write is exclusive, so two processes
- * importing at once write each fact once. Old `not_found` recovery rows came from a
- * truncated history, so they import as `unknown`. Returns how many calls were imported.
- */
-export function importAuditLog(store: PaymentStore, target: { auditDir: string; auditFallbackPath?: string }): number {
-  const files: string[] = [];
-  try {
-    for (const f of fs.readdirSync(target.auditDir).sort()) if (f.endsWith(".jsonl")) files.push(join(target.auditDir, f));
-  } catch {
-    // No audit log yet.
-  }
-  files.push(fallbackAuditPath(target.auditDir, target.auditFallbackPath));
-  type Row = Omit<AuditEntry, "tool" | "status"> & { tool: string; status: string; txid?: string; block_height?: number; note?: string };
-  const byCall = new Map<string, { intent?: Row; result?: Row; recovery: Row[] }>();
-  for (const f of files) {
-    let text: string;
-    try {
-      const lst = fs.lstatSync(f);
-      if (!lst.isFile()) continue;
-      text = fs.readFileSync(f, "utf8");
-    } catch {
-      continue;
-    }
-    for (const line of text.split("\n")) {
-      if (!line.trim()) continue;
-      let row: Row;
-      try {
-        row = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      if (typeof row?.call_id !== "string" || !NAME.test(row.call_id)) continue;
-      const slot = byCall.get(row.call_id) ?? { recovery: [] };
-      if (row.tool === "zcash_pay" && row.status === "pending") slot.intent = row;
-      else if (row.tool === "zcash_pay" && row.status !== "replayed") slot.result = row;
-      else if (row.tool === "zcash_pay_recovery") slot.recovery.push(row);
-      else continue;
-      byCall.set(row.call_id, slot);
-    }
-  }
-  let n = 0;
-  for (const [callId, c] of byCall) {
-    const i = c.intent;
-    if (!i || i.amount_zats === undefined) continue;
-    n++;
-    store.writeIntent({
-      call_id: callId,
-      ts: i.ts,
-      amount_zec: i.amount_zec,
-      amount_zats: i.amount_zats,
-      recipient: i.recipient,
-      memo: i.memo,
-      allowlist_hit: i.allowlist_hit,
-      cap_zec: i.cap_zec,
-      view_key_fingerprint: i.view_key_fingerprint,
-      idempotency_key: i.idempotency_key,
-      params_sha256: i.params_sha256,
-      chain_tip: typeof i.chain_tip === "number" ? i.chain_tip : undefined,
-      wallet_height: typeof i.wallet_height === "number" ? i.wallet_height : undefined,
-      imported: true,
-    });
-    if (i.idempotency_key && i.params_sha256) store.bindKey(i.idempotency_key, callId, i.params_sha256);
-    const events: CallEvent[] = [];
-    const r = c.result;
-    if (r?.status === "ok") events.push({ ts: r.ts, call_id: callId, state: "sent", txid: r.mock_txid, by: "import" });
-    else if (r?.status === "error" || r?.status === "rejected")
-      events.push({ ts: r.ts, call_id: callId, state: "not_sent", code: r.code, error: r.error, by: "import" });
-    else if (r?.status === "unknown")
-      events.push({ ts: r.ts, call_id: callId, state: "unknown", code: r.code, error: r.error, possible_sends: r.possible_sends, by: "import" });
-    for (const rec of c.recovery) {
-      if (rec.status === "confirmed" && rec.txid)
-        events.push({ ts: rec.ts, call_id: callId, state: "mined", txid: rec.txid, block_height: rec.block_height, note: rec.note, by: "import" });
-      else events.push({ ts: rec.ts, call_id: callId, state: "unknown", possible_sends: rec.possible_sends, note: "Imported from an older recovery row, which could not prove the payment was not sent.", by: "import" });
-    }
-    let i2 = 0;
-    for (const e of events) {
-      const dir = join(store.dir, "calls", safeName(callId, "call id"));
-      createExclusive(dir, `000000000000000-import-${String(i2++).padStart(3, "0")}.json`, JSON.stringify(e));
-      if (e.txid) store.claimTxid(e.txid, callId);
-    }
-    const after = store.readCall(callId)!;
-    if (isSettled(after.state)) store.clearPending(callId);
-  }
-  return n;
 }

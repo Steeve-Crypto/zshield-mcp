@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
-import { appendAuditEntry } from "../src/audit/log.ts";
 import { MockChainAdapter } from "../src/chain/mock.ts";
 import type { ChainAdapter } from "../src/chain/types.ts";
 import { resetPaymentStores as resetPaymentIndexes } from "../src/payments/store.ts";
@@ -8,21 +7,21 @@ import { RECOVERY_EXPIRY_MS, recoverPendingPayments } from "../src/payments/reco
 import { executePay } from "../src/tools/pay.ts";
 import { executePaymentStatus, paymentStatus } from "../src/tools/status.ts";
 import type { AuditEntry, Config, TxSummary } from "../src/types.ts";
-import { ALLOWED, connect, readAuditRows, tempConfig, textOf } from "./helpers.ts";
+import { ALLOWED, connect, readAuditRows, tempConfig, textOf, seedCall } from "./helpers.ts";
 
 const R = "utest1" + "s".repeat(100);
 const T0 = Date.parse("2026-10-26T12:00:00Z");
 const TX = "ab".repeat(32);
 
+const pendingRow = (callId: string, extra: Partial<AuditEntry> = {}): AuditEntry => ({
+  ts: new Date(T0).toISOString(), tool: "zcash_pay", call_id: callId, amount_zec: "0.0001", amount_zats: "10000",
+  recipient: R, allowlist_hit: true, cap_zec: "0.01", status: "pending", view_key_fingerprint: "f", memo: "inv-7", ...extra,
+});
 function pending(config: Config, callId: string, extra: Partial<AuditEntry> = {}) {
-  appendAuditEntry(config.auditDir, {
-    ts: new Date(T0).toISOString(), tool: "zcash_pay", call_id: callId, amount_zec: "0.0001", amount_zats: "10000",
-    recipient: R, allowlist_hit: true, cap_zec: "0.01", status: "pending", view_key_fingerprint: "f", memo: "inv-7", ...extra,
-  });
+  seedCall(config, pendingRow(callId, extra));
 }
 function result(config: Config, callId: string, extra: Partial<AuditEntry>) {
-  pending(config, callId);
-  appendAuditEntry(config.auditDir, {
+  seedCall(config, pendingRow(callId), {}, {
     ts: new Date(T0 + 1000).toISOString(), tool: "zcash_pay", call_id: callId, amount_zec: "0.0001", amount_zats: "10000",
     recipient: R, allowlist_hit: true, cap_zec: "0.01", status: "ok", view_key_fingerprint: "f", ...extra,
   });

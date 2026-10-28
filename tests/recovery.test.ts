@@ -5,7 +5,7 @@ import type { ChainAdapter } from "../src/chain/types.ts";
 import { resetPaymentStores as resetPaymentIndexes, storeFor } from "../src/payments/store.ts";
 import { RECOVERY_EXPIRY_MS, recoverPendingPayments } from "../src/payments/recovery.ts";
 import type { AuditEntry, ChainHealth, Config, TxSummary } from "../src/types.ts";
-import { readAuditRows, tempConfig } from "./helpers.ts";
+import { readAuditRows, tempConfig, seedCall } from "./helpers.ts";
 
 const R = "utest1" + "r".repeat(100);
 const T0 = Date.parse("2026-10-26T12:00:00Z");
@@ -27,7 +27,7 @@ function pending(config: Config, callId: string, extra: Partial<AuditEntry> = {}
     wallet_height: 900,
     ...extra,
   };
-  appendAuditEntry(config.auditDir, row);
+  seedCall(config, row);
 }
 
 function sent(txid: string, opts: Partial<TxSummary> = {}, memo = "rent"): TxSummary {
@@ -159,6 +159,7 @@ describe("crash recovery on startup", () => {
       ts: new Date(T0 + 1).toISOString(), tool: "zcash_pay", call_id: "done", amount_zec: "0.0001", recipient: R,
       allowlist_hit: true, cap_zec: "0.01", status: "ok", view_key_fingerprint: "abc",
     });
+    storeFor(config, {}).advance({ ts: new Date(T0 + 1).toISOString(), call_id: "done", state: "sent", by: "send" });
     pending(config, "open", { chain_tip: 990, wallet_height: 990 });
     const first = chain([], synced);
     assert.deepEqual((await recoverPendingPayments(config, first.c, { now: T0 + 60_000 })).map((r) => [r.call_id, r.status]), [["open", "unknown"]]);
