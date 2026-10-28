@@ -42,7 +42,9 @@ async function main() {
   const chain = new LiveChainAdapter({ network: "testnet", zingoBin: bin, server, dataDir: join(base, "wallet") });
 
   console.log(`Sending ${amount} TAZ to ${recipient.slice(0, 24)}... (cap ${config.spendingCapZec})`);
-  const res = await executePay({ amount_zec: amount, recipient, memo: "zshield-mcp testnet demo" }, { config, chain });
+  // A live payment needs an idempotency key. A fresh one per run; set DEMO_KEY to retry a run safely.
+  const idempotency_key = process.env.DEMO_KEY ?? `demo-${Date.now()}`;
+  const res = await executePay({ amount_zec: amount, recipient, memo: "zshield-mcp testnet demo", idempotency_key }, { config, chain });
   if (!res.ok) {
     console.error(res.text);
     process.exit(1);

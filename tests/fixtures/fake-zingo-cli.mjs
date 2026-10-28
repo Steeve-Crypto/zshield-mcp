@@ -105,6 +105,8 @@ async function oneShot() {
       return out(`{\n  "spendable_balance": 100000000\n}\n`);
     case "balance":
       return out(readFileSync(new URL("./zingo/balance.txt", import.meta.url), "utf8"));
+    case "addresses":
+      return out(pretty([{ address_index: 0, encoded_address: "utest1" + "d".repeat(100), has_orchard: true }]));
     case "export_ufvk":
       return out(JSON.stringify({ ufvk: "uviewtest1" + "q".repeat(80), birthday: 1 }) + "\n");
     case "transactions":
