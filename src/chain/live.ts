@@ -371,7 +371,13 @@ export class LiveChainAdapter implements ChainAdapter {
    * listed twice, is left out before the limit applies, and unreadable JSON is an error.
    */
   async getHistory(limit: number, opts: { offline?: boolean; verifiedOnly?: boolean } = {}): Promise<TxSummary[]> {
-    const run = (...cmd: string[]) => this.exec(opts.offline ? [...this.offline(cmd[0]), ...cmd.slice(1)] : [...this.baseArgs(), ...cmd], { timeoutMs: readTimeoutMs() });
+    // One deadline for the whole read, not a full timeout for each command.
+    const deadline = Date.now() + readTimeoutMs();
+    const run = (...cmd: string[]) => {
+      const timeoutMs = deadline - Date.now();
+      if (timeoutMs <= 0) throw new Error("Reading the wallet history ran out of time.");
+      return this.exec(opts.offline ? [...this.offline(cmd[0]), ...cmd.slice(1)] : [...this.baseArgs(), ...cmd], { timeoutMs });
+    };
     // The JSON commands first, then the listing: an entry that appeared in between is not
     // in the JSON and so stays unverified, never the other way round.
     let wallet: WalletFacts | undefined;
