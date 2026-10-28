@@ -10,7 +10,7 @@ Each row is written with `fsync` on the file, and on a new file also on its dire
 
 ## Idempotency, replay, and recovery rows
 
-The audit log is the human trail. Payment state lives in the payment store in the wallet directory (see [RELIABILITY_DESIGN.md](RELIABILITY_DESIGN.md)), and the server does not rebuild anything from these files. The first time a server opens the store with a given `AUDIT_DIR`, it imports that log and its fallback file once, so keys and results from before the store existed still count. Editing a row afterwards changes no payment state.
+The audit log is the human trail. Payment state lives in the payment store in the wallet directory (see [RELIABILITY_DESIGN.md](RELIABILITY_DESIGN.md)), and the server never reads these files back into it: no import at startup or later, and the fallback file does not seed anything. They are a compliance trail on disk. Editing, forging, or deleting a row changes no payment state. Older versions imported these logs once; what they imported stays in the store, and nothing is imported again.
 
 - The `pending` row of a call with a key carries `idempotency_key` and `params_sha256`, the hash of the amount in zatoshis, recipient, and memo.
 - A repeat call with the same key writes its own row with status `replayed`, its own `call_id`, and `replay_of` set to the first call's `call_id`. It sends nothing. It copies `allowlist_hit` and `view_key_fingerprint` from the first call, so the row says which wallet and which allow-list decision it repeats.
@@ -19,7 +19,7 @@ The audit log is the human trail. Payment state lives in the payment store in th
 
 ## File safety
 
-At startup the audit dir and the fallback file are checked. A symlink or a file owned by another user stops the server. A folder looser than `700` or a file looser than `600` is tightened, with a note on stderr. Rows are appended with `O_NOFOLLOW`, and the open file's owner is checked before each write.
+At startup the audit dir and the fallback file are checked, and so is every directory above them: one that is group or other writable without the sticky bit, or owned by another non-root user, stops the server. A symlink or a file owned by another user stops the server. A folder looser than `700` or a file looser than `600` is tightened, with a note on stderr. Rows are appended with `O_NOFOLLOW`, and the open file's owner is checked before each write.
 
 ## Fields
 
@@ -61,4 +61,4 @@ Calls refused with `RATE_LIMITED` do not get a row each, so a flood of calls can
 
 ## Retention
 
-Rotate or archive `audits/*.jsonl` as your compliance needs require. Do not commit live audit files (gitignored). Payment state (keys, calls, txids) lives in the payment store in the wallet directory, not in these files. Idempotency, status, and recovery never read the audit log, apart from a one-time import of an audit dir the store has not seen before, so rotating or deleting old files cannot change a payment's state and a long log does not slow any call. The import trusts that dir on first sight: keep it private (startup checks its mode and owner).
+Rotate or archive `audits/*.jsonl` as your compliance needs require. Do not commit live audit files (gitignored). Payment state (keys, calls, txids) lives in the payment store in the wallet directory, not in these files. Idempotency, status, and recovery never read the audit log, so rotating or deleting old files cannot change a payment's state and a long log does not slow startup or any call.
