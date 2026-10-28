@@ -1,6 +1,6 @@
 import type { ChainAdapter } from "../chain/types.js";
 import { writeAuditRow } from "../audit/log.js";
-import { lookalikeSends, MATCH_AFTER_MS, MATCH_SKEW_MS, matchHistory, placedInTime } from "../tools/pay.js";
+import { capCandidates, lookalikeSends, MATCH_AFTER_MS, MATCH_SKEW_MS, matchHistory, placedInTime } from "../tools/pay.js";
 import type { Config, MatchConfidence, PossibleSend } from "../types.js";
 import { acquireWalletLock, BusyError, type WalletLock } from "./lock.js";
 import { TIP_TOLERANCE_BLOCKS, tipProblem } from "./tip.js";
@@ -166,7 +166,7 @@ export async function reconcile(record: CallRecord, chain: ChainAdapter, opts: R
     return {
       ...base,
       status: "unknown",
-      possible_sends: matches,
+      possible_sends: capCandidates(matches),
       note:
         matches.length > 1
           ? "More than one transaction matches; check by hand. Do not pay again."
@@ -183,7 +183,7 @@ export async function reconcile(record: CallRecord, chain: ChainAdapter, opts: R
     return {
       ...base,
       status: "unknown",
-      possible_sends: lookalikes,
+      possible_sends: capCandidates(lookalikes),
       note: "No transaction matches the recipient and memo, but a sent transaction of the same amount near this time belongs to no call. It could be this send, listed in a different form. Check by hand. Do not pay again.",
     };
   }
@@ -418,8 +418,9 @@ async function recoverLocked(
     });
     const before = store.readCall(callId);
     const after = recordReconcile(store, row, "recovery");
-    // One audit row per decision that moved the call, so repeated runs stay quiet.
-    if (!before || after.state !== before.state || after.blockHeight !== before.blockHeight || row.status === "unknown") {
+    // One audit row per decision that moved the call or changed its candidates, so repeated runs stay quiet.
+    const same = (a?: PossibleSend[], b?: PossibleSend[]) => (a ?? []).map((p) => p.txid).join() === (b ?? []).map((p) => p.txid).join();
+    if (!before || after.state !== before.state || after.blockHeight !== before.blockHeight || (row.status === "unknown" && !(before.state === "unknown" && same(before.top?.possible_sends, row.possible_sends)))) {
       writeAuditRow(config, row);
     }
     rows.push(row);

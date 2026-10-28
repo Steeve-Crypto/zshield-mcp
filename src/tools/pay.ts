@@ -4,7 +4,7 @@ import type { ChainAdapter } from "../chain/types.js";
 import { fingerprintViewKey, writeAuditRow } from "../audit/log.js";
 import { assertWithinCap, PolicyError } from "../policy/caps.js";
 import { assertRecipientAllowed, isRecipientAllowed, loadAllowlist } from "../policy/allowlist.js";
-import { assertPayInputBounded, MAX_MEMO_BYTES, MAX_RECIPIENT_LENGTH, memoProblem } from "../policy/limits.js";
+import { assertPayInputBounded, MAX_CANDIDATES, MAX_MEMO_BYTES, MAX_RECIPIENT_LENGTH, memoProblem } from "../policy/limits.js";
 import { boundAuditEntry } from "../audit/log.js";
 import { MAX_AMOUNT_LENGTH } from "../policy/amount.js";
 import { addressNetwork } from "../chain/network.js";
@@ -143,6 +143,11 @@ export function lookalikeSends(
   });
 }
 
+/** The first MAX_CANDIDATES of a candidate list, for output and audit only: decisions use the whole list. */
+export function capCandidates<T>(list: T[]): T[] {
+  return list.slice(0, MAX_CANDIDATES);
+}
+
 /** Whether a match is placed in time, by its timestamp or its mined height. */
 export function placedInTime(m: PossibleSend): boolean {
   return m.matched.includes("time") || m.matched.includes("height");
@@ -182,7 +187,7 @@ export async function findPossibleSends(
   callId?: string
 ): Promise<PossibleSend[]> {
   try {
-    return matchHistory(await chain.getHistory(Infinity), target, startedAt, claimedBy, callId);
+    return capCandidates(matchHistory(await chain.getHistory(Infinity), target, startedAt, claimedBy, callId));
   } catch {
     return [];
   }
@@ -491,8 +496,8 @@ function replay(input: PayInput, deps: PayDeps, callId: string, originalCallId: 
         code: "SEND_UNCONFIRMED",
         message,
         error: message,
-        possible_txids: top?.possible_sends?.map((p) => p.txid),
-        possible_sends: top?.possible_sends,
+        possible_txids: top?.possible_sends && capCandidates(top.possible_sends).map((p) => p.txid),
+        possible_sends: top?.possible_sends && capCandidates(top.possible_sends),
       },
       "SEND_UNCONFIRMED"
     );

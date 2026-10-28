@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
-import { appendAuditEntry } from "../src/audit/log.ts";
+import { appendAuditEntry, boundAuditEntry } from "../src/audit/log.ts";
 import { LiveChainAdapter, type CliRunner } from "../src/chain/live.ts";
 import type { ChainAdapter } from "../src/chain/types.ts";
+import { MAX_AUDIT_ROW_BYTES, MAX_CANDIDATES } from "../src/policy/limits.ts";
+import { recoverPendingPayments } from "../src/payments/recovery.ts";
+import { findPossibleSends } from "../src/tools/pay.ts";
 import { resetPaymentStores, storeFor } from "../src/payments/store.ts";
 import { executeHistory } from "../src/tools/history.ts";
 import { paymentStatus } from "../src/tools/status.ts";
 import type { AuditEntry, Config, TxSummary } from "../src/types.ts";
-import { tempConfig } from "./helpers.ts";
+import { readAuditRows, tempConfig } from "./helpers.ts";
 
 // V12 run 6 regression tests (F-26, F-27, F-28, F-30, F-34).
 
@@ -90,5 +93,47 @@ describe("F-26: a forged listing entry is never admitted", () => {
       assert.equal(s.state, "unknown", `case ${history.length}${history[0].verified}`);
       assert.equal(storeFor(config, chainWith([])).readCall("c1")?.state, "sent", "the stored state did not move");
     }
+  });
+});
+
+describe("F-27: candidate lists are bounded", () => {
+  const txid = (n: number) => n.toString(16).padStart(64, "0");
+  // Same amount, sent near the call, to nobody the call named: a lookalike that blocks "not sent".
+  const lookalike = (n: number): TxSummary =>
+    ({ txid: txid(n), time: new Date(T0 + 5000).toISOString(), status: "mempool", kind: "sent", valueZats: 10000n, outgoing: [{ recipient: "utest1other", valueZats: 10000n, memo: "" }] }) as TxSummary;
+  const flood = Array.from({ length: 60 }, (_, i) => lookalike(i + 1));
+  const chainOf = (history: TxSummary[]) =>
+    ({ mode: "live", getHistory: async () => history, walletHeight: async () => 505, checkHealth: async () => ({ walletHeight: 505, chainTip: 505, spendableZats: 0n }) }) as unknown as ChainAdapter;
+  const pendingCall = (config: Config) =>
+    appendAuditEntry(config.auditDir, { ts: new Date(T0).toISOString(), tool: "zcash_pay", call_id: "c1", amount_zec: "0.0001", amount_zats: "10000", recipient: R, allowlist_hit: true, cap_zec: "0.01", status: "pending", view_key_fingerprint: "f", memo: "inv-7", chain_tip: 400, wallet_height: 400 } as AuditEntry);
+
+  it("status lists at most MAX_CANDIDATES lookalikes and still answers unknown", async () => {
+    const config = tempConfig();
+    pendingCall(config);
+    const s = await paymentStatus(config, chainOf(flood), { call_id: "c1" }, T0 + 60_000);
+    assert.equal(s.state, "unknown");
+    assert.equal(s.possible_sends?.length, MAX_CANDIDATES);
+  });
+
+  it("the unknown-send lookup caps its matches", async () => {
+    const same = (n: number) => ({ ...lookalike(n), outgoing: [{ recipient: R, valueZats: 10000n, memo: "inv-7" }] }) as TxSummary;
+    const found = await findPossibleSends(chainOf(Array.from({ length: 60 }, (_, i) => same(i + 1))), { amountZats: 10000n, recipient: R, memo: "inv-7" }, T0);
+    assert.equal(found.length, MAX_CANDIDATES);
+  });
+
+  it("an audit row stays within the size limit however many candidates it carries", () => {
+    const possible_sends = flood.map((t) => ({ txid: t.txid, confidence: "low", matched: ["amount"], status: "mempool" }));
+    const row = boundAuditEntry({ ts: "t", tool: "zcash_pay", call_id: "c1", status: "unknown", possible_txids: possible_sends.map((p) => p.txid), possible_sends });
+    assert.ok(Buffer.byteLength(JSON.stringify(row)) <= MAX_AUDIT_ROW_BYTES);
+    assert.equal(row.status, "unknown");
+  });
+
+  it("repeated recovery of the same unknown call writes its audit row once", async () => {
+    const config = tempConfig();
+    pendingCall(config);
+    for (let i = 0; i < 3; i++) await recoverPendingPayments(config, chainOf(flood), { now: T0 + 60_000 });
+    const rows = readAuditRows(config).filter((r) => r.call_id === "c1" && r.status === "unknown");
+    assert.equal(rows.length, 1);
+    assert.ok(Buffer.byteLength(JSON.stringify(rows[0])) <= MAX_AUDIT_ROW_BYTES);
   });
 });
