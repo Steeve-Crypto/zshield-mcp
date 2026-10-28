@@ -41,14 +41,14 @@ function liveConfig(): Config {
 function pendingRow(config: Config, callId: string, extra: Partial<AuditEntry> = {}) {
   appendAuditEntry(config.auditDir, {
     ts: new Date(T0).toISOString(), tool: "zcash_pay", call_id: callId, amount_zec: "0.0001", amount_zats: "10000",
-    recipient: R, allowlist_hit: true, cap_zec: "0.01", status: "pending", view_key_fingerprint: "f", ...extra,
+    recipient: R, allowlist_hit: true, cap_zec: "0.01", status: "pending", view_key_fingerprint: "f", memo: "inv-7", ...extra,
   } as AuditEntry);
 }
 
 function sentTx(over: Partial<TxSummary> = {}): TxSummary {
   return {
     txid: TX, time: new Date(T0 + 2000).toISOString(), status: "confirmed", blockHeight: 500, kind: "sent",
-    valueZats: 10000n, outgoing: [{ recipient: R, valueZats: 10000n, memo: "" }], ...over,
+    valueZats: 10000n, outgoing: [{ recipient: R, valueZats: 10000n, memo: "inv-7" }], ...over,
   } as TxSummary;
 }
 
