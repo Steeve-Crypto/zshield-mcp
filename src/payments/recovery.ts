@@ -387,10 +387,7 @@ async function recoverLocked(
   const evidence = chainEvidence(chain, sync, opts.maxLagBlocks ?? config.healthMaxLagBlocks ?? 10, () => store.readTipMark());
   // One history read for the whole run: the wallet does not change while the lease is
   // held, and N pending calls should not mean N full reads.
-  let history: ReturnType<ChainAdapter["getHistory"]> | undefined;
-  const once: ChainAdapter = Object.create(chain, {
-    getHistory: { value: (limit: number, o?: { offline?: boolean }) => (history ??= chain.getHistory(limit, o)) },
-  });
+  const once = onceHistory(chain);
   const rows: RecoveryAuditEntry[] = [];
   const budgetMs = opts.budgetMs ?? RECOVERY_BUDGET_MS;
   const started = Date.now();
@@ -426,6 +423,14 @@ async function recoverLocked(
     rows.push(row);
   }
   return rows;
+}
+
+/** The chain with one full history read, shared by every caller of the wrapper. */
+export function onceHistory(chain: ChainAdapter): ChainAdapter {
+  let history: ReturnType<ChainAdapter["getHistory"]> | undefined;
+  return Object.create(chain, {
+    getHistory: { value: (limit: number, o?: { offline?: boolean; verifiedOnly?: boolean }) => (history ??= chain.getHistory(limit, o)) },
+  });
 }
 
 /**
