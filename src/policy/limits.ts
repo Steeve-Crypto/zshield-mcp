@@ -12,6 +12,8 @@ export const MAX_RECIPIENT_LENGTH = 256;
 export const MAX_MEMO_BYTES = 512;
 /** Hard ceiling for one serialized audit row, in UTF-8 bytes. */
 export const MAX_AUDIT_ROW_BYTES = 8192;
+/** Most candidate transactions (possible_sends) any one result or audit row lists. */
+export const MAX_CANDIDATES = 10;
 
 /** Addresses are bech32 or base58: visible ASCII, no spaces or control characters. */
 const ADDRESS_CHARS = /^[\x21-\x7e]+$/;

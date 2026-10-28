@@ -4,7 +4,7 @@ import type { ChainAdapter } from "../chain/types.js";
 import { recentRefusal, recentRefusalByKey, storeFor, type CallRecord, type PaymentStore } from "../payments/store.js";
 import { boundedSync, chainEvidence, countRivals, reconcile, recordReconcile, RECOVERY_EXPIRY_MS } from "../payments/recovery.js";
 import { acquireWalletLock, BusyError, type WalletLock } from "../payments/lock.js";
-import { inFlightCall } from "./pay.js";
+import { capCandidates, inFlightCall } from "./pay.js";
 import type { Config, PossibleSend } from "../types.js";
 import type { SyncResult } from "../chain/sync.js";
 import { ReadRejection, runReadTool, type ReadDeps } from "./read.js";
@@ -254,7 +254,7 @@ async function fromChain(
   if (r.status === "failed") return failedStatus(base, amount, r.txid, r.note);
   if (r.status === "broadcast") return { ...common, state: "broadcast", txid: r.txid, message: r.note };
   // A candidate is a guess, never this call's transaction: it is listed, not claimed.
-  const candidates = r.possible_sends ?? [];
+  const candidates = capCandidates(r.possible_sends ?? []);
   return {
     ...common,
     state: candidates.length === 0 && record.state === "pending" && now - started < RECOVERY_EXPIRY_MS ? "pending" : "unknown",
