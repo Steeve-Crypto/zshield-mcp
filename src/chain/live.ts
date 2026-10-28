@@ -4,6 +4,7 @@ import { isAbsolute, join } from "node:path";
 import type { ChainAdapter } from "./types.js";
 import type { ChainHealth, OutgoingNote, PaymentReceipt, PaymentRequest, TxSummary, WalletBalance } from "../types.js";
 import { assertTestnetAddress, NetworkError } from "./network.js";
+import { addNoteFacts, corroborate, extractJson, messageFacts, type TxFacts, type WalletFacts } from "./corroborate.js";
 import { ChainUnreachableError, CliTimeoutError, SendOutcomeUnknownError } from "./outcome.js";
 import { defaultSyncer, type SyncResult, type WalletSyncer } from "./sync.js";
 import { displayUrl, redact, registerServerUrl } from "../redact.js";
@@ -42,6 +43,8 @@ export type CliRunner = (bin: string, args: string[], opts?: RunOptions) => Prom
 
 /** Sends can take a while to build proofs. */
 export const SEND_TIMEOUT_MS = 15 * 60_000;
+/** Building and signing a transaction broadcasts nothing, so it may be cut off sooner. */
+export const STAGE_TIMEOUT_MS = 5 * 60_000;
 /** Reads should answer fast or fail. Override with ZINGO_READ_TIMEOUT_MS. */
 export const DEFAULT_READ_TIMEOUT_MS = 120_000;
 
@@ -366,9 +369,23 @@ export class LiveChainAdapter implements ChainAdapter {
    * reads the wallet file as last synced and starts no sync of its own.
    */
   async getHistory(limit: number, opts: { offline?: boolean } = {}): Promise<TxSummary[]> {
-    const args = opts.offline ? this.offline("transactions") : [...this.baseArgs(), "transactions"];
-    const all = parseTransactions(await this.exec(args, { timeoutMs: readTimeoutMs() }));
-    return all.slice(0, limit);
+    const run = (...cmd: string[]) => this.exec(opts.offline ? [...this.offline(cmd[0]), ...cmd.slice(1)] : [...this.baseArgs(), ...cmd], { timeoutMs: readTimeoutMs() });
+    // The JSON commands first, then the listing: an entry that appeared in between is not
+    // in the JSON and so stays unverified, never the other way round.
+    let wallet: WalletFacts | undefined;
+    try {
+      const byTxid = new Map<string, TxFacts>();
+      addNoteFacts(extractJson(await run("notes", "all")), byTxid);
+      addNoteFacts(extractJson(await run("coins", "all")), byTxid);
+      wallet = { byTxid, messages: messageFacts(extractJson(await run("messages"))) };
+    } catch {
+      // No second source: every sent entry stays unverified and confirms nothing.
+      wallet = undefined;
+    }
+    const all = parseTransactions(await run("transactions"));
+    const times = new Map<string, number>();
+    for (const t of all) times.set(t.txid, (times.get(t.txid) ?? 0) + 1);
+    return all.slice(0, limit).map((t) => ({ ...t, verified: corroborate(t, wallet, times.get(t.txid) ?? 0) }));
   }
 
   /** Read-only: runs `addresses` and returns the newest unified address. Refuses a mainnet one. */
@@ -428,25 +445,48 @@ export class LiveChainAdapter implements ChainAdapter {
     if (memoIssue) throw new Error(`Memo refused: ${memoIssue}`);
     // The recipient, amount, and memo go over stdin to zingo-cli's prompt, never in argv,
     // so they do not show up in the process list. argv holds only the fixed base options.
-    const input = buildSendInput(req);
-    let out: string;
+    //
+    // Two steps, so the transaction id is known and recorded before anything is broadcast:
+    // `send` and `calculate` build and sign it, `transmit <txid>` broadcasts exactly that.
+    // Nothing is broadcast in step one, so every failure there is a clean "not sent".
+    let txid: string;
     try {
       // The last check, with nothing between it and the start of the wallet process.
       req.fence?.();
       // The wallet lock is taken by the wrapper in front of zingo-cli: if another zingo-cli
-      // holds it past the wait, or the start deadline passes, the send never starts.
-      out = await this.exec(this.baseArgs(), {
+      // holds it past the wait, or the start deadline passes, nothing starts.
+      const built = await this.exec(this.baseArgs(), {
+        timeoutMs: STAGE_TIMEOUT_MS,
+        input: buildStageInput(req),
+        lockWaitMs: SEND_LOCK_WAIT_MS,
+        lockDeadlineMs: this.now() + SEND_START_WINDOW_MS,
+      });
+      txid = parseStaged(built);
+    } catch (e) {
+      if (e instanceof CliTimeoutError) throw new Error(`zingo-cli did not finish building the transaction (${e.message}). Nothing was sent.`);
+      throw e;
+    }
+    // Bind the txid durably. If that fails the transaction is never transmitted.
+    req.stage?.(txid);
+    // A lost lease stops here, before the wallet process starts: not sent.
+    req.fence?.();
+    let sent: string;
+    try {
+      sent = await this.exec(this.baseArgs(), {
         timeoutMs: SEND_TIMEOUT_MS,
-        input,
+        input: `transmit ${txid}\nquit\n`,
         lockWaitMs: SEND_LOCK_WAIT_MS,
         lockDeadlineMs: this.now() + SEND_START_WINDOW_MS,
       });
     } catch (e) {
-      // A send that was cut off may still have been broadcast.
-      if (e instanceof CliTimeoutError) throw new SendOutcomeUnknownError(e.message);
-      throw e;
+      // The wallet process never started: nothing was transmitted.
+      if (e instanceof WalletBusyError) throw e;
+      // Anything else may have happened after the broadcast.
+      throw new SendOutcomeUnknownError(e instanceof Error ? e.message : String(e), txid);
     }
-    const txid = parseTxid(out);
+    if (!transmitted(sent, txid)) {
+      throw new SendOutcomeUnknownError(`zingo-cli did not report the transmit of ${txid}: ${sent.trim().slice(0, 300)}`, txid);
+    }
     return {
       txid,
       amountZats: req.amountZats,
@@ -458,12 +498,14 @@ export class LiveChainAdapter implements ChainAdapter {
 }
 
 /**
- * Build the stdin script for one send: a `quicksend` line in zingo-cli's JSON form, then
- * `quit`. The prompt splits the line like a shell, so the JSON goes inside single quotes.
- * JSON.stringify already escapes newlines and control characters; single quotes become
- * \u0027, which is still valid JSON. The result is one line with no single quote in it.
+ * Build the stdin script for step one of a send: a `send` line in zingo-cli's JSON form
+ * (it proposes the transfer), `calculate` (it signs the proposal without transmitting),
+ * then `quit`. The prompt splits the line like a shell, so the JSON goes inside single
+ * quotes. JSON.stringify already escapes newlines and control characters; single quotes
+ * become \u0027, which is still valid JSON. The result has one line per command and no
+ * single quote inside the JSON.
  */
-export function buildSendInput(req: PaymentRequest): string {
+export function buildStageInput(req: PaymentRequest): string {
   const entry: Record<string, string | number> = {
     address: req.recipient,
     amount: Number(req.amountZats),
@@ -473,15 +515,29 @@ export function buildSendInput(req: PaymentRequest): string {
   if (req.memo) entry.memo = req.memo;
   const json = JSON.stringify([entry]).replace(/'/g, "\\u0027");
   if (/[\r\n']/.test(json)) throw new Error("Send line could not be encoded safely");
-  return `quicksend '${json}'\nquit\n`;
+  return `send '${json}'\ncalculate\nquit\n`;
 }
 
-export function parseTxid(out: string): string {
-  const m = out.match(/"txids"\s*:\s*\[\s*"([0-9a-f]{64})"/i);
-  if (m) return m[1].toLowerCase();
+/**
+ * The txid of the one transaction step one built. `send` prints `{ "fee": N }` and
+ * `calculate` prints `{ "txids": [...] }`; both must be there, in that order, with no error
+ * text, and exactly one txid. Anything else is a refusal. Nothing was broadcast.
+ */
+export function parseStaged(out: string): string {
   if (/error/i.test(out)) throw new Error(`zingo-cli send error: ${out.trim().slice(0, 500)}`);
-  // No error and no txid: the send may or may not have gone out.
-  throw new SendOutcomeUnknownError(`zingo-cli finished without a txid or an error: ${out.trim().slice(0, 300)}`);
+  const fee = out.search(/"fee"\s*:\s*\d+/);
+  const m = out.match(/"txids"\s*:\s*\[\s*"([0-9a-f]{64})"\s*\]/i);
+  if (fee < 0 || !m || m.index === undefined || m.index < fee) {
+    throw new Error(`zingo-cli did not build exactly one transaction: ${out.trim().slice(0, 300)}`);
+  }
+  return m[1].toLowerCase();
+}
+
+/** Whether `transmit <txid>` reported exactly that txid and nothing else. */
+export function transmitted(out: string, txid: string): boolean {
+  if (/error/i.test(out)) return false;
+  const m = out.match(/"txids"\s*:\s*\[\s*"([0-9a-f]{64})"\s*\]/i);
+  return m !== null && m[1].toLowerCase() === txid;
 }
 
 /**

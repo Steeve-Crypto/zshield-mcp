@@ -71,6 +71,8 @@ export interface CallEvent {
   error?: string;
   possible_sends?: PossibleSend[];
   note?: string;
+  /** The txid of the signed transaction, written before it was transmitted */
+  staged_txid?: string;
   /** Who wrote it */
   by: "send" | "recovery" | "status" | "import";
 }
@@ -83,6 +85,8 @@ export interface CallRecord {
   top?: CallEvent;
   txid?: string;
   blockHeight?: number;
+  /** The txid bound at signing time, before the broadcast. The call's identity when set. */
+  stagedTxid?: string;
   events: CallEvent[];
 }
 
@@ -134,7 +138,8 @@ export function foldEvents(callId: string, intent: CallIntent | undefined, event
     txid = withTx[0].txid;
     blockHeight = withTx.find((e) => e.block_height !== undefined)?.block_height;
   }
-  return { callId, intent, state: top?.state ?? "pending", top, txid, blockHeight, events };
+  const stagedTxid = events.find((e) => e.staged_txid)?.staged_txid;
+  return { callId, intent, state: top?.state ?? "pending", top, txid, blockHeight, stagedTxid, events };
 }
 
 /** Whether `next` moves a call in `current` state forward. */
@@ -291,6 +296,15 @@ export class PaymentStore {
     const after = this.readCall(event.call_id) ?? foldEvents(event.call_id, undefined, [event]);
     if (isSettled(after.state)) this.clearPending(event.call_id);
     return after;
+  }
+
+  /**
+   * Bind the txid of a signed, untransmitted transaction to the call, durably, before it
+   * is transmitted. Throws when another call already owns the txid or the write fails.
+   */
+  stageTxid(callId: string, txid: string, ts: string): void {
+    if (!this.claimTxid(txid, callId)) throw new Error("Another call already owns this transaction id.");
+    this.appendEvent({ ts, call_id: callId, state: "pending", staged_txid: txid, note: "Signed, not yet transmitted.", by: "send" });
   }
 
   /** Which call a txid was credited to. */

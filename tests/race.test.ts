@@ -179,4 +179,16 @@ describe("two server processes on one wallet", { timeout: 120_000 }, () => {
     assert.equal(again.txid, txid);
     if (process.env.RACE_LOG) console.log("after: status", s.state, "| repay", again.status, again.code ?? "", again.idempotent_replay ?? "");
   });
+
+  it("a process that dies after building but before transmitting sends nothing, and the key stays free to retry", async () => {
+    const w = world();
+    const a = await proc(w, "a", ["pay", "race-4"], { FAKE_ZINGO_STAGE_EXIT: "1" }).done;
+    assert.equal(sends(w).length, 0, JSON.stringify(a));
+    assert.notEqual(a.ok, true);
+    const st = readFileSync(join(w.chain, "staged.jsonl"), "utf8").split("\n").filter(Boolean);
+    assert.equal(st.length, 1);
+    const b = await proc(w, "b", ["recover"]).done;
+    for (const r of b) assert.notEqual(String(r.status), "confirmed");
+    assert.equal(sends(w).length, 0);
+  });
 });

@@ -10,10 +10,10 @@ import { loadConfig } from "../src/config.ts";
 import { describePolicy } from "../src/policy/describe.ts";
 import { startupChecks } from "../src/startup.ts";
 import { executeHistory } from "../src/tools/history.ts";
-import { executePay } from "../src/tools/pay.ts";
+import { executePay, findPossibleSends } from "../src/tools/pay.ts";
 import { paymentStatus } from "../src/tools/status.ts";
 import type { AuditEntry, Config, TxSummary } from "../src/types.ts";
-import { connect, tempConfig, withEnv, withUfvk } from "./helpers.ts";
+import { connect, tempConfig, walletJson, withEnv, withUfvk } from "./helpers.ts";
 
 // One regression test (or more) per V12 finding on ff2254b. They only use entry points
 // that exist on both sides, so each one can be run against ff2254b to show it fails there.
@@ -106,27 +106,28 @@ describe("V12 F-8: possible sends are matched on the whole history and the recip
     `{\n    txid: ${txid}\n    datetime: ${utc(Date.now())}\n    status: confirmed\n    blockheight: 999\n    kind: ${kind}\n    value: ${value}\n    fee: 10000\n` +
     (recipient ? `    outgoing orchard notes: \n\t{\n            value: ${value}\n            memo: \n            recipient: ${recipient}\n            output index: 0\n        }\n` : "") +
     "}\n";
-  const unknownSend = async (transactions: string) => {
-    const config = liveConfig();
-    const runner: CliRunner = async (_b, args, opts) => {
-      if (opts?.input !== undefined) return "no txid here"; // outcome unknown
+  // The heuristic search for an unbound send: the wallet lists the whole history, the
+  // JSON commands vouch for its entries, and only this recipient and amount match.
+  const unknownSend = async (transactions: string, txids: string[]) => {
+    const runner: CliRunner = async (_b, args) => {
+      const j = walletJson(args, txids.map((txid) => ({ txid, height: 999 })));
+      if (j) return j;
       if (args.at(-1) === "transactions") return transactions;
       throw new Error(`unexpected ${args.at(-1)}`);
     };
     const chain = new LiveChainAdapter({ network: "testnet", runner: withUfvk(runner) });
-    const r = JSON.parse((await executePay({ idempotency_key: "t-v12-1", amount_zec: "0.001", recipient: R }, { config, chain })).text);
-    assert.equal(r.code, "SEND_UNCONFIRMED");
-    return (r.possible_sends ?? []) as { txid: string }[];
+    const found = await findPossibleSends(chain, { amountZats: 100000n, recipient: R }, Date.now() - 1000);
+    return found as { txid: string }[];
   };
 
   it("the send is found behind 30 newer wallet entries", async () => {
     const newer = Array.from({ length: 30 }, (_, i) => block((i + 1).toString(16).padStart(64, "0"), undefined, "received", 7));
-    const found = await unknownSend(newer.join("") + block(TX, R));
+    const found = await unknownSend(newer.join("") + block(TX, R), [TX]);
     assert.deepEqual(found.map((p) => p.txid), [TX]);
   });
 
   it("a same-amount send to another recipient is not attributed to the call", async () => {
-    assert.deepEqual(await unknownSend(block(TX, OTHER)), []);
+    assert.deepEqual(await unknownSend(block(TX, OTHER), [TX]), []);
   });
 
   it("zcash_history shows the recipient and memo of a send", async () => {

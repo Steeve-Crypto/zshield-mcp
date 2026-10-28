@@ -89,7 +89,9 @@ export const REORG_SLACK_BLOCKS = 5;
  * low confidence candidate and is never confirmed on its own.
  */
 export function matchSend(t: TxSummary, target: SendTarget, startedAt: number): PossibleSend | undefined {
-  if (!/sent/i.test(t.kind) || t.status === "failed") return undefined;
+  // A calculated transaction was built and never broadcast; it is not a send. An entry the
+  // wallet's JSON does not vouch for may be a forgery and never counts.
+  if (!/sent/i.test(t.kind) || t.status === "failed" || t.status === "calculated" || t.verified === false) return undefined;
   // Memos are exact: accepted memos have no edge whitespace, and the listing parser trims
   // the edges it prints, so the two compare as plain strings. A call with an older memo
   // that has edge whitespace cannot match, and stays unknown.
@@ -129,7 +131,8 @@ export function lookalikeSends(
 ): TxSummary[] {
   const minHeight = target.notBeforeHeight === undefined ? undefined : target.notBeforeHeight - REORG_SLACK_BLOCKS;
   return txs.filter((t) => {
-    if (!/sent/i.test(t.kind) || t.status === "failed") return false;
+    // An unverified entry is kept: it cannot confirm anything, but it must block "not sent".
+    if (!/sent/i.test(t.kind) || t.status === "failed" || t.status === "calculated") return false;
     if (t.valueZats !== target.amountZats && !(t.outgoing ?? []).some((n) => n.valueZats === target.amountZats)) return false;
     const owner = claimedBy?.(t.txid);
     if (owner && owner !== callId) return false;
@@ -764,6 +767,20 @@ async function runPay(
                 throw new FenceError(lostLeaseMessage(e));
               }
             },
+            stage: (txid) => {
+              // Between signing and transmitting: the lease must still be this call's, and
+              // the txid is recorded durably first. If either fails, nothing is transmitted.
+              try {
+                lock!.assertHeld();
+              } catch (e) {
+                throw new FenceError(lostLeaseMessage(e));
+              }
+              try {
+                store.stageTxid(callId, txid, now());
+              } catch (e) {
+                throw new Error(`The signed transaction could not be recorded, so it was not transmitted: ${e instanceof Error ? e.message : String(e)}`);
+              }
+            },
           });
           mockTxid = receipt.txid;
           status = "ok";
@@ -778,13 +795,17 @@ async function runPay(
         } catch (e) {
           if (e instanceof SendOutcomeUnknownError) {
             fail("unknown", "SEND_UNCONFIRMED", `${SEND_UNCONFIRMED_GUIDANCE} Detail: ${redactInput(e.message, input)}`);
-            possibleSends = await findPossibleSends(
-              chain,
-              { amountZats, recipient: input.recipient, memo: input.memo },
-              startedAt,
-              (txid) => safeOwner(store, txid),
-              callId
-            );
+            // A send that got as far as signing has its txid on record: that one transaction
+            // is the candidate. Otherwise look through the history.
+            possibleSends = e.txid
+              ? [{ txid: e.txid, confidence: "high", matched: ["txid"], status: "signed" }]
+              : await findPossibleSends(
+                  chain,
+                  { amountZats, recipient: input.recipient, memo: input.memo },
+                  startedAt,
+                  (txid) => safeOwner(store, txid),
+                  callId
+                );
             recordSafely(store, { ts: now(), call_id: callId, state: "unknown", code, error, possible_sends: possibleSends, by: "send" }, warnings);
           } else if (e instanceof FenceError || e instanceof WalletBusyError) {
             // Neither started zingo-cli: the lease was lost at the fence, or the wallet's OS

@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LiveChainAdapter, parseTxid, type CliRunner } from "../src/chain/live.ts";
+import { LiveChainAdapter, parseStaged, type CliRunner } from "../src/chain/live.ts";
 import { addressNetwork, assertTestnetAddress } from "../src/chain/network.ts";
 import { executePay } from "../src/tools/pay.ts";
 import type { Config } from "../src/types.ts";
@@ -74,9 +74,9 @@ describe("LiveChainAdapter", () => {
     await assert.rejects(a.pay({ amountZats: -1n, recipient: UTEST }), /positive integer/);
     assert.equal(calls.length, 0);
   });
-  it("parseTxid errors on missing or error output", () => {
-    assert.throws(() => parseTxid("Error: proposal failed"), /send error/);
-    assert.throws(() => parseTxid("{}"), /without a txid/);
+  it("parseStaged errors on missing or error output", () => {
+    assert.throws(() => parseStaged("Error: proposal failed"), /send error/);
+    assert.throws(() => parseStaged("{}"), /exactly one transaction/);
   });
 });
 

@@ -245,6 +245,8 @@ async function fromChain(
     return { ...common, ...(await byTxid(chain, r.txid, started, now, offline)) };
   }
   if (r.status === "not_found") return { ...common, state: "expired", code: "PAYMENT_EXPIRED", message: r.note };
+  if (r.status === "failed") return failedStatus(base, amount, r.txid, r.note);
+  if (r.status === "broadcast") return { ...common, state: "broadcast", txid: r.txid, message: r.note };
   const candidates = r.possible_sends ?? [];
   if (candidates.length === 1 && candidates[0].status !== "failed" && placedInTime(candidates[0]) && !rivals) {
     return { ...common, state: "broadcast", txid: candidates[0].txid, possible_sends: candidates, message: r.note };

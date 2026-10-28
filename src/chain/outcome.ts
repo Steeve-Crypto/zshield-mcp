@@ -14,8 +14,11 @@ export class CliTimeoutError extends Error {
  * Callers must not retry without checking wallet history first.
  */
 export class SendOutcomeUnknownError extends Error {
-  constructor(message: string) {
+  /** The txid that was bound before the transmit step, when the send got that far. */
+  readonly txid?: string;
+  constructor(message: string, txid?: string) {
     super(message);
+    this.txid = txid;
     this.name = "SendOutcomeUnknownError";
   }
 }

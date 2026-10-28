@@ -148,14 +148,17 @@ describe("history limit", () => {
 });
 
 describe("LiveChainAdapter.getHistory", () => {
-  it("runs only the transactions command and applies the limit", async () => {
+  it("runs only read commands and applies the limit", async () => {
     const calls: string[][] = [];
     const a = new LiveChainAdapter({ network: "testnet", runner: runnerFor(TRANSACTIONS_OUT, calls) });
     const txs = await a.getHistory(2);
     assert.deepEqual(txs.map((t) => t.txid), [PENDING, TX]);
-    assert.equal(calls.length, 1);
     assert.deepEqual(calls[0].slice(0, 2), ["--chain", "testnet"]);
-    assert.equal(calls[0].at(-1), "transactions");
+    assert.equal(calls.at(-1)?.at(-1), "transactions");
+    // The machine-readable commands come first; this runner cannot answer them in JSON, so
+    // nothing in the listing is vouched for.
+    for (const c of calls) assert.ok(["notes", "all", "coins", "messages", "transactions"].includes(c.at(-1)!), c.join(" "));
+    assert.ok(txs.every((t) => t.verified === false));
   });
 });
 

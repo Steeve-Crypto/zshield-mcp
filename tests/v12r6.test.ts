@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
-import { buildSendInput, LiveChainAdapter, parseTransactions, type CliRunner } from "../src/chain/live.ts";
+import { buildStageInput, LiveChainAdapter, parseTransactions, type CliRunner } from "../src/chain/live.ts";
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -43,9 +43,9 @@ describe("memo: exact, validated, one form everywhere", () => {
   });
 
   it("the send line carries the memo exactly, and the adapter refuses one that is not matchable", async () => {
-    const line = buildSendInput({ amountZats: 10000n, recipient: R, memo: "pay it" });
+    const line = buildStageInput({ amountZats: 10000n, recipient: R, memo: "pay it" });
     assert.match(line, /"memo":"pay it"/);
-    assert.doesNotMatch(buildSendInput({ amountZats: 10000n, recipient: R, memo: "" }), /memo/);
+    assert.doesNotMatch(buildStageInput({ amountZats: 10000n, recipient: R, memo: "" }), /memo/);
     let ran = 0;
     const a = new LiveChainAdapter({ network: "testnet", dataDir: "/w", runner: async () => { ran++; return ""; } });
     await assert.rejects(a.pay({ amountZats: 10000n, recipient: R, memo: "pay it " }), /Memo refused/);
@@ -238,16 +238,20 @@ describe("OS wallet lock: the wallet process itself is excluded", () => {
       if (args.at(-1) === "info") return '{"latest_block_height": 1000}';
       if (args.at(-1) === "height") return '{"height": 1000}';
       if (args.at(-1) === "spendable_balance") return '{"spendable_balance": 5}';
-      return `{ "txids": ["${tx(5)}"] }`;
+      return `{ "fee": 10000 }\n{ "txids": ["${tx(5)}"] }`;
     };
     const a = new LiveChainAdapter({ network: "testnet", runner, dataDir: d, stateDir: join(d, ".zshield-state") });
     await a.checkHealth({ sync: false });
     await a.pay({ amountZats: 1000n, recipient: R });
     assert.ok(seen.length >= 4);
     for (const s of seen) assert.equal(s.opts?.lockFile, join(d, ".zshield-state", "zingo.flock"));
-    const send = seen.at(-1)!.opts!;
+    // The build step and the transmit step both wait for the lock and have a start deadline.
+    assert.ok(seen.at(-2)!.opts!.input?.startsWith("send '"));
+    assert.ok(seen.at(-1)!.opts!.input?.startsWith("transmit "));
+    for (const send of [seen.at(-2)!.opts!, seen.at(-1)!.opts!])
     assert.ok((send.lockWaitMs ?? 0) > 0 && (send.lockWaitMs ?? 0) <= 60_000);
-    assert.ok((send.lockDeadlineMs ?? 0) > Date.now() - 1000 && (send.lockDeadlineMs ?? 0) <= Date.now() + 120_000);
+    for (const send of [seen.at(-2)!.opts!, seen.at(-1)!.opts!])
+      assert.ok((send.lockDeadlineMs ?? 0) > Date.now() - 1000 && (send.lockDeadlineMs ?? 0) <= Date.now() + 120_000);
   });
 
   it("a wallet held by another process is a BUSY refusal: not sent, nothing recorded as sent", async () => {

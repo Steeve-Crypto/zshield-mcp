@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildSendInput, defaultRunner, LiveChainAdapter, type CliRunner, type RunOptions } from "../src/chain/live.ts";
+import { buildStageInput, defaultRunner, LiveChainAdapter, type CliRunner, type RunOptions } from "../src/chain/live.ts";
 import { withUfvk } from "./helpers.ts";
 
 const UTEST = "utest1" + "q".repeat(100);
@@ -20,7 +20,8 @@ const NASTY = [
 
 /** Undo zingo-cli's line handling: one POSIX single-quoted argument after the command name. */
 function decodeSendLine(input: string): { command: string; json: unknown } {
-  const [line, quit, rest] = input.split("\n");
+  const [line, calculate, quit, rest] = input.split("\n");
+  assert.equal(calculate, "calculate");
   assert.equal(quit, "quit");
   assert.equal(rest, "");
   const m = line.match(/^(\w+) '([^']*)'$/);
@@ -28,25 +29,25 @@ function decodeSendLine(input: string): { command: string; json: unknown } {
   return { command: m[1], json: JSON.parse(m[2]) };
 }
 
-describe("buildSendInput", () => {
+describe("buildStageInput", () => {
   for (const memo of NASTY) {
     it(`round-trips ${JSON.stringify(memo)}`, () => {
-      const input = buildSendInput({ amountZats: 123_456n, recipient: UTEST, memo });
+      const input = buildStageInput({ amountZats: 123_456n, recipient: UTEST, memo });
       const { command, json } = decodeSendLine(input);
-      assert.equal(command, "quicksend");
+      assert.equal(command, "send");
       assert.deepEqual(json, [{ address: UTEST, amount: 123456, memo }]);
     });
   }
   it("leaves memo out when there is none", () => {
-    const { json } = decodeSendLine(buildSendInput({ amountZats: 1n, recipient: UTEST }));
+    const { json } = decodeSendLine(buildStageInput({ amountZats: 1n, recipient: UTEST }));
     assert.deepEqual(json, [{ address: UTEST, amount: 1 }]);
   });
   it("keeps the 21M ZEC maximum exact", () => {
-    const { json } = decodeSendLine(buildSendInput({ amountZats: 2_100_000_000_000_000n, recipient: UTEST }));
+    const { json } = decodeSendLine(buildStageInput({ amountZats: 2_100_000_000_000_000n, recipient: UTEST }));
     assert.equal((json as { amount: number }[])[0].amount, 2_100_000_000_000_000);
   });
   it("refuses an amount it cannot encode exactly", () => {
-    assert.throws(() => buildSendInput({ amountZats: 2n ** 60n, recipient: UTEST }), /too large/);
+    assert.throws(() => buildStageInput({ amountZats: 2n ** 60n, recipient: UTEST }), /too large/);
   });
 });
 
@@ -88,7 +89,11 @@ describe("defaultRunner with input", () => {
 let input = "";
 process.stdin.on("data", (d) => (input += d));
 process.stdin.on("end", () => {
-  require("node:fs").writeFileSync(${JSON.stringify(record)}, JSON.stringify({ argv: process.argv.slice(2), input }));
+  const fs = require("node:fs");
+  const seen = fs.existsSync(${JSON.stringify(record)}) ? JSON.parse(fs.readFileSync(${JSON.stringify(record)}, "utf8")) : [];
+  seen.push({ argv: process.argv.slice(2), input });
+  fs.writeFileSync(${JSON.stringify(record)}, JSON.stringify(seen));
+  console.log(JSON.stringify({ fee: 10000 }));
   console.log(JSON.stringify({ txids: ["${TXID}"] }));
   console.error("Save task shutdown successfully.");
 });
@@ -100,11 +105,15 @@ process.stdin.on("end", () => {
 
   it("writes the input to stdin, keeps argv clean, and appends stderr", async () => {
     const { bin, record } = fakeCli();
-    const a = new LiveChainAdapter({ network: "testnet", zingoBin: bin, dataDir: "/tmp/none", runner: withUfvk(defaultRunner) });
+    const a = new LiveChainAdapter({ network: "testnet", zingoBin: bin, dataDir: "/tmp/none", runner: withUfvk(defaultRunner, {}, false) });
     const memo = "it's private, \"really\" \\ ok";
     const r = await a.pay({ amountZats: 5_000n, recipient: UTEST, memo });
     assert.equal(r.txid, TXID);
-    const seen = JSON.parse(readFileSync(record, "utf8"));
+    const runs = JSON.parse(readFileSync(record, "utf8"));
+    // Step one builds the transaction, step two transmits that txid.
+    assert.equal(runs.length, 2);
+    assert.match(runs[1].input, new RegExp(`^transmit ${TXID}\\n`));
+    const seen = runs[0];
     assert.ok(!seen.argv.join(" ").includes("private"));
     assert.ok(!seen.argv.includes(UTEST));
     const { json } = decodeSendLine(seen.input);
