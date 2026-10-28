@@ -1,23 +1,13 @@
 import { resolveWalletDir } from "./chain/live.js";
 import { assertWalletPrivate } from "./chain/perms.js";
-import {
-  assertWindowsWalletPrivate,
-  defaultHardener,
-  defaultIcacls,
-  type AclHardener,
-  type IcaclsRunner,
-} from "./chain/winacl.js";
 import type { Config } from "./types.js";
-import { mkdirSync, readdirSync } from "node:fs";
+import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fallbackAuditPath } from "./audit/log.js";
 import { checkPrivateFile, ensurePrivateDir } from "./fsafe.js";
 import { resolveStateDir, walletStateDir } from "./payments/store.js";
 
 export interface StartupDeps {
-  icacls?: IcaclsRunner;
-  env?: NodeJS.ProcessEnv;
-  harden?: AclHardener;
   /** The payment store folder; defaults to the one createChain gives the chain. */
   stateDir?: string;
 }
@@ -32,7 +22,7 @@ export function stateDirFor(config: Config): string {
  * The audit dir, the audit fallback file, and the payment store hold recipients, memos,
  * and payment state. On POSIX: create them private, refuse a symlink or another owner
  * (for the dirs and every file in them), and repair loose modes, returning a note for each
- * repair. Windows has no modes; the ACL is checked in testnet mode instead.
+ * repair. Windows has no modes and no check: mock state there has no ACL protection.
  */
 export function checkRecordPaths(config: Config, stateDir: string, platform: string = process.platform): string[] {
   if (platform === "win32") return [];
@@ -57,8 +47,8 @@ export function checkRecordPaths(config: Config, stateDir: string, platform: str
  * Checks that must pass before the server accepts any call. Throws with a message meant
  * for the operator. In testnet mode: the network must be testnet, and the wallet directory
  * must not be open to group or other users. Returns warnings to print, such as a loose
- * file mode inside a private wallet directory. On Windows the wallet ACL is checked with
- * icacls instead. Mock mode has no wallet to check.
+ * file mode inside a private wallet directory. Live mode is refused on Windows. Mock mode
+ * has no wallet to check.
  */
 export function startupChecks(config: Config, platform: string = process.platform, deps: StartupDeps = {}): string[] {
   if (config.chainMode !== "live") {
@@ -67,22 +57,11 @@ export function startupChecks(config: Config, platform: string = process.platfor
   if (config.chainNetwork !== "testnet") {
     throw new Error("zshield-mcp: live mode requires CHAIN_MODE=testnet. Mainnet is refused.");
   }
+  if (platform === "win32") {
+    throw new Error("zshield-mcp: testnet mode is not supported on Windows. Use mock mode there, or run testnet mode on Linux or macOS.");
+  }
   const dataDir = resolveWalletDir(config.zingoDataDir);
   const stateDir = deps.stateDir ?? walletStateDir(dataDir);
-  if (platform === "win32") {
-    // POSIX modes mean nothing on Windows; check the ACLs instead: the wallet, then the
-    // audit dir and the payment store, which name recipients and amounts.
-    const icacls = deps.icacls ?? defaultIcacls;
-    const env = deps.env ?? process.env;
-    const harden = deps.harden ?? defaultHardener;
-    // Create them now so their ACL is checked before the first payment row lands in them.
-    // The wallet directory first: a new one must exist to have an ACL worth checking.
-    for (const dir of [dataDir, config.auditDir, stateDir]) mkdirSync(dir, { recursive: true });
-    const warnings = assertWindowsWalletPrivate(dataDir, icacls, env, harden);
-    warnings.push(...assertWindowsWalletPrivate(config.auditDir, icacls, env, harden, "The audit log names recipients and amounts"));
-    warnings.push(...assertWindowsWalletPrivate(stateDir, icacls, env, harden, "The payment store names recipients and amounts"));
-    return warnings;
-  }
   const warnings = assertWalletPrivate(dataDir, platform);
   warnings.push(...checkRecordPaths(config, stateDir, platform));
   return warnings;
@@ -102,9 +81,8 @@ export function runStartup(config: Config, platform: string = process.platform, 
  * In testnet mode, make every file this process and its zingo-cli children create private
  * (umask 077). zingo-cli rewrites the wallet file on each save, so this keeps it at 600
  * when the server is the one running zingo-cli. Audit files become 600 as well.
- * Returns the previous umask, or undefined when nothing changed. Windows has no umask;
- * there the startup ACL check requires a private wallet directory, whose inheritable
- * entries then apply to every file created in it.
+ * Returns the previous umask, or undefined when nothing changed. Windows has no umask
+ * and no live mode.
  */
 export function restrictUmask(config: Config, platform: string = process.platform): number | undefined {
   if (config.chainMode !== "live" || platform === "win32") return undefined;

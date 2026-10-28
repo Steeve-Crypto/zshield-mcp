@@ -9,6 +9,7 @@ import { fallbackAuditPath } from "../src/audit/log.ts";
 import { paymentParamsHash, resetPaymentStores, storeFor, walletStateDir } from "../src/payments/store.ts";
 import { executePay } from "../src/tools/pay.ts";
 import type { PaymentReceipt, PaymentRequest } from "../src/types.ts";
+import { startupChecks } from "../src/startup.ts";
 import { ALLOWED, tempConfig } from "./helpers.ts";
 
 // V12 run 6 decision tests (F-24 to F-25, F-29 to F-33, F-35, F-36).
@@ -91,5 +92,35 @@ describe("F-25, F-29, F-36: audit rows never seed the payment store", () => {
     assert.equal(sent.length, 0);
     assert.equal(r.idempotent_replay, true);
     assert.equal(r.call_id, "old-import-1");
+  });
+});
+
+describe("F-32, F-33: no live mode on Windows, and no ACL code", () => {
+  const live = () => tempConfig({ chainMode: "live", chainNetwork: "testnet", zingoDataDir: mkdtempSync(join(tmpdir(), "zshield-winwallet-")) });
+
+  it("live mode refuses to start on win32 with a clear error", () => {
+    assert.throws(() => startupChecks(live(), "win32"), /testnet mode is not supported on Windows/);
+  });
+
+  it("mock mode still starts on win32, with no ACL check", () => {
+    assert.deepEqual(startupChecks(tempConfig(), "win32"), []);
+  });
+
+  it("the ACL parser is gone", () => {
+    assert.equal(existsSync(new URL("../src/chain/winacl.ts", import.meta.url)), false);
+  });
+
+  it("wrapForWallet still refuses on win32 and nothing is built", async () => {
+    const { wrapForWallet, WalletBusyError } = await import("../src/chain/walletlock.ts");
+    const real = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      assert.throws(
+        () => wrapForWallet("zingo-cli", ["info"], { lockFile: join(tmpdir(), "x", "zingo.flock"), waitMs: 1000 }),
+        (e: unknown) => e instanceof WalletBusyError && e.kind === "unavailable"
+      );
+    } finally {
+      Object.defineProperty(process, "platform", real);
+    }
   });
 });
