@@ -18,7 +18,7 @@ import { WALLET_LOCK_FILE } from "../src/payments/filelock.ts";
 import { resetPaymentStores as resetPaymentIndexes } from "../src/payments/store.ts";
 import { matchSend } from "../src/tools/pay.ts";
 import { paymentStatus } from "../src/tools/status.ts";
-import { tempConfig, walletJson } from "./helpers.ts";
+import { seedCall, tempConfig, walletJson } from "./helpers.ts";
 
 // Captured read-only from the testnet wallet on Oct 27 2026. Nothing was sent to capture them.
 const fixture = (n: string) => readFileSync(new URL(`./fixtures/zingo/${n}`, import.meta.url), "utf8");
@@ -66,9 +66,13 @@ describe("zcash_payment_status syncs first, on real zingo-cli output", () => {
   function setup(syncComplete: boolean | "busy") {
     const config = tempConfig({ chainMode: "live" });
     const base = { tool: "zcash_pay" as const, call_id: "806e0f74", amount_zec: "0.0001", amount_zats: "10000", recipient: RECIPIENT, allowlist_hit: true, cap_zec: "0.01", view_key_fingerprint: "3cafd3c7bb2e8887", memo: "zshield reliable sends", idempotency_key: "reliable-sends-20261027-01" };
-    appendAuditEntry(config.auditDir, { ...base, ts: new Date(SENT_AT).toISOString(), status: "pending", params_sha256: "p" });
-    appendAuditEntry(config.auditDir, { ...base, ts: new Date(SENT_AT + 70_000).toISOString(), status: "ok", mock_txid: TXID });
     const dir = mkdtempSync(join(tmpdir(), "zshield-wallet-"));
+    seedCall(
+      config,
+      { ...base, ts: new Date(SENT_AT).toISOString(), status: "pending", params_sha256: "p" },
+      { stateDir: dir },
+      { ...base, ts: new Date(SENT_AT + 70_000).toISOString(), status: "ok", mock_txid: TXID }
+    );
     if (syncComplete === "busy") {
       writeFileSync(join(dir, WALLET_LOCK_FILE), JSON.stringify({ pid: process.pid, host: hostname(), started: new Date().toISOString(), purpose: "zcash_pay", token: "t" }));
     }

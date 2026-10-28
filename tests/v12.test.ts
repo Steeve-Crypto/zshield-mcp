@@ -14,7 +14,7 @@ import { executePay, findPossibleSends } from "../src/tools/pay.ts";
 import { paymentStatus } from "../src/tools/status.ts";
 import type { AuditEntry, Config, TxSummary } from "../src/types.ts";
 import { storeFor } from "../src/payments/store.ts";
-import { connect, tempConfig, walletJson, withEnv, withUfvk } from "./helpers.ts";
+import { connect, tempConfig, walletJson, withEnv, withUfvk, seedCall } from "./helpers.ts";
 
 // One regression test (or more) per V12 finding on ff2254b. They only use entry points
 // that exist on both sides, so each one can be run against ff2254b to show it fails there.
@@ -40,7 +40,7 @@ function liveConfig(): Config {
 }
 
 function pendingRow(config: Config, callId: string, extra: Partial<AuditEntry> = {}) {
-  appendAuditEntry(config.auditDir, {
+  seedCall(config, {
     ts: new Date(T0).toISOString(), tool: "zcash_pay", call_id: callId, amount_zec: "0.0001", amount_zats: "10000",
     recipient: R, allowlist_hit: true, cap_zec: "0.01", status: "pending", view_key_fingerprint: "f", memo: "inv-7", ...extra,
   } as AuditEntry);
