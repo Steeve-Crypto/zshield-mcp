@@ -136,7 +136,10 @@ export async function reconcile(record: CallRecord, chain: ChainAdapter, opts: R
   try {
     const txs = await chain.getHistory(Infinity, { offline: opts.offline });
     for (const t of txs) heights.set(t.txid, t.blockHeight);
-    matches = matchHistory(txs, target, startedAt, opts.claimedBy, record.callId);
+    // A two-step call transmits only after its transaction id is on record, and this one has
+    // none: nothing was transmitted, so no entry in the history is its own. Entries of the
+    // same amount can only be lookalikes that block a "not sent" answer.
+    matches = intent.two_step ? [] : matchHistory(txs, target, startedAt, opts.claimedBy, record.callId);
     if (matches.length === 0) {
       lookalikes = lookalikeSends(txs, target, startedAt, opts.claimedBy, record.callId).map((t) => ({
         txid: t.txid, confidence: "low" as const, matched: ["amount"], status: t.status,
@@ -146,7 +149,9 @@ export async function reconcile(record: CallRecord, chain: ChainAdapter, opts: R
     return { ...base, status: "unknown", note: `Wallet history could not be read: ${e instanceof Error ? e.message : String(e)}` };
   }
   const mined = matches.filter((m) => m.status === "confirmed");
-  if (mined.length === 1 && matches.length === 1 && !opts.rivals && placedInTime(mined[0])) {
+  // One entry is not proof of which payment it was: without a memo, the same recipient and
+  // amount in the same minutes could be any other payment, so only a memo confirms.
+  if (mined.length === 1 && matches.length === 1 && !opts.rivals && placedInTime(mined[0]) && mined[0].matched.includes("memo")) {
     const m = mined[0];
     return {
       ...base,
@@ -169,7 +174,9 @@ export async function reconcile(record: CallRecord, chain: ChainAdapter, opts: R
             ? "Another unsettled payment is identical (same recipient, amount, and memo), so this transaction cannot be told apart. Check by hand. Do not pay again."
             : mined.length === 1 && !placedInTime(mined[0])
               ? "A matching mined transaction has no time and no height that places it after this call started. Check by hand. Do not pay again."
-              : "A matching transaction was found but is not mined yet. Do not pay again.",
+              : mined.length === 1 && !mined[0].matched.includes("memo")
+                ? "A mined transaction has this recipient and amount, but this payment had no memo to tell it from any other payment of the same amount. Check by hand. Do not pay again."
+                : "A matching transaction was found but is not mined yet. Do not pay again.",
     };
   }
   if (lookalikes.length > 0) {

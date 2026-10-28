@@ -701,6 +701,7 @@ async function runPay(
         ...keyFields,
         chain_tip: chainTip,
         wallet_height: walletHeight,
+        ...(chain.mode === "live" ? { two_step: true } : {}),
       };
       let ready = false;
       try {

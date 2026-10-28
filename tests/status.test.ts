@@ -17,7 +17,7 @@ const TX = "ab".repeat(32);
 function pending(config: Config, callId: string, extra: Partial<AuditEntry> = {}) {
   appendAuditEntry(config.auditDir, {
     ts: new Date(T0).toISOString(), tool: "zcash_pay", call_id: callId, amount_zec: "0.0001", amount_zats: "10000",
-    recipient: R, allowlist_hit: true, cap_zec: "0.01", status: "pending", view_key_fingerprint: "f", ...extra,
+    recipient: R, allowlist_hit: true, cap_zec: "0.01", status: "pending", view_key_fingerprint: "f", memo: "inv-7", ...extra,
   });
 }
 function result(config: Config, callId: string, extra: Partial<AuditEntry>) {
@@ -30,7 +30,7 @@ function result(config: Config, callId: string, extra: Partial<AuditEntry>) {
 function tx(over: Partial<TxSummary> = {}): TxSummary {
   return {
     txid: TX, time: new Date(T0 + 2000).toISOString(), status: "confirmed", blockHeight: 500, kind: "sent",
-    valueZats: -10000n, outgoing: [{ recipient: R, valueZats: 10000n, memo: "" }], ...over,
+    valueZats: -10000n, outgoing: [{ recipient: R, valueZats: 10000n, memo: "inv-7" }], ...over,
   };
 }
 function chain(history: TxSummary[], height = 505) {
@@ -112,12 +112,13 @@ describe("zcash_payment_status", () => {
     assert.equal(s.state, "unknown");
   });
 
-  it("SEND_UNCONFIRMED with one unmined candidate is broadcast", async () => {
+  it("SEND_UNCONFIRMED with one unmined candidate stays unknown: a candidate is not this call's transaction", async () => {
     const config = tempConfig();
     result(config, "c1", { status: "unknown", code: "SEND_UNCONFIRMED" });
     const s = await paymentStatus(config, chain([tx({ status: "mempool", blockHeight: undefined })]).c, { call_id: "c1" }, T0 + 60_000);
-    assert.equal(s.state, "broadcast");
-    assert.equal(s.txid, TX);
+    assert.equal(s.state, "unknown");
+    assert.equal(s.txid, undefined, "no txid is claimed for the call");
+    assert.deepEqual(s.possible_sends?.map((p) => p.txid), [TX]);
     assert.equal(s.code, "SEND_UNCONFIRMED");
   });
 

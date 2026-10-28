@@ -59,6 +59,11 @@ export interface CallIntent {
   wallet_height?: number;
   /** Where it came from when imported from an older audit log */
   imported?: boolean;
+  /**
+   * Set by a live send, which signs the transaction and records its id before it transmits
+   * anything. Such a call with no recorded id never transmitted: no history entry is its own.
+   */
+  two_step?: boolean;
 }
 
 export interface CallEvent {
