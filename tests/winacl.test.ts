@@ -102,3 +102,19 @@ describe("Windows wallet directory that does not exist yet", () => {
   });
 });
 
+
+describe("Windows has no OS wallet lock, so no wallet command starts", () => {
+  it("wrapForWallet refuses on win32 and nothing is built", async () => {
+    const { wrapForWallet, WalletBusyError } = await import("../src/chain/walletlock.ts");
+    const real = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      assert.throws(
+        () => wrapForWallet("zingo-cli", ["info"], { lockFile: join(tmpdir(), "x", "zingo.flock"), waitMs: 1000 }),
+        (e: unknown) => e instanceof WalletBusyError && e.kind === "unavailable"
+      );
+    } finally {
+      Object.defineProperty(process, "platform", real);
+    }
+  });
+});

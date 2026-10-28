@@ -24,6 +24,8 @@ Layout:
 - `pending/<call id>`: a marker for a call whose outcome is not settled yet. Recovery lists only this folder.
 - `txids/<txid>`: which call a txid belongs to, created exclusively, so recovery never credits one transaction to two calls.
 - `wallet.lock`: the wallet lease (below).
+- `zingo.flock`: the file the OS wallet lock (below) is taken on. It is empty.
+- `tip.json`: the highest chain tip seen for this wallet.
 - `meta.json`: store version.
 - `imports/<hash of audit paths>`: one marker per audit dir whose log was imported. The first time a server opens the store with a given `AUDIT_DIR` and fallback file, it imports the payments in that log once, then writes the marker. So a second server with its own older log brings its keys along too, and nothing rebuilds from the log again. Old `not_found` results come in as `unknown`, since they came from a truncated history. An `ok` row with no txid comes in as `sent`. The import costs about 15 seconds per 20,000 rows, once.
 
@@ -37,23 +39,42 @@ A lease is stale when its process is gone on this host, or when its mtime is old
 
 Fencing: the holder checks that the file is still its own (same inode, same content, so same token and `gen`) at the start, and again right before binding a key, right before broadcasting, and at the moment `zingo-cli` is started. That last check runs synchronously just before the process spawns, so nothing sits between it and the send. A renewal also marks the lease lost if more than half a lease time passed since the previous one, as after a long freeze. A holder that lost the lease stops and sends nothing, and the call is recorded `not sent` with `BUSY`. If it stalls after the last check, the exclusive key binding still stops a second send for the same key.
 
+## The OS wallet lock
+
+The lease above is a soft lock: it can be lost by a process that is frozen, and a new holder cannot stop the old process from waking up. So two wallet holders are kept apart by the operating system as well, whatever idempotency keys the payments use.
+
+Every `zingo-cli` process this server starts (sync, reads, send, transmit) is started through a small `perl` wrapper. The wrapper takes an exclusive `flock(2)` on `zingo.flock` and then `exec`s `zingo-cli`. The lock sits on a file descriptor that `zingo-cli` inherits, so the wallet process itself holds it for as long as it lives. A parent that is frozen, killed, or late cannot release it early or start a second wallet process beside the first:
+
+- A new holder's `zingo-cli` waits for a still-running old one.
+- A send carries a start deadline (45 seconds after its last fence check). A parent that wakes up past it gets a wrapper refusal and nothing starts.
+- The wrapper reports "did not start" with a stderr line that carries a random nonce known only to this process and the wrapper, plus a reserved exit code (75 busy, 76 late, 77 no lock, 78 exec). Only that line counts. Nothing `zingo-cli` prints can pass for it.
+- A wallet held by another process is a `BUSY` refusal: not sent, nothing recorded as sent.
+
+This needs `perl` and a POSIX platform. Without perl, or on Windows, live mode refuses every wallet command and sends nothing. Tests: `tests/v12r6.test.ts` (three processes, a killed parent, the start deadline, the nonce) and `tests/race.test.ts` (four processes, different keys, one frozen holder).
+
 ## A send, step by step
 
-1. Policy checks, then the viewing key fingerprint. No lock yet.
+1. Policy checks, a live send's required `idempotency_key`, then the viewing key fingerprint. No lock yet. The memo is checked once here, and this same string is what the policy sees, what the audit row and intent hold, and what is sent.
 2. If the key is already bound, replay its call. Nothing is sent.
 3. Take the in-process lock, then the wallet lease. Re-read the key, since another process may have bound it while this one waited.
 4. Health check: bounded sync, chain tip, funds. The tip must not be below the wallet's own height, nor below the highest tip recorded for this wallet, by more than 10 blocks, or the send is refused. It records the expiry anchor: the highest of the server tip, the wallet height, and the recorded mark. A failure here binds nothing, so the caller may retry with the same key.
 5. Fence check, then read the key once more (the health check can take minutes, and another process may have bound it), then write the intent event and the pending marker.
 6. Write the audit `pending` row. If it cannot reach disk, record `not sent` and stop.
 7. Fence check, then bind the key. Losing the key race means another call owns it: record `not sent` for this call and replay the winner.
-8. Broadcast. The last fence check runs synchronously right before `zingo-cli` starts. A send process that ignores a polite stop is killed outright after its timeout plus 5 seconds.
-9. Record the result event (`sent` with txid, `not sent` for a clear refusal, or `unknown`), claim the txid, write the audit result row, and clear the pending marker once settled.
+8. Send in two stages. First `send '<json>'` and `calculate` build and sign the transaction. Nothing is broadcast, and the output must hold one fee and one txid. Then the txid is written to the call (`stageTxid`), which also claims it, and fsynced. Only then is `transmit <txid>` run, and it counts only if its output names that txid. The last fence check runs synchronously right before each `zingo-cli` start. A send process that ignores a polite stop is killed outright after its timeout plus 5 seconds.
+9. Record the result event (`sent` with txid, `not sent` for a clear refusal, or `unknown`), write the audit result row, and clear the pending marker once settled.
 
 Binding last means an unbound key proves the call never reached the send. A call that crashed before binding can be retried with the same key.
+
+Staging the txid before `transmit` means a timeout or crash during the broadcast leaves the call's own transaction id on record. Recovery then asks the wallet about that txid, never about "a transaction that looks like it". A call that crashed before staging never transmitted anything.
 
 ## Recovery and status
 
 Recovery runs at startup and settles pending calls, one at a time, under the lease, each with a fresh read of the call's events. It reads the full wallet history once per run, never a fixed number of entries, and skips txids claimed by other calls.
+
+**A call with a staged txid** is settled by that txid: mined, still pending, failed, or absent. A different transaction with the same recipient, amount, and memo is never taken for it. **A call made by the two-step flow without a staged txid** never transmitted, so no history entry is attributed to it. It is `unknown` when lookalike sends exist, and otherwise the normal proof below applies. **A legacy call** (imported from an old audit log, or recorded before the two-step flow) has no txid, so it is matched by content: a lone match confirms it only when it carries the call's exact memo. A lone match for a call that had no memo cannot be told from any other payment of that amount, so it stays `unknown` with the candidate listed, and `zcash_payment_status` never claims such a candidate as the call's txid.
+
+**Machine-readable corroboration.** `zingo-cli` prints its history as text, so the text listing is never trusted alone. For each entry the adapter also reads `notes all`, `coins all` and `messages` as JSON and checks the transaction against them: for a send, the amount, the recipient (or its unified address), the memo, and the txid, status and height. An entry the JSON does not vouch for, or one the listing shows more than once, is `unverified`: it never confirms a call, and it still blocks a "not sent" proof. `zingo-cli` gives no JSON listing of the outgoing recipient of a memo-less send, so for those the recipient and amount come from the text and are only tied to the JSON by txid, status and height.
 
 A history entry is this call's send only if all of these hold: it is a sent transaction that is not failed; the amount is equal; the memo is equal (a call with no memo matches only a transaction with no memo, never someone else's memo payment); the recipient is equal, or equal to the note's unified address; and the entry is placed after the call started, by its time or, when it has none, by a block height that is not before the wallet height recorded at the send (less 5 blocks for a reorg). A single mined match that is not placed in time stays `unknown`. If another unsettled call has the same recipient, amount, and memo and started close in time, one transaction cannot be told apart between them, so both stay `unknown`. If nothing matches but an unclaimed sent transaction of the same amount sits near the call's time, the call stays `unknown` (the wallet may have listed the recipient in another form), never proven not sent.
 
@@ -77,13 +98,15 @@ Every timeout comes from a bounded setting. Values outside the range stop the se
 
 ## Known limits
 
-- The lease and fencing protect the wallet file from two writers in the common case. The last fence check runs right before `zingo-cli` starts, but a process can still be frozen by the OS between that check and the spawn, and then run one command beside a new holder. That can disturb the wallet file but cannot repeat a keyed payment, because of the exclusive binding.
+- Two wallet holders are kept apart by the OS lock (`flock` on `zingo.flock`, held by the `zingo-cli` process itself), not by the lease alone. The lease only decides which server process may start a send. The OS lock needs `perl` and a POSIX platform, works on a local filesystem (not on every network share), and does not cover a `zingo-cli` the operator starts by hand on the same wallet.
+- A transaction that was built (`calculate`) but never transmitted can stay in the wallet's pending list and hold its notes until the wallet drops it. It is never broadcast by this server, so it cannot pay anyone.
 - Breaking a stale lock moves the file aside for a moment. In that gap a holder sees its lock as removed and stops, which is safe. A different waiter could create a new lock in the gap only if the holder had already stalled past its lease. The window is a few microseconds and it fails closed.
 - Staleness is a stall policy: a live process that stops renewing for a whole lease time loses the lease. That is intended.
-- Calls without an idempotency key have no duplicate protection beyond the lease. That is by design: without a key there is no way to tell a retry from a new payment.
+- Live payments require an idempotency key. Only mock payments may go without one, and they move no money.
 - The expiry proof trusts the wallet's scan and the 40 block expiry that `zingo-cli` sets, plus the 30 block margin and the two hour floor. A wallet that skips a block range could still fool it. A call recorded before the wallet height was kept is never proven expired and stays `unknown`.
 - The tip mark (`tip.json` in the store) only rises. After a deliberate testnet reset, or a wallet moved to a different chain, sends are refused with `CHAIN_ERROR` until the file is removed by hand.
-- `zingo-cli` prints its history as human text, and a third party's incoming memo is part of that text. Newlines in memos are refused on the way out, but an incoming memo with crafted lines could still fake a transaction block in the listing, and the parser cannot tell. This is why a match needs time or height placement, equal memo, and a claim check, and why unplaced matches stay `unknown`. A machine-readable history from `zingo-cli` would remove the risk.
+- `zingo-cli` prints its history as human text, and a third party's incoming memo is part of that text. Newlines in memos are refused on the way out, but an incoming memo with crafted lines could still fake a transaction block in the listing. The JSON corroboration above catches a fake block (no matching note, coin or message), but a memo-less send is vouched for only by txid, status and height. This is why a match needs time or height placement, equal memo, a claim check and JSON corroboration, and why unplaced or unverified matches stay `unknown`.
+- A call from before the two-step flow, with no memo, never confirms from history. Its candidate is listed for a human to check.
 - Calls with identical recipient, amount, and memo started close together stay `unknown` until checked by hand.
 - Lease staleness is judged by the lock file's mtime. All processes on one wallet must share a clock: the same host, or a network share whose clock agrees with theirs.
 - The store needs hard links (`link`) for exclusive creates. On a filesystem without them, such as FAT, the first exclusive write fails and nothing is sent.
