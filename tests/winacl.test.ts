@@ -85,3 +85,20 @@ describe("Windows wallet ACL check (V12 F-11)", () => {
     assert.throws(check, /Everyone/);
   });
 });
+
+describe("Windows wallet directory that does not exist yet", () => {
+  it("is created and checked before zingo-cli can fill it, so a broad inherited ACL is refused", () => {
+    const parent = mkdtempSync(join(tmpdir(), "zshield-winnew-"));
+    const dir = join(parent, "wallet");
+    const config = tempConfig({ chainMode: "live", chainNetwork: "testnet", zingoDataDir: dir });
+    const seen: string[] = [];
+    const icacls = (p: string) => {
+      seen.push(p);
+      return icaclsOut(p, p === dir ? [...PRIVATE, "Everyone:(OI)(CI)(RX)"] : PRIVATE);
+    };
+    const deps = { icacls, env: {} } as Parameters<typeof startupChecks>[2];
+    assert.throws(() => startupChecks(config, "win32", deps), /Everyone/);
+    assert.ok(seen.includes(dir), "the new wallet directory was inspected");
+  });
+});
+
