@@ -35,7 +35,7 @@ export async function executeHistory(input: HistoryInput, deps: ReadDeps) {
     deps.config,
     async () => {
       const limit = checkLimit(input.limit);
-      return withWalletRead(storeFor(deps.config, deps.chain), "zcash_history", (offline) => deps.chain.getHistory(limit, { offline }));
+      return withWalletRead(storeFor(deps.config, deps.chain), "zcash_history", (offline) => deps.chain.getHistory(limit, { offline, verifiedOnly: true }));
     },
     (txs) => ({
       count: txs.length,

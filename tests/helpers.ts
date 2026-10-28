@@ -121,7 +121,7 @@ export async function withEnv<T>(name: string, value: string | undefined, fn: ()
  */
 export function walletJson(
   args: string[],
-  txs: { txid: string; status?: string; height?: number; memos?: { recipient: string; memo: string }[] }[]
+  txs: { txid: string; status?: string; height?: number; memos?: { recipient: string; memo: string; value?: number }[] }[]
 ): string | undefined {
   const last = args.at(-1);
   const prev = args.at(-2);
@@ -140,7 +140,7 @@ export function walletJson(
   if (prev === "coins" && last === "all") return pretty({ transparent_coins: [] });
   if (last === "messages") {
     return pretty({
-      value_transfers: txs.filter((t) => t.memos?.length).map((t) => ({ txid: t.txid, recipient_address: t.memos![0].recipient, memos: t.memos!.map((m) => m.memo) })),
+      value_transfers: txs.filter((t) => t.memos?.length).map((t) => ({ txid: t.txid, kind: "sent", value: t.memos![0].value, recipient_address: t.memos![0].recipient, memos: t.memos!.map((m) => m.memo) })),
     });
   }
   return undefined;

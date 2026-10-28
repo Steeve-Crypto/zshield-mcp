@@ -83,7 +83,13 @@ async function byTxid(
   now: number,
   offline: boolean
 ): Promise<Partial<PaymentStatus> & { state: PaymentState; message: string }> {
-  const tx = (await chain.getHistory(Infinity, { offline })).find((t) => t.txid === txid);
+  const found = (await chain.getHistory(Infinity, { offline })).filter((t) => t.txid === txid);
+  // Listed twice, or not vouched for by the wallet's JSON: a memo may have forged it. Nothing
+  // is read from it and nothing is recorded.
+  if (found.length > 1 || found[0]?.verified === false) {
+    return { state: "unknown", txid, message: "The wallet's listing for this transaction is ambiguous or not confirmed by the wallet's own JSON, so nothing was recorded. Check the explorer. Do not pay again." };
+  }
+  const tx = found[0];
   if (!tx) {
     return now - sentAt < RECOVERY_EXPIRY_MS
       ? { state: "broadcast", txid, message: "Sent; not in the wallet's history yet." }

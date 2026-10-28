@@ -18,7 +18,7 @@ import { WALLET_LOCK_FILE } from "../src/payments/filelock.ts";
 import { resetPaymentStores as resetPaymentIndexes } from "../src/payments/store.ts";
 import { matchSend } from "../src/tools/pay.ts";
 import { paymentStatus } from "../src/tools/status.ts";
-import { tempConfig } from "./helpers.ts";
+import { tempConfig, walletJson } from "./helpers.ts";
 
 // Captured read-only from the testnet wallet on Oct 27 2026. Nothing was sent to capture them.
 const fixture = (n: string) => readFileSync(new URL(`./fixtures/zingo/${n}`, import.meta.url), "utf8");
@@ -77,6 +77,8 @@ describe("zcash_payment_status syncs first, on real zingo-cli output", () => {
     const runner: CliRunner = async (_b, args) => {
       calls.push(args);
       const last = args.at(-1);
+      const json = walletJson(args, [{ txid: TXID, height: 4547481, memos: [{ recipient: RECIPIENT, memo: "zshield reliable sends", value: 10000 }] }]);
+      if (json !== undefined) return json;
       if (last === "transactions") return fixture("transactions.txt");
       if (last === "height") return fixture("height-synced.txt");
       throw new Error(`unexpected ${args.join(" ")}`);

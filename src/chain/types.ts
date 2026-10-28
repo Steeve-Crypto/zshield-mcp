@@ -16,8 +16,9 @@ export interface ChainAdapter {
   /**
    * Read-only. Up to `limit` recent transactions, newest first; `Infinity` for the whole
    * history. `offline` reads the wallet as last synced, without starting a sync.
+   * `verifiedOnly` leaves out entries the wallet's JSON does not vouch for (live chain).
    */
-  getHistory(limit: number, opts?: { offline?: boolean }): Promise<TxSummary[]>;
+  getHistory(limit: number, opts?: { offline?: boolean; verifiedOnly?: boolean }): Promise<TxSummary[]>;
   /**
    * Read-only. The wallet's unified full viewing key, used only to compute the salted
    * audit fingerprint. Callers must never log, store, or return it.
