@@ -366,9 +366,11 @@ export class LiveChainAdapter implements ChainAdapter {
   /**
    * Read-only: runs `transactions` and returns the newest `limit` entries. zingo-cli
    * prints the whole wallet history, so `Infinity` returns all of it. With `offline`,
-   * reads the wallet file as last synced and starts no sync of its own.
+   * reads the wallet file as last synced and starts no sync of its own. Entries carry
+   * `verified`. With `verifiedOnly`, an entry the wallet's JSON does not vouch for, or one
+   * listed twice, is left out before the limit applies, and unreadable JSON is an error.
    */
-  async getHistory(limit: number, opts: { offline?: boolean } = {}): Promise<TxSummary[]> {
+  async getHistory(limit: number, opts: { offline?: boolean; verifiedOnly?: boolean } = {}): Promise<TxSummary[]> {
     const run = (...cmd: string[]) => this.exec(opts.offline ? [...this.offline(cmd[0]), ...cmd.slice(1)] : [...this.baseArgs(), ...cmd], { timeoutMs: readTimeoutMs() });
     // The JSON commands first, then the listing: an entry that appeared in between is not
     // in the JSON and so stays unverified, never the other way round.
@@ -382,10 +384,12 @@ export class LiveChainAdapter implements ChainAdapter {
       // No second source: every sent entry stays unverified and confirms nothing.
       wallet = undefined;
     }
+    if (!wallet && opts.verifiedOnly) throw new Error("zingo-cli's JSON output could not be read, so the listing cannot be checked.");
     const all = parseTransactions(await run("transactions"));
     const times = new Map<string, number>();
     for (const t of all) times.set(t.txid, (times.get(t.txid) ?? 0) + 1);
-    return all.slice(0, limit).map((t) => ({ ...t, verified: corroborate(t, wallet, times.get(t.txid) ?? 0) }));
+    const checked = all.map((t) => ({ ...t, verified: corroborate(t, wallet, times.get(t.txid) ?? 0) }));
+    return (opts.verifiedOnly ? checked.filter((t) => t.verified) : checked).slice(0, limit);
   }
 
   /** Read-only: runs `addresses` and returns the newest unified address. Refuses a mainnet one. */

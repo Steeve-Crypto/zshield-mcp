@@ -4,7 +4,7 @@ import { MockChainAdapter, MOCK_FEE_ZATS } from "../src/chain/mock.ts";
 import { LiveChainAdapter, parseTransactions, type CliRunner } from "../src/chain/live.ts";
 import { checkLimit, executeHistory, HISTORY_MAX_LIMIT } from "../src/tools/history.ts";
 import { executePay } from "../src/tools/pay.ts";
-import { ALLOWED, readAuditRows, tempConfig } from "./helpers.ts";
+import { ALLOWED, readAuditRows, tempConfig, walletJson } from "./helpers.ts";
 
 const RX = "c0f2f121316f6429929491e259144d1b31689364732c387ca9a2f0c76268ad06";
 const TX = "59d9cb1b5a473a84602c4812a7809217f6e9d359174deb178e7fd52c151ae8fc";
@@ -193,7 +193,9 @@ describe("executeHistory", () => {
 
   it("adds explorer links in live mode", async () => {
     const config = tempConfig({ chainMode: "live", chainNetwork: "testnet" });
-    const chain = new LiveChainAdapter({ network: "testnet", runner: runnerFor(TRANSACTIONS_OUT) });
+    const runner: CliRunner = async (_b, args) =>
+      walletJson(args, [{ txid: RX, height: 4492422 }, { txid: TX, status: "transmitted", height: 4493939, memos: [{ recipient: "utest1tkzp6v69", memo: "zshield-mcp testnet demo", value: 100000 }] }, { txid: PENDING, status: "mempool" }]) ?? TRANSACTIONS_OUT;
+    const chain = new LiveChainAdapter({ network: "testnet", runner });
     const body = JSON.parse((await executeHistory({ limit: 5 }, { config, chain })).text);
     assert.equal(body.count, 3);
     assert.equal(body.transactions[1].explorer_url, `https://blockexplorer.one/zcash/testnet/tx/${TX}`);
