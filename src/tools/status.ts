@@ -2,7 +2,7 @@ import { z } from "zod";
 import { TESTNET_EXPLORER } from "../chain/live.js";
 import type { ChainAdapter } from "../chain/types.js";
 import { recentRefusal, recentRefusalByKey, storeFor, type CallRecord, type PaymentStore } from "../payments/store.js";
-import { boundedSync, chainEvidence, countRivals, reconcile, recordReconcile, RECOVERY_EXPIRY_MS } from "../payments/recovery.js";
+import { boundedSync, chainEvidence, countRivals, onceHistory, reconcile, recordReconcile, RECOVERY_EXPIRY_MS } from "../payments/recovery.js";
 import { acquireWalletLock, BusyError, type WalletLock } from "../payments/lock.js";
 import { capCandidates, inFlightCall } from "./pay.js";
 import type { Config, PossibleSend } from "../types.js";
@@ -193,13 +193,15 @@ function settledStatus(record: CallRecord, base: { call_id: string; idempotency_
 
 async function fromChain(
   config: Config,
-  chain: ChainAdapter,
+  wallet: ChainAdapter,
   store: PaymentStore,
   record: CallRecord,
   base: { call_id: string; idempotency_key?: string },
   now: number,
   sync: SyncResult | undefined
 ): Promise<PaymentStatus> {
+  // One history read serves the whole call, reconcile and the txid lookup alike.
+  const chain = onceHistory(wallet);
   // Live reads are offline: the bounded sync, if any, already ran under the lock.
   const offline = chain.syncWallet !== undefined;
   const intent = record.intent;

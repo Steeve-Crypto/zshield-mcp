@@ -102,6 +102,9 @@ export function healthSyncTimeoutMs(): number {
   return boundedMs("HEALTH_SYNC_TIMEOUT_MS");
 }
 
+/** Wallet history scans that may run at once. */
+const MAX_HISTORY_SCANS = 2;
+
 export function readTimeoutMs(): number {
   return boundedMs("ZINGO_READ_TIMEOUT_MS");
 }
@@ -371,12 +374,37 @@ export class LiveChainAdapter implements ChainAdapter {
    * listed twice, is left out before the limit applies, and unreadable JSON is an error.
    */
   async getHistory(limit: number, opts: { offline?: boolean; verifiedOnly?: boolean } = {}): Promise<TxSummary[]> {
+    // Reads that overlap share one scan, and only a few scans run at once.
+    const key = `${this.epoch}:${opts.offline === true}`;
+    let scan = this.scans.get(key);
+    if (!scan) {
+      if (this.scans.size >= MAX_HISTORY_SCANS) throw new Error("Too many wallet history reads are running. Try again shortly.");
+      scan = this.scanHistory(opts.offline === true).finally(() => this.scans.delete(key));
+      this.scans.set(key, scan);
+    }
+    const { entries, checked } = await scan;
+    if (!opts.verifiedOnly) return entries.slice(0, limit);
+    if (!checked) throw new Error("zingo-cli's JSON output could not be read, so the listing cannot be checked.");
+    return entries.filter((t) => t.verified).slice(0, limit);
+  }
+
+  /** Scans in flight, by send epoch and offline flag. */
+  private readonly scans = new Map<string, Promise<{ entries: TxSummary[]; checked: boolean }>>();
+  private epoch = 0;
+
+  /** A scan that began before a send must not answer a read made after it. */
+  invalidateScans(): void {
+    this.epoch++;
+  }
+
+  /** One full read: the wallet's JSON, then the listing, all under one deadline. */
+  private async scanHistory(offline: boolean): Promise<{ entries: TxSummary[]; checked: boolean }> {
     // One deadline for the whole read, not a full timeout for each command.
     const deadline = Date.now() + readTimeoutMs();
     const run = (...cmd: string[]) => {
       const timeoutMs = deadline - Date.now();
       if (timeoutMs <= 0) throw new Error("Reading the wallet history ran out of time.");
-      return this.exec(opts.offline ? [...this.offline(cmd[0]), ...cmd.slice(1)] : [...this.baseArgs(), ...cmd], { timeoutMs });
+      return this.exec(offline ? [...this.offline(cmd[0]), ...cmd.slice(1)] : [...this.baseArgs(), ...cmd], { timeoutMs });
     };
     // The JSON commands first, then the listing: an entry that appeared in between is not
     // in the JSON and so stays unverified, never the other way round.
@@ -390,12 +418,10 @@ export class LiveChainAdapter implements ChainAdapter {
       // No second source: every sent entry stays unverified and confirms nothing.
       wallet = undefined;
     }
-    if (!wallet && opts.verifiedOnly) throw new Error("zingo-cli's JSON output could not be read, so the listing cannot be checked.");
     const all = parseTransactions(await run("transactions"));
     const times = new Map<string, number>();
     for (const t of all) times.set(t.txid, (times.get(t.txid) ?? 0) + 1);
-    const checked = all.map((t) => ({ ...t, verified: corroborate(t, wallet, times.get(t.txid) ?? 0) }));
-    return (opts.verifiedOnly ? checked.filter((t) => t.verified) : checked).slice(0, limit);
+    return { entries: all.map((t) => ({ ...t, verified: corroborate(t, wallet, times.get(t.txid) ?? 0) })), checked: wallet !== undefined };
   }
 
   /** Read-only: runs `addresses` and returns the newest unified address. Refuses a mainnet one. */
@@ -445,6 +471,15 @@ export class LiveChainAdapter implements ChainAdapter {
   }
 
   async pay(req: PaymentRequest): Promise<PaymentReceipt> {
+    this.invalidateScans();
+    try {
+      return await this.payOnce(req);
+    } finally {
+      this.invalidateScans();
+    }
+  }
+
+  private async payOnce(req: PaymentRequest): Promise<PaymentReceipt> {
     assertTestnetAddress(req.recipient);
     if (typeof req.amountZats !== "bigint" || req.amountZats <= 0n) {
       throw new Error("Amount must be a positive integer number of zatoshis");

@@ -205,3 +205,64 @@ describe("F-28: history does not hold the payment lease", () => {
     });
   });
 });
+
+describe("F-34: history scans are shared and capped", () => {
+  const wallet = () => mkdtempSync(join(tmpdir(), "zshield-scan-"));
+  function gatedChain() {
+    let open!: () => void;
+    const opened = new Promise<void>((r) => (open = r));
+    const calls: string[][] = [];
+    const runner: CliRunner = async (_b, args) => {
+      calls.push(args);
+      await opened;
+      return walletJson(args, []) ?? "";
+    };
+    const d = wallet();
+    return { chain: new LiveChainAdapter({ network: "testnet", runner, dataDir: d, stateDir: d }), calls, open };
+  }
+  const listings = (calls: string[][]) => calls.filter((a) => a.at(-1) === "transactions").length;
+
+  it("overlapping reads share one scan of the wallet", async () => {
+    const { chain, calls, open } = gatedChain();
+    const reads = Array.from({ length: 5 }, () => chain.getHistory(Infinity, { offline: true }));
+    await new Promise((r) => setTimeout(r, 20));
+    open();
+    await Promise.all(reads);
+    assert.equal(listings(calls), 1);
+    assert.equal(calls.filter((a) => a.at(-2) === "notes").length, 1);
+  });
+
+  it("a read started after a send does not join a scan that began before it", async () => {
+    const { chain, calls, open } = gatedChain();
+    const before = chain.getHistory(Infinity, { offline: true });
+    chain.invalidateScans();
+    const after = chain.getHistory(Infinity, { offline: true });
+    await new Promise((r) => setTimeout(r, 20));
+    open();
+    await Promise.all([before, after]);
+    assert.equal(listings(calls), 2);
+  });
+
+  it("no more than two scans run at once", async () => {
+    const { chain, open } = gatedChain();
+    const first = chain.getHistory(Infinity, { offline: true });
+    chain.invalidateScans();
+    const second = chain.getHistory(Infinity, { offline: true });
+    chain.invalidateScans();
+    await assert.rejects(chain.getHistory(Infinity, { offline: true }), /Too many wallet history reads/);
+    open();
+    await Promise.all([first, second]);
+    await chain.getHistory(Infinity, { offline: true });
+  });
+
+  it("one status call reads the history once, even when reconcile then looks the txid up", async () => {
+    const config = tempConfig();
+    appendAuditEntry(config.auditDir, { ts: new Date(T0).toISOString(), tool: "zcash_pay", call_id: "c1", amount_zec: "0.0001", amount_zats: "10000", recipient: R, allowlist_hit: true, cap_zec: "0.01", status: "pending", view_key_fingerprint: "f", memo: "inv-7", chain_tip: 400, wallet_height: 400 } as AuditEntry);
+    let reads = 0;
+    const mined = { txid: GOOD, time: new Date(T0 + 2000).toISOString(), status: "confirmed", blockHeight: 500, kind: "sent", valueZats: 10000n, outgoing: [{ recipient: R, valueZats: 10000n, memo: "inv-7" }], verified: true } as TxSummary;
+    const chain = { mode: "live", getHistory: async () => (reads++, [mined]), walletHeight: async () => 505, checkHealth: async () => ({ walletHeight: 505, chainTip: 505, spendableZats: 0n }) } as unknown as ChainAdapter;
+    const s = await paymentStatus(config, chain, { call_id: "c1" }, T0 + 60_000);
+    assert.equal(s.state, "mined");
+    assert.equal(reads, 1);
+  });
+});
