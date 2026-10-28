@@ -10,7 +10,9 @@ import { paymentParamsHash, resetPaymentStores, storeFor, walletStateDir } from 
 import { executePay } from "../src/tools/pay.ts";
 import type { PaymentReceipt, PaymentRequest } from "../src/types.ts";
 import { startupChecks } from "../src/startup.ts";
-import { ALLOWED, tempConfig } from "./helpers.ts";
+import { LiveChainAdapter, type CliRunner } from "../src/chain/live.ts";
+import { executeHistory } from "../src/tools/history.ts";
+import { ALLOWED, tempConfig, walletJson } from "./helpers.ts";
 
 // V12 run 6 decision tests (F-24 to F-25, F-29 to F-33, F-35, F-36).
 
@@ -122,5 +124,39 @@ describe("F-32, F-33: no live mode on Windows, and no ACL code", () => {
     } finally {
       Object.defineProperty(process, "platform", real);
     }
+  });
+});
+
+describe("F-35: zcash_history does not return recipients or memos", () => {
+  const MEMO = "invoice-secret-77";
+
+  it("mock mode: no recipient or memo in the text, the data stays inside", async () => {
+    const config = tempConfig();
+    const chain = new MockChainAdapter();
+    await executePay({ amount_zec: "0.01", recipient: ALLOWED, memo: MEMO }, { config, chain });
+    const text = (await executeHistory({}, { config, chain })).text;
+    assert.equal(text.includes(ALLOWED), false);
+    assert.equal(text.includes(MEMO), false);
+    assert.equal("outgoing" in JSON.parse(text).transactions[0], false);
+    const [tx] = await chain.getHistory(10);
+    assert.equal(tx.outgoing?.[0].recipient, ALLOWED);
+    assert.equal(tx.outgoing?.[0].memo, MEMO);
+  });
+
+  it("live mode: no recipient or memo in the text, the data stays inside", async () => {
+    const config = tempConfig({ chainMode: "live", chainNetwork: "testnet" });
+    const TX = "ab".repeat(32);
+    const RCPT = "utest1tkzp6v69";
+    const listing = `{\n    txid: ${TX}\n    datetime: 2026-10-26 12:00:02 UTC\n    status: confirmed\n    blockheight: 500\n    kind: sent\n    value: 10000\n    fee: 10000\n    outgoing orchard notes: \n\t{\n            value: 10000\n            memo: ${MEMO}\n            recipient: ${RCPT}\n            output index: 0\n        }\n}\n`;
+    const runner: CliRunner = async (_b, args) =>
+      walletJson(args, [{ txid: TX, height: 500, memos: [{ recipient: RCPT, memo: MEMO, value: 10000 }] }]) ?? listing;
+    const chain = new LiveChainAdapter({ network: "testnet", runner });
+    const text = (await executeHistory({}, { config, chain })).text;
+    assert.equal(JSON.parse(text).count, 1);
+    assert.equal(text.includes(RCPT), false);
+    assert.equal(text.includes(MEMO), false);
+    const [tx] = await chain.getHistory(10, { offline: true });
+    assert.equal(tx.outgoing?.[0].recipient, RCPT);
+    assert.equal(tx.outgoing?.[0].memo, MEMO);
   });
 });
