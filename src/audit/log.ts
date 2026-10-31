@@ -51,7 +51,7 @@ export function boundAuditEntry<T extends object>(entry: T): T {
     truncated = true;
   }
   if (size(row) > MAX_AUDIT_ROW_BYTES) {
-    const keep = ["ts", "tool", "call_id", "status", "code", "mock_txid", "recipient_sha256", "view_key_fingerprint", "possible_txids", "possible_sends", "txid", "block_height", "idempotency_key"];
+    const keep = ["ts", "tool", "call_id", "status", "code", "mock_txid", "recipient_sha256", "view_key_fingerprint", "possible_txids", "possible_sends", "txid", "block_height", "idempotency_key", "operation_id"];
     row = Object.fromEntries(Object.entries(row).filter(([k]) => keep.includes(k)));
   }
   // Last: candidate lists are the one thing the keep list lets through at any size.

@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { writeAuditRow } from "../audit/log.js";
 import type { ChainAdapter } from "../chain/types.js";
+import { acquireWalletLock, BusyError } from "../payments/lock.js";
+import type { PaymentStore } from "../payments/store.js";
 import { NetworkError } from "../chain/network.js";
 import type { ReadErrorCode } from "../errors.js";
 import type { Config, ReadAuditEntry, ReadTool } from "../types.js";
@@ -26,6 +28,26 @@ export class ReadRejection extends Error {
   ) {
     super(message);
     this.name = "ReadRejection";
+  }
+}
+
+/**
+ * Run a wallet read without racing a send. It takes the wallet lock without waiting: while a
+ * send holds it (from before the build until after the transmit) the read is refused with
+ * BUSY, so nothing reads the wallet between stage and transmit.
+ */
+export async function withWalletRead<T>(store: PaymentStore, purpose: string, fn: () => Promise<T>): Promise<T> {
+  let lock;
+  try {
+    lock = await acquireWalletLock(store, 0, purpose);
+  } catch (e) {
+    if (e instanceof BusyError) throw new ReadRejection("BUSY", "The wallet is busy with a send or sync. Try again shortly.");
+    throw e;
+  }
+  try {
+    return await fn();
+  } finally {
+    await lock.release();
   }
 }
 

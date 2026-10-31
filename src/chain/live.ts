@@ -11,7 +11,7 @@ import { displayUrl, redact, registerServerUrl } from "../redact.js";
 import { memoProblem } from "../policy/limits.js";
 import { walletStateDir } from "../payments/store.js";
 import { checkPin, pinDir, type DirPin } from "./pin.js";
-import { READ_LOCK_WAIT_MS, lockWaitWithin, SEND_LOCK_WAIT_MS, SEND_START_WINDOW_MS, WalletBusyError, missingPerl, wrapForWallet, wrapperRefusal, type Wrapped } from "./walletlock.js";
+import { READ_LOCK_WAIT_MS, lockWaitWithin, SEND_LOCK_WAIT_MS, WalletBusyError, missingPerl, wrapForWallet, wrapperRefusal, type Wrapped } from "./walletlock.js";
 
 /** Used when a test injects a runner and no syncer: no process is started. */
 const skipSync: WalletSyncer = async () => ({ complete: true, elapsedMs: 0 });
@@ -31,12 +31,11 @@ export interface RunOptions {
   input?: string;
   /**
    * Run under the OS wallet lock on this file (see walletlock.ts). The wrapper waits up to
-   * lockWaitMs for it, and refuses to start after lockDeadlineMs. A refusal rejects with
+   * lockWaitMs for it. A refusal rejects with
    * WalletBusyError, which means nothing was started.
    */
   lockFile?: string;
   lockWaitMs?: number;
-  lockDeadlineMs?: number;
 }
 
 /** Runs a zingo-cli invocation and returns stdout. Injectable for tests. */
@@ -138,7 +137,6 @@ export const defaultRunner: CliRunner = (bin, args, opts = {}) =>
         wrapped = wrapForWallet(bin, args, {
           lockFile: opts.lockFile,
           waitMs: lockWaitWithin(opts.lockWaitMs ?? READ_LOCK_WAIT_MS, timeout),
-          deadlineMs: opts.lockDeadlineMs,
         });
       } catch (e) {
         reject(e);
@@ -522,12 +520,11 @@ export class LiveChainAdapter implements ChainAdapter {
       req.fence?.();
       this.assertPinned();
       // The wallet lock is taken by the wrapper in front of zingo-cli: if another zingo-cli
-      // holds it past the wait, or the start deadline passes, nothing starts.
+      // (one a killed process left behind) holds it past the wait, nothing starts.
       const built = await this.exec(this.baseArgs(), {
         timeoutMs: STAGE_TIMEOUT_MS,
         input: buildStageInput(req),
         lockWaitMs: SEND_LOCK_WAIT_MS,
-        lockDeadlineMs: this.now() + SEND_START_WINDOW_MS,
       });
       txid = parseStaged(built);
     } catch (e) {
@@ -536,7 +533,7 @@ export class LiveChainAdapter implements ChainAdapter {
     }
     // Bind the txid durably. If that fails the transaction is never transmitted.
     req.stage?.(txid);
-    // A lost lease stops here, before the wallet process starts: not sent.
+    // A lost lock stops here, before the wallet process starts.
     req.fence?.();
     let sent: string;
     try {
@@ -545,7 +542,6 @@ export class LiveChainAdapter implements ChainAdapter {
         timeoutMs: SEND_TIMEOUT_MS,
         input: `transmit ${txid}\nquit\n`,
         lockWaitMs: SEND_LOCK_WAIT_MS,
-        lockDeadlineMs: this.now() + SEND_START_WINDOW_MS,
       });
     } catch (e) {
       // The wallet process never started: nothing was transmitted.

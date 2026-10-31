@@ -1,10 +1,10 @@
 import { z } from "zod";
 import { TESTNET_EXPLORER } from "../chain/live.js";
 import type { ChainAdapter } from "../chain/types.js";
-import { recentRefusal, recentRefusalByKey, storeFor, type CallRecord, type PaymentStore } from "../payments/store.js";
+import { OPERATION_ID_PATTERN, recentRefusal, recentRefusalByKey, storeFor, type CallRecord, type PaymentStore } from "../payments/store.js";
 import { boundedSync, chainEvidence, countRivals, onceHistory, reconcile, recordReconcile, RECOVERY_EXPIRY_MS } from "../payments/recovery.js";
 import { acquireWalletLock, BusyError, type WalletLock } from "../payments/lock.js";
-import { capCandidates, inFlightCall } from "./pay.js";
+import { capCandidates, inFlightCall, MAX_IDEMPOTENCY_KEY_LENGTH } from "./pay.js";
 import type { Config, PossibleSend } from "../types.js";
 import type { SyncResult } from "../chain/sync.js";
 import { ReadRejection, runReadTool, type ReadDeps } from "./read.js";
@@ -15,13 +15,15 @@ export type PaymentState = "pending" | "broadcast" | "mined" | "expired" | "fail
 export const paymentStatusInputSchema = z.object({
   // Kept loose here so a bad lookup reaches executePaymentStatus and is audited as a rejection.
   call_id: z.string().optional().describe("The call_id a zcash_pay response returned."),
-  idempotency_key: z.string().optional().describe("The idempotency_key passed to zcash_pay. Give this or call_id, not both."),
+  idempotency_key: z.string().optional().describe("The idempotency_key passed to zcash_pay. Give exactly one of call_id, operation_id or idempotency_key."),
+  operation_id: z.string().optional().describe("The operation_id a zcash_pay response returned (op_ and 32 hex digits)."),
 });
 
 export type PaymentStatusInput = z.infer<typeof paymentStatusInputSchema>;
 
 export interface PaymentStatus {
   call_id: string;
+  operation_id?: string;
   idempotency_key?: string;
   state: PaymentState;
   txid?: string;
@@ -53,10 +55,24 @@ type Lookup =
 function lookup(config: Config, chain: ChainAdapter, input: PaymentStatusInput): Lookup {
   const byCall = typeof input.call_id === "string" && input.call_id !== "";
   const byKey = typeof input.idempotency_key === "string" && input.idempotency_key !== "";
-  if (byCall === byKey) {
-    throw new ReadRejection("INVALID_LOOKUP", "Give exactly one of call_id or idempotency_key.");
+  const byOp = typeof input.operation_id === "string" && input.operation_id !== "";
+  if (Number(byCall) + Number(byKey) + Number(byOp) !== 1) {
+    throw new ReadRejection("INVALID_LOOKUP", "Give exactly one of call_id, operation_id or idempotency_key.");
+  }
+  // Checked before anything reads or hashes it: the format fixes the length.
+  if (byOp && !OPERATION_ID_PATTERN.test(input.operation_id!)) {
+    throw new ReadRejection("INVALID_LOOKUP", "operation_id must be op_ followed by 32 lowercase hex digits.");
+  }
+  if (byKey && input.idempotency_key!.length > MAX_IDEMPOTENCY_KEY_LENGTH) {
+    throw new ReadRejection("INVALID_LOOKUP", `idempotency_key is longer than ${MAX_IDEMPOTENCY_KEY_LENGTH} characters.`);
   }
   const store = storeFor(config, chain);
+  if (byOp) {
+    const callId = store.callForOperation(input.operation_id!);
+    const record = callId ? store.readCall(callId) : undefined;
+    if (callId && record) return { callId, key: record.intent?.idempotency_key, record, store };
+    throw new ReadRejection("PAYMENT_NOT_FOUND", "No zcash_pay call with this operation_id for this wallet.");
+  }
   if (byCall) {
     const callId = input.call_id!;
     const record = store.readCall(callId);
@@ -131,7 +147,7 @@ export async function paymentStatus(
   now = Date.now()
 ): Promise<PaymentStatus> {
   const found = lookup(config, chain, input);
-  const base = { call_id: found.callId, idempotency_key: found.key };
+  const base = { call_id: found.callId, idempotency_key: found.key, operation_id: "record" in found ? found.record.intent?.operation_id : undefined };
   if ("inFlight" in found) return { ...base, state: "pending", message: "The payment is being sent now." };
   if ("refused" in found) {
     const r = found.refused;
@@ -143,14 +159,16 @@ export async function paymentStatus(
 
   // Live: sync first, bounded by STATUS_SYNC_TIMEOUT_MS, so a mined payment reads as
   // mined. Only while no send holds the wallet; never wait for one.
-  let lock: WalletLock | undefined;
+  let lock: WalletLock;
   try {
     lock = await acquireWalletLock(found.store, 0, "zcash_payment_status");
   } catch (e) {
-    if (!(e instanceof BusyError)) throw e;
+    // A send holds the wallet: no read may run between its stage and its transmit.
+    if (e instanceof BusyError) throw new ReadRejection("BUSY", "The wallet is busy with a send or sync. Try again shortly.");
+    throw e;
   }
   try {
-    const sync = lock ? await boundedSync(chain) : undefined;
+    const sync = await boundedSync(chain);
     // Re-read: another process may have settled the call while this one synced.
     const record = found.store.readCall(found.callId) ?? found.record;
     const s = settledStatus(record, base) ?? (await fromChain(config, chain, found.store, record, base, now, sync ?? { complete: false, elapsedMs: 0, detail: "not synced" }));
@@ -167,12 +185,10 @@ export async function paymentStatus(
       ...s,
       stale: true,
       wallet_height: walletHeight,
-      sync_note: lock
-        ? `Wallet sync did not finish: ${sync?.detail ?? "no detail"}. This is the last state the wallet knew.`
-        : "Another send or sync holds the wallet, so it was not synced. This is the last state the wallet knew.",
+      sync_note: `Wallet sync did not finish: ${sync?.detail ?? "no detail"}. This is the last state the wallet knew.`,
     };
   } finally {
-    lock?.release();
+    await lock.release();
   }
 }
 

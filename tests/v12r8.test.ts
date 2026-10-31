@@ -141,7 +141,7 @@ describe("F-27: candidate lists are bounded", () => {
   });
 });
 
-describe("F-28: history does not hold the payment lease", () => {
+describe("F-28: history and the wallet lock", () => {
   const wallet = () => mkdtempSync(join(tmpdir(), "zshield-hist-"));
   const gate = () => {
     let open!: () => void;
@@ -150,7 +150,7 @@ describe("F-28: history does not hold the payment lease", () => {
   };
   const slowChain = (d: string, runner: CliRunner) => new LiveChainAdapter({ network: "testnet", runner, dataDir: d, stateDir: d });
 
-  it("a payment can take the lease while a history read is still running", async () => {
+  it("a history read holds the wallet lock only while it runs: a payment cannot start beside it, and can once it is done", async () => {
     const d = wallet();
     const g = gate();
     const runner: CliRunner = async (_b, args) => {
@@ -161,10 +161,11 @@ describe("F-28: history does not hold the payment lease", () => {
     const config = liveConfig();
     const history = executeHistory({}, { config, chain });
     await new Promise((r) => setTimeout(r, 20));
-    const lease = await acquireWalletLock(storeFor(config, chain), 0, "zcash_pay");
-    lease.release();
+    await assert.rejects(() => acquireWalletLock(storeFor(config, chain), 0, "zcash_pay"), /in progress|holds/);
     g.open();
     await history;
+    const lock = await acquireWalletLock(storeFor(config, chain), 0, "zcash_pay");
+    await lock.release();
   });
 
   it("reads the wallet offline even when nothing else holds it, and allows one history at a time", async () => {

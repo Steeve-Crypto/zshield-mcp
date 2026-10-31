@@ -137,7 +137,7 @@ export function createServer(config: Config = loadConfig(), chain: ChainAdapter 
 
   server.tool(
     "zcash_payment_status",
-    "Read-only. Where a zcash_pay call stands, by call_id or idempotency_key: pending, broadcast, mined (with height and confirmations), expired, failed, or unknown. Never sends. Writes an audit row.",
+    "Read-only. Where a zcash_pay call stands, by call_id, operation_id or idempotency_key: pending, broadcast, mined (with height and confirmations), expired, failed, or unknown. Never sends. Writes an audit row.",
     paymentStatusInputSchema.shape,
     limited("zcash_payment_status", async (args: Record<string, unknown>) => {
       const result = await executePaymentStatus(paymentStatusInputSchema.parse(args), { config, chain });

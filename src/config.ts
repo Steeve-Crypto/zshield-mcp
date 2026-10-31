@@ -3,7 +3,6 @@ import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { parseZecToZats } from "./policy/amount.js";
 import { resolveWalletDir, validateTimeouts } from "./chain/live.js";
-import { parseLockLease } from "./payments/filelock.js";
 import { urlHasCredentials } from "./redact.js";
 import { HEALTH_MAX_LAG_DEFAULT } from "./tools/pay.js";
 import { parseSendQueueWait, SEND_QUEUE_WAIT_DEFAULT_MS } from "./payments/lock.js";
@@ -61,7 +60,6 @@ export function checkServerUrl(url: string | undefined, env: NodeJS.ProcessEnv =
 export function loadConfig(cwd = process.cwd()): Config {
   // Every timeout has a range; an out-of-range value stops the server here.
   validateTimeouts(process.env);
-  if (process.env.ZSHIELD_LOCK_LEASE_MS) parseLockLease(process.env.ZSHIELD_LOCK_LEASE_MS);
   const yamlPath = resolve(cwd, "config/default.yaml");
   let fromFile: Partial<{
     spending_cap_zec: number | string;

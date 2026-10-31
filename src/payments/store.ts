@@ -49,6 +49,8 @@ export interface CallIntent {
   view_key_fingerprint: string | null;
   idempotency_key?: string;
   params_sha256?: string;
+  /** Made by ZShield when the payment was authorized: `op_` and 32 hex digits. Never from the caller */
+  operation_id?: string;
   /**
    * The height an expiry is proven from: the highest of the tip the pre-send check saw,
    * the wallet's own height, and the highest tip recorded for this wallet.
@@ -151,21 +153,30 @@ export function movesForward(current: CallRecord | undefined, next: CallState): 
   return STATE_RANK[next] > STATE_RANK[current?.state ?? "pending"];
 }
 
+/** Operation ids: `op_` and 32 lowercase hex digits, made by ZShield, never taken from a caller. */
+export const OPERATION_ID_PATTERN = /^op_[0-9a-f]{32}$/;
+
+export function newOperationId(): string {
+  return `op_${randomBytes(16).toString("hex")}`;
+}
+
 export class PaymentStore {
   readonly dir: string;
+  /** Live mode: the OS wallet lock is required, not best effort. Set by storeFor */
+  requireOsLock = false;
 
   constructor(dir: string) {
     this.dir = dir;
   }
 
-  private sub(name: "keys" | "calls" | "pending" | "txids"): string {
+  private sub(name: "keys" | "calls" | "pending" | "txids" | "ops"): string {
     return join(this.dir, name);
   }
 
   /** Create the folders (0700) if needed and repair loose modes. Returns repair notes. */
   ensureLayout(): string[] {
     const notes: string[] = [];
-    for (const d of [this.dir, this.sub("keys"), this.sub("calls"), this.sub("pending"), this.sub("txids")]) {
+    for (const d of [this.dir, this.sub("keys"), this.sub("calls"), this.sub("pending"), this.sub("txids"), this.sub("ops")]) {
       const n = ensurePrivateDir(d);
       if (n) notes.push(n);
     }
@@ -217,6 +228,7 @@ export class PaymentStore {
     const dir = this.callDir(intent.call_id);
     ensurePrivateDir(dir);
     createExclusive(dir, "intent.json", JSON.stringify(intent));
+    if (intent.operation_id) createExclusive(this.sub("ops"), `${intent.operation_id}.json`, JSON.stringify({ call_id: intent.call_id }));
     this.markPending(intent.call_id);
   }
 
@@ -243,6 +255,12 @@ export class PaymentStore {
       throw e;
     }
     return names.filter((n) => !n.startsWith(".tmp-")).map((n) => n.replace(/%3A/g, ":"));
+  }
+
+  /** The call an operation id was made for. Undefined for an unknown or malformed id. One small file read. */
+  callForOperation(operationId: string): string | undefined {
+    if (!OPERATION_ID_PATTERN.test(operationId)) return undefined;
+    return this.readJson<{ call_id: string }>(join(this.sub("ops"), `${operationId}.json`))?.call_id;
   }
 
   /** Add one event. Events are never rewritten. */
@@ -358,7 +376,17 @@ const stores = new Map<string, PaymentStore>();
  * The store for this config and chain, opened on first use in this process: folders
  * created and checked. Every read after that goes to disk; nothing is cached.
  */
-export function storeFor(config: Pick<Config, "auditDir" | "auditFallbackPath">, chain: Pick<ChainAdapter, "stateDir">): PaymentStore {
+export function storeFor(
+  config: Pick<Config, "auditDir" | "auditFallbackPath">,
+  chain: Pick<ChainAdapter, "stateDir"> & Partial<Pick<ChainAdapter, "mode">>
+): PaymentStore {
+  const store = openFor(config, chain);
+  // A live wallet must have the OS lock; the mock chain may fall back to the in-process one.
+  store.requireOsLock = chain.mode === "live";
+  return store;
+}
+
+function openFor(config: Pick<Config, "auditDir" | "auditFallbackPath">, chain: Pick<ChainAdapter, "stateDir">): PaymentStore {
   const dir = resolveStateDir(config, chain);
   let store = stores.get(dir);
   if (!store && !chain.stateDir) {
