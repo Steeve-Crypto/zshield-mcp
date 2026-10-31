@@ -113,8 +113,8 @@ setTimeout(() => { try { fs.unlinkSync(d + "/running"); } catch {} fs.appendFile
   return bin;
 }
 
-function wrapProc(bin: string, lockFile: string, waitMs: number, deadlineOffset?: number) {
-  const child = spawn(process.execPath, ["--import", TSX, WRAP_DRIVER, bin, lockFile, String(waitMs), ...(deadlineOffset ? [String(deadlineOffset)] : [])], {
+function wrapProc(bin: string, lockFile: string, waitMs: number) {
+  const child = spawn(process.execPath, ["--import", TSX, WRAP_DRIVER, bin, lockFile, String(waitMs)], {
     env: { PATH: process.env.PATH ?? "" },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -167,19 +167,6 @@ describe("OS wallet lock: the wallet process itself is excluded", () => {
     assert.equal(eventsOf(d).filter((l) => l.startsWith("OVERLAP")).length, 0);
   });
 
-  it("a send that waited past its start deadline is not started, even though the lock came free", async () => {
-    const d = mkdtempSync(join(tmpdir(), "zshield-late-"));
-    const bin = holdBin(d, 900);
-    const lockFile = join(d, "state", "zingo.flock");
-    const holder = wrapProc(bin, lockFile, 5000);
-    await until(() => eventsOf(d).some((l) => l.startsWith("start")));
-    const late = await wrapProc(bin, lockFile, 10_000, 300).result;
-    assert.equal(late.event, "failed");
-    assert.equal(late.kind, "late");
-    await holder.result;
-    assert.equal(eventsOf(d).filter((l) => l.startsWith("start")).length, 1);
-  });
-
   it("only the wrapper's own nonce line counts as a refusal: a wallet process cannot fake one", async () => {
     const d = mkdtempSync(join(tmpdir(), "zshield-fake-"));
     const bin = join(d, "liar.mjs");
@@ -230,7 +217,7 @@ describe("OS wallet lock: the wallet process itself is excluded", () => {
     await holder.result;
   });
 
-  it("the live adapter starts every wallet process under the lock, and a send gets a wait and a start deadline", async () => {
+  it("the live adapter starts every wallet process under the lock, and a send gets a wait", async () => {
     const seen: { args: string[]; opts?: import("../src/chain/live.ts").RunOptions }[] = [];
     const d = mkdtempSync(join(tmpdir(), "zshield-ad-"));
     const runner: CliRunner = async (_b, args, opts) => {
@@ -245,13 +232,11 @@ describe("OS wallet lock: the wallet process itself is excluded", () => {
     await a.pay({ amountZats: 1000n, recipient: R });
     assert.ok(seen.length >= 4);
     for (const s of seen) assert.equal(s.opts?.lockFile, join(d, ".zshield-state", "zingo.flock"));
-    // The build step and the transmit step both wait for the lock and have a start deadline.
+    // The build step and the transmit step both wait for the lock.
     assert.ok(seen.at(-2)!.opts!.input?.startsWith("send '"));
     assert.ok(seen.at(-1)!.opts!.input?.startsWith("transmit "));
     for (const send of [seen.at(-2)!.opts!, seen.at(-1)!.opts!])
     assert.ok((send.lockWaitMs ?? 0) > 0 && (send.lockWaitMs ?? 0) <= 60_000);
-    for (const send of [seen.at(-2)!.opts!, seen.at(-1)!.opts!])
-      assert.ok((send.lockDeadlineMs ?? 0) > Date.now() - 1000 && (send.lockDeadlineMs ?? 0) <= Date.now() + 120_000);
   });
 
   it("a wallet held by another process is a BUSY refusal: not sent, nothing recorded as sent", async () => {

@@ -9,10 +9,11 @@ import { boundAuditEntry } from "../audit/log.js";
 import { MAX_AMOUNT_LENGTH } from "../policy/amount.js";
 import { addressNetwork } from "../chain/network.js";
 import type { PayCode } from "../errors.js";
-import { acquireWalletLock, BusyError, SEND_QUEUE_WAIT_DEFAULT_MS, type WalletLock } from "../payments/lock.js";
-import { LeaseLostError } from "../payments/filelock.js";
+import { acquireWalletLock, BusyError, LockLostError, SEND_QUEUE_WAIT_DEFAULT_MS, type WalletLock } from "../payments/lock.js";
 import { expiryAnchor, TIP_TOLERANCE_BLOCKS, tipProblem } from "../payments/tip.js";
 import {
+  isSettled,
+  newOperationId,
   paymentParamsHash,
   rememberRefusal,
   storeFor,
@@ -40,7 +41,6 @@ function assertNetworkAllowed(recipient: string, config: Config): void {
   }
 }
 
-class ViewKeyUnavailable extends Error {}
 
 function safelyRead<T>(fn: () => T): T | undefined {
   try {
@@ -50,7 +50,7 @@ function safelyRead<T>(fn: () => T): T | undefined {
   }
 }
 
-/** The wallet lease was lost at the last moment before the wallet process would start. */
+/** The wallet lock was lost at the last moment before the wallet process would start. */
 class FenceError extends Error {}
 
 /** Shown with SEND_UNCONFIRMED so a client does not retry blindly. */
@@ -361,7 +361,14 @@ function priorUse(
   key: string,
   paramsSha256: string
 ): PayResult | undefined {
-  const bound = store.readKey(key);
+  let bound: ReturnType<PaymentStore["readKey"]>;
+  try {
+    bound = store.readKey(key);
+  } catch (e) {
+    // An unreadable keys dir (EACCES and the like) is a structured refusal, never a throw.
+    const reason = (e as NodeJS.ErrnoException)?.code ?? (e instanceof Error ? e.message : String(e));
+    return refuseKey(input, deps, callId, "STATE_WRITE_FAILED", `The idempotency key store could not be read (${reason}). Nothing was sent.`, "error");
+  }
   const flying = inFlight.get(flightKey(store, key));
   const other = bound ? { callId: bound.call_id, paramsSha256: bound.params_sha256 } : flying && flying.callId !== callId ? flying : undefined;
   if (!other) return undefined;
@@ -446,11 +453,12 @@ function replay(input: PayInput, deps: PayDeps, callId: string, originalCallId: 
     ...baseRow(input, config, callId),
     allowlist_hit: intent?.allowlist_hit ?? false,
     view_key_fingerprint: intent?.view_key_fingerprint ?? null,
+    operation_id: intent?.operation_id,
     status: "replayed",
     idempotency_key: input.idempotency_key,
     replay_of: originalCallId,
   });
-  const common = { call_id: originalCallId, idempotency_key: input.idempotency_key, idempotent_replay: true };
+  const common = { call_id: originalCallId, operation_id: intent?.operation_id, idempotency_key: input.idempotency_key, idempotent_replay: true };
   const state: CallState = record?.state ?? "pending";
   const respond = (ok: boolean, body: Record<string, unknown>, code?: PayCode): PayResult => ({
     ok,
@@ -529,18 +537,19 @@ async function runPay(
   let mockTxid: string | undefined;
   let amountZats: bigint | undefined;
   // One fingerprint per wallet: a salted hash of its UFVK, written on every row of the call.
-  // Reading the key can run zingo-cli, so it waits until every cheap check has passed.
+  // Reading the key can run zingo-cli, so it waits until every cheap check has passed and the lock is held.
   // Rows for calls refused before that use the fingerprint from an earlier call, if any.
   let viewKeyFingerprint: string | null = knownFingerprints.get(chain) ?? null;
-  let viewKeyError: string | undefined;
-  let viewKeyBusy = false;
   let chainTip: number | undefined;
   let walletHeight: number | undefined;
+  // Made when the payment is authorized (just before its intent is written), never by the caller.
+  let operationId: string | undefined;
 
   const entry = (): AuditEntry => ({
     ts: new Date().toISOString(),
     tool: "zcash_pay",
     call_id: callId,
+    operation_id: operationId,
     amount_zec: input.amount_zec,
     amount_zats: amountZats?.toString(),
     recipient: input.recipient,
@@ -585,29 +594,15 @@ async function runPay(
     if (config.chainMode === "live" && !keyFields.idempotency_key) {
       throw new PolicyError("IDEMPOTENCY_KEY_REQUIRED", "A live payment needs an idempotency_key (1 to 128 letters, digits, dot, underscore, colon, or dash). Nothing was sent.");
     }
-    // Last, and only once everything above passed: read the viewing key.
-    try {
-      viewKeyFingerprint = fingerprintViewKey(await chain.getViewingKey(), config.viewKeyFingerprintSalt);
-      knownFingerprints.set(chain, viewKeyFingerprint);
-    } catch (e) {
-      viewKeyFingerprint = null;
-      viewKeyError = e instanceof Error ? e.message : String(e);
-      viewKeyBusy = e instanceof WalletBusyError;
-    }
-    if (viewKeyFingerprint === null && viewKeyBusy) throw new WalletBusyError(viewKeyError ?? "The wallet is busy.", "busy");
-    if (viewKeyFingerprint === null) {
-      throw new ViewKeyUnavailable(`Wallet viewing key could not be read, so the payment was not sent: ${viewKeyError}`);
-    }
     policyPassed = true;
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     if (e instanceof PolicyError) fail("rejected", e.code, message);
     else if (e instanceof WalletBusyError) fail("error", "BUSY", `${message} Nothing was sent.`);
-    else if (e instanceof ViewKeyUnavailable) fail("error", "VIEWKEY_UNAVAILABLE", message);
     else fail("error", "CONFIG_ERROR", message);
   }
 
-  // One send at a time per wallet: an in-process queue, then the wallet lease shared with
+  // One send at a time per wallet: an in-process queue, then the OS wallet lock shared with
   // every process on the wallet. Later calls queue for a bounded time, then get BUSY.
   let lock: WalletLock | undefined;
   if (policyPassed && amountZats !== undefined) {
@@ -625,14 +620,29 @@ async function runPay(
   let final: ReturnType<typeof writeAuditRow>;
   try {
     // Another process on this wallet may have bound the key while this call queued.
-    // Under the lease, read the binding fresh; if taken, this call becomes a replay or a
+    // Under the lock, read the binding fresh; if taken, this call becomes a replay or a
     // conflict and sends nothing.
     if (lock && keyFields.idempotency_key) {
       const other = store.readKey(keyFields.idempotency_key);
       if (other && other.call_id !== callId) {
-        lock.release();
+        await lock.release();
         lock = undefined;
         return priorUse(input, deps, store, callId, keyFields.idempotency_key, keyFields.params_sha256!)!;
+      }
+    }
+
+    // The viewing key can run zingo-cli, so it is read here, under the lock, last of the
+    // cheap checks: a read can never slip into a send's stage-to-transmit gap.
+    if (policyPassed && amountZats !== undefined && lock) {
+      try {
+        viewKeyFingerprint = fingerprintViewKey(await chain.getViewingKey(), config.viewKeyFingerprintSalt);
+        knownFingerprints.set(chain, viewKeyFingerprint);
+      } catch (e) {
+        viewKeyFingerprint = null;
+        policyPassed = false;
+        const message = e instanceof Error ? e.message : String(e);
+        if (e instanceof WalletBusyError) fail("error", "BUSY", `${message} Nothing was sent.`);
+        else fail("error", "VIEWKEY_UNAVAILABLE", `Wallet viewing key could not be read, so the payment was not sent: ${message}`);
       }
     }
 
@@ -670,21 +680,21 @@ async function runPay(
     }
 
     if (policyPassed && amountZats !== undefined && lock) {
-      // The health check can be slow. Prove the lease is still ours before any write.
+      // The health check can be slow. Prove the lock is still ours before any write.
       try {
         lock.assertHeld();
       } catch (e) {
         policyPassed = false;
-        fail("error", "BUSY", lostLeaseMessage(e));
+        fail("error", "BUSY", lostLockMessage(e));
       }
     }
 
-    // The health check can take minutes. Read the key's binding again now that the lease is
+    // The health check can take minutes. Read the key's binding again now that the lock is
     // proven: if another call took it meanwhile, this call is a replay and sends nothing.
     if (policyPassed && amountZats !== undefined && lock && keyFields.idempotency_key) {
       const other = store.readKey(keyFields.idempotency_key);
       if (other && other.call_id !== callId) {
-        lock.release();
+        await lock.release();
         lock = undefined;
         return priorUse(input, deps, store, callId, keyFields.idempotency_key, keyFields.params_sha256!)!;
       }
@@ -695,8 +705,10 @@ async function runPay(
       // before the broadcast. The key is bound last so a call that stops here leaves it
       // free; once bound, nothing slow runs before the send.
       status = "pending";
+      operationId = newOperationId();
       const intent: CallIntent = {
         call_id: callId,
+        operation_id: operationId,
         ts: new Date(startedAt).toISOString(),
         amount_zec: input.amount_zec,
         amount_zats: amountZats.toString(),
@@ -730,12 +742,12 @@ async function runPay(
       }
 
       if (ready) {
-        // Last check before binding and sending: the lease is still this call's.
+        // Last check before binding and sending: the lock is still this call's.
         try {
           lock.assertHeld();
         } catch (e) {
           ready = false;
-          fail("error", "BUSY", lostLeaseMessage(e));
+          fail("error", "BUSY", lostLockMessage(e));
         }
       }
 
@@ -748,11 +760,11 @@ async function runPay(
           fail("error", "STATE_WRITE_FAILED", `The idempotency key could not be bound: ${e instanceof Error ? e.message : String(e)}. Nothing was sent.`);
         }
         if (bound && !bound.won) {
-          // Another call won the key, one the lease did not stop. It owns the key; this
+          // Another call won the key, one the lock did not stop. It owns the key; this
           // call sends nothing and reports that call's outcome.
           recordSafely(store, { ts: now(), call_id: callId, state: "not_sent", code: "IDEMPOTENCY_CONFLICT", error: "Another call bound this idempotency key first.", by: "send" }, warnings);
           writeAuditRow(config, boundAuditEntry({ ...entry(), status: "error", code: "IDEMPOTENCY_CONFLICT", error: "Another call bound this idempotency key first. Nothing was sent." }));
-          lock.release();
+          await lock.release();
           lock = undefined;
           return priorUse(input, deps, store, callId, keyFields.idempotency_key, keyFields.params_sha256!)!;
         }
@@ -763,6 +775,27 @@ async function runPay(
       }
 
       if (ready) {
+        // Last look, under the lock, right before the chain call: the lock is still ours, the
+        // key is still bound to this call, and nothing has settled it. A process whose
+        // lock was lost stops here and sends nothing.
+        try {
+          lock.assertHeld();
+          const bound = keyFields.idempotency_key ? store.readKey(keyFields.idempotency_key) : undefined;
+          if (keyFields.idempotency_key && bound?.call_id !== callId) {
+            throw new FenceError("The idempotency key is no longer bound to this call. Nothing was sent.");
+          }
+          const current = store.readCall(callId);
+          if (current && isSettled(current.state)) throw new FenceError(`This call is already ${current.state}. Nothing was sent.`);
+        } catch (e) {
+          ready = false;
+          fail("error", "BUSY", e instanceof FenceError ? e.message : lostLockMessage(e));
+          recordSafely(store, { ts: now(), call_id: callId, state: "not_sent", code, error, by: "send" }, warnings);
+        }
+      }
+
+      let staged = false;
+      let stagedTxid: string | undefined;
+      if (ready) {
         try {
           const receipt = await chain.pay({
             amountZats,
@@ -772,22 +805,24 @@ async function runPay(
               try {
                 lock!.assertHeld();
               } catch (e) {
-                throw new FenceError(lostLeaseMessage(e));
+                throw new FenceError(lostLockMessage(e));
               }
             },
             stage: (txid) => {
-              // Between signing and transmitting: the lease must still be this call's, and
+              // Between signing and transmitting: the lock must still be this call's, and
               // the txid is recorded durably first. If either fails, nothing is transmitted.
               try {
                 lock!.assertHeld();
               } catch (e) {
-                throw new FenceError(lostLeaseMessage(e));
+                throw new FenceError(lostLockMessage(e));
               }
               try {
                 store.stageTxid(callId, txid, now());
               } catch (e) {
                 throw new Error(`The signed transaction could not be recorded, so it was not transmitted: ${e instanceof Error ? e.message : String(e)}`);
               }
+              staged = true;
+              stagedTxid = txid;
             },
           });
           mockTxid = receipt.txid;
@@ -815,9 +850,15 @@ async function runPay(
                   callId
                 );
             recordSafely(store, { ts: now(), call_id: callId, state: "unknown", code, error, possible_sends: possibleSends, by: "send" }, warnings);
+          } else if ((e instanceof FenceError || e instanceof WalletBusyError) && staged && stagedTxid) {
+            // A signed transaction is on record, so "not sent" is not a safe claim: it stays
+            // pending/unknown with the staged txid as the candidate, and recovery reconciles it.
+            fail("unknown", "SEND_UNCONFIRMED", `${SEND_UNCONFIRMED_GUIDANCE} Detail: ${redactInput(e.message, input)}`);
+            possibleSends = [{ txid: stagedTxid, confidence: "high", matched: ["txid"], status: "signed" }];
+            recordSafely(store, { ts: now(), call_id: callId, state: "unknown", code, error, possible_sends: possibleSends, by: "send" }, warnings);
           } else if (e instanceof FenceError || e instanceof WalletBusyError) {
-            // Neither started zingo-cli: the lease was lost at the fence, or the wallet's OS
-            // lock was held by another zingo-cli past the wait or the start deadline.
+            // Neither started zingo-cli: the lock was lost at the fence, or a zingo-cli left
+            // by a killed process held the wallet past the wait.
             fail("error", "BUSY", e.message);
             recordSafely(store, { ts: now(), call_id: callId, state: "not_sent", code, error, by: "send" }, warnings);
           } else {
@@ -834,7 +875,7 @@ async function runPay(
     // the txid and invite a retry that pays twice. A failed write is reported with the result.
     final = writeAuditRow(config, audit);
   } finally {
-    lock?.release();
+    await lock?.release();
   }
   if (!wroteIntent && status !== "ok") rememberRefusal(callId, { code, error, amount_zats: amountZats?.toString(), idempotency_key: keyFields.idempotency_key });
   if (final.warning) warnings.push(final.warning);
@@ -852,6 +893,7 @@ async function runPay(
           message: error,
           error,
           call_id: callId,
+          operation_id: operationId,
           idempotency_key: input.idempotency_key,
           possible_txids: possibleSends?.map((p) => p.txid),
           possible_sends: possibleSends,
@@ -873,6 +915,7 @@ async function runPay(
         ok: true,
         status: "ok",
         call_id: callId,
+        operation_id: operationId,
         idempotency_key: input.idempotency_key,
         txid: mockTxid,
         amount_zec: input.amount_zec,
@@ -894,8 +937,8 @@ function now(): string {
   return new Date().toISOString();
 }
 
-function lostLeaseMessage(e: unknown): string {
-  const detail = e instanceof LeaseLostError ? e.detail : e instanceof Error ? e.message : String(e);
+function lostLockMessage(e: unknown): string {
+  const detail = e instanceof LockLostError || e instanceof Error ? e.message : String(e);
   return `The wallet lock was lost before the send (${detail}). Nothing was sent. Try again.`;
 }
 

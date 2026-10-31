@@ -48,7 +48,6 @@ function proc(w: World, name: string, args: string[], env: Record<string, string
       ALLOWLIST_PATH: "./allow.json",
       VIEW_KEY_FINGERPRINT_SALT: "race",
       SEND_QUEUE_WAIT_MS: "8000",
-      ZSHIELD_LOCK_LEASE_MS: "1000",
       FAKE_ZINGO_STATE: w.chain,
       RACE_RECIPIENT: RECIPIENT,
       ...env,
@@ -95,23 +94,6 @@ const killGroup = (c: ChildProcess, sig: NodeJS.Signals) => {
   }
 };
 
-/** Every wallet lock file this or an older build could use, made to look 31 minutes old. */
-function ageLocks(w: World) {
-  const old = new Date(Date.now() - 31 * 60_000);
-  const paths = [join(w.wallet, ".zshield-wallet.lock")];
-  const state = join(w.wallet, ".zshield-state");
-  if (existsSync(state)) for (const f of readdirSync(state)) if (f.endsWith(".lock")) paths.push(join(state, f));
-  for (const p of paths.filter((x) => existsSync(x))) {
-    try {
-      const info = JSON.parse(readFileSync(p, "utf8"));
-      if (typeof info.started === "string") writeFileSync(p, JSON.stringify({ ...info, started: old.toISOString() }));
-    } catch {
-      // not JSON; mtime is enough
-    }
-    utimesSync(p, old, old);
-  }
-}
-
 describe("two server processes on one wallet", { timeout: 120_000 }, () => {
   it("different audit dirs: the second process replays the first one's key (V12 F-12)", async () => {
     const w = world();
@@ -124,31 +106,27 @@ describe("two server processes on one wallet", { timeout: 120_000 }, () => {
     assert.equal(b.txid, a.txid);
   });
 
-  it("a holder frozen with its wallet process: another process takes the lease but cannot start a wallet process beside it (V12 F-14)", async () => {
+  it("a holder frozen with its wallet process: another process cannot take the wallet lock or start a wallet process beside it (V12 F-14)", async () => {
     const w = world();
     const hold = join(w.root, "hold");
     const a = proc(w, "a", ["pay", "race-2"], { FAKE_ZINGO_HOLD: hold });
     await until(() => existsSync(`${hold}.reached`), "process A to reach its health check");
     killGroup(a.child, "SIGSTOP");
     await new Promise((r) => setTimeout(r, 1500));
-    ageLocks(w);
-    // A's wallet process is frozen and still holds the OS wallet lock, so B's wallet
-    // process is never started: B's pre-send check is refused as BUSY, and nothing is sent.
+    // A is frozen and still holds the wallet lock, so B waits its queue time, is refused as
+    // BUSY, and starts no wallet process. Nothing is sent.
     const b = await proc(w, "b", ["pay", "race-2"], { ZINGO_HEALTH_TIMEOUT_MS: "2500", ZINGO_READ_TIMEOUT_MS: "2500", HEALTH_SYNC_TIMEOUT_MS: "1000" }).done;
     assert.equal(b.code, "BUSY", JSON.stringify(b));
     assert.equal(sends(w).length, 0);
     writeFileSync(`${hold}.go`, "");
     killGroup(a.child, "SIGCONT");
     const ra = await a.done;
-    // A woke after its lease was taken over: it stops at the fence and sends nothing.
-    assert.equal(ra.code, "BUSY", JSON.stringify(ra));
-    assert.equal(sends(w).length, 0, `A: ${JSON.stringify(ra)} B: ${JSON.stringify(b)}`);
+    // A woke still holding the lock and finishes its one send. The retry replays it.
+    assert.equal(ra.status, "ok", JSON.stringify(ra));
+    assert.equal(sends(w).length, 1, `A: ${JSON.stringify(ra)} B: ${JSON.stringify(b)}`);
     const retry = await proc(w, "c", ["pay", "race-2"]).done;
-    assert.equal(retry.status, "ok", JSON.stringify(retry));
-    assert.equal(sends(w).length, 1);
-    const again = await proc(w, "d", ["pay", "race-2"]).done;
-    assert.equal(again.idempotent_replay, true, JSON.stringify(again));
-    assert.equal(again.txid, retry.txid);
+    assert.equal(retry.idempotent_replay, true, JSON.stringify(retry));
+    assert.equal(retry.txid, ra.txid);
     assert.equal(sends(w).length, 1);
   });
 

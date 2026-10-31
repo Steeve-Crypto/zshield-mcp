@@ -333,7 +333,7 @@ export interface RecoveryOptions {
 
 /**
  * On startup: reconcile up to RECOVERY_MAX_CALLS calls with a pending marker (the process stopped mid-send,
- * or the outcome was unknown). Holds the wallet lease while it runs, so no send overlaps
+ * or the outcome was unknown). Holds the wallet lock while it runs, so no send overlaps
  * it, and re-reads each call fresh before deciding, so a call another process settled is
  * skipped. Writes one recovery audit row per call it decides. Never resends. Never throws.
  */
@@ -370,7 +370,7 @@ export async function recoverPendingPayments(
   } catch {
     return [];
   } finally {
-    lock.release();
+    await lock.release();
   }
 }
 
@@ -385,14 +385,14 @@ async function recoverLocked(
   // Sync first, bounded, then read history offline so no read starts a sync of its own.
   const sync = await boundedSync(chain, RECOVERY_SYNC_MAX_MS);
   const evidence = chainEvidence(chain, sync, opts.maxLagBlocks ?? config.healthMaxLagBlocks ?? 10, () => store.readTipMark());
-  // One history read for the whole run: the wallet does not change while the lease is
+  // One history read for the whole run: the wallet does not change while the lock is
   // held, and N pending calls should not mean N full reads.
   const once = onceHistory(chain);
   const rows: RecoveryAuditEntry[] = [];
   const budgetMs = opts.budgetMs ?? RECOVERY_BUDGET_MS;
   const started = Date.now();
   for (const callId of todo.slice(0, opts.maxCalls ?? RECOVERY_MAX_CALLS)) {
-    // Let timers run, the lease heartbeat among them, between calls.
+    // Let timers run between calls.
     await new Promise<void>((r) => setImmediate(r));
     if (rows.length > 0 && Date.now() - started >= budgetMs) break;
     try {

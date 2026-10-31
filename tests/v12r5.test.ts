@@ -1,16 +1,14 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { chmodSync, mkdtempSync, readdirSync, rmSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { beforeEach, describe, it } from "node:test";
 import { appendAuditEntry } from "../src/audit/log.ts";
 import { parseTransactions } from "../src/chain/live.ts";
 import type { ChainAdapter } from "../src/chain/types.ts";
 import { MockChainAdapter } from "../src/chain/mock.ts";
 import { defaultRunner, LiveChainAdapter, type CliRunner } from "../src/chain/live.ts";
-import * as filelock from "../src/payments/filelock.ts";
 import * as recovery from "../src/payments/recovery.ts";
 import { acquireWalletLock } from "../src/payments/lock.ts";
 import { readAuditRows, seedCall } from "./helpers.ts";
@@ -160,99 +158,6 @@ describe("F-8: a history match must be this call's send", () => {
   });
 });
 
-// F-21: stale-lock races and split-brain leases.
-
-const LOCK_DRIVER = fileURLToPath(new URL("./fixtures/lock-driver.mts", import.meta.url));
-const TSX = import.meta.resolve("tsx");
-
-function lockProc(dir: string, args: string[], leaseMs: number) {
-  const child = spawn(process.execPath, ["--import", TSX, LOCK_DRIVER, dir, ...args], {
-    env: { PATH: process.env.PATH ?? "", ZSHIELD_LOCK_LEASE_MS: String(leaseMs) },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let out = "";
-  child.stdout!.on("data", (d) => (out += d));
-  const events = new Promise<{ event: string; t: number; message?: string }[]>((resolve) =>
-    child.on("close", () => resolve(out.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))))
-  );
-  return { child, events, started: async (): Promise<void> => { while (!out.includes("acquired")) await new Promise((r) => setTimeout(r, 20)); } };
-}
-
-describe("F-21: leases", () => {
-  it("a waiter with a short lease does not break a live holder with a long one (two processes)", async () => {
-    const d = mkdtempSync(join(tmpdir(), "zshield-lease-"));
-    const holder = lockProc(d, ["3500", "0"], 600_000);
-    await holder.started();
-    // The holder renews every 150 s here, so by the waiter's own 1 s lease it looks old.
-    const waiter = lockProc(d, ["100", "2500"], 1000);
-    const [h, w] = await Promise.all([holder.events, waiter.events]);
-    assert.deepEqual(w.map((e) => e.event), ["busy"], "the waiter must not take a lock whose holder is alive and within its own lease");
-    assert.ok(h.some((e) => e.event === "held"), "the holder still holds at the end");
-  });
-
-  it("the lock file records its lease time and a renewal counter", async () => {
-    const d = mkdtempSync(join(tmpdir(), "zshield-lease-"));
-    const lease = await filelock.acquireFileLock(d, { waitMs: 0, purpose: "t", leaseMs: 4000 });
-    const first = JSON.parse(readFileSync(join(d, "wallet.lock"), "utf8"));
-    assert.equal(first.leaseMs, 4000);
-    lease.assertHeld();
-    lease.assertHeld();
-    const later = JSON.parse(readFileSync(join(d, "wallet.lock"), "utf8"));
-    assert.ok(parseInt(later.gen, 16) > parseInt(first.gen, 16), "the counter moves on every renewal");
-    assert.equal(later.token, first.token);
-    lease.release();
-  });
-
-  it("breaking a stale lock that was renewed after it was judged puts it back", async () => {
-    const d = mkdtempSync(join(tmpdir(), "zshield-lease-"));
-    const lease = await filelock.acquireFileLock(d, { waitMs: 0, purpose: "t", leaseMs: 1000 });
-    const path = join(d, "wallet.lock");
-    const judged = readFileSync(path, "utf8");
-    const old = new Date(Date.now() - 60_000);
-    utimesSync(path, old, old); // what the waiter saw: an old mtime
-    // The holder renews after the waiter looked and before it moves the file.
-    lease.assertHeld();
-    filelock.breakStaleLockForTest(path, judged, { leaseMs: 1000 });
-    assert.ok(statSync(path).isFile(), "the live lock is still in place");
-    lease.assertHeld();
-    lease.release();
-  });
-
-  it("a renewal that lands during the move is seen: the file is put back, not removed", async () => {
-    const d = mkdtempSync(join(tmpdir(), "zshield-lease-"));
-    const path = join(d, "wallet.lock");
-    const lease = await filelock.acquireFileLock(d, { waitMs: 0, purpose: "t", leaseMs: 1000 });
-    const old = new Date(Date.now() - 60_000);
-    utimesSync(path, old, old);
-    const judged = readFileSync(path, "utf8");
-    let aside = "";
-    filelock.breakStaleLockForTest(path, judged, {
-      leaseMs: 1000,
-      afterMove: () => {
-        // The holder's heartbeat touches the inode it already holds, as the move leaves it.
-        const now = new Date();
-        for (const f of readdirSync(d)) if (f.includes(".stale-")) { aside = f; utimesSync(join(d, f), now, now); }
-      },
-    });
-    assert.ok(aside, "the file was moved aside");
-    assert.ok(statSync(path).isFile(), "and put back");
-    lease.assertHeld();
-    lease.release();
-  });
-
-  it("four processes taking the lease in turn never overlap, even with a one second lease", async () => {
-    const d = mkdtempSync(join(tmpdir(), "zshield-lease-"));
-    const marker = join(d, "critical");
-    const procs = [0, 1, 2, 3].map(() => lockProc(d, ["250", "20000", "4", marker], 1000));
-    const all = (await Promise.all(procs.map((p) => p.events))).flat();
-    assert.equal(all.filter((e) => e.event === "overlap").length, 0);
-    assert.equal(all.filter((e) => e.event === "lost").length, 0);
-    assert.equal(all.filter((e) => e.event === "acquired").length, 16);
-  });
-});
-
-
-
 // F-14: every path where a holder could send while another process holds the wallet.
 
 function liveCfg(): Config {
@@ -264,14 +169,14 @@ function liveCfg(): Config {
 type Req = import("../src/types.ts").PaymentRequest;
 
 /** A live-mode chain whose health check and send are scripted. `store` is filled in once the store exists. */
-function liveChain(hooks: { health?: () => void; pay?: (req: Req) => void; reading?: () => ChainHealth; history?: () => TxSummary[] }) {
+function liveChain(hooks: { health?: () => void; pay?: (req: Req) => void | Promise<void>; reading?: () => ChainHealth; history?: () => TxSummary[] }) {
   const counts = { sent: 0 };
   const chain = {
     mode: "live",
     async getViewingKey() { return "uviewtest1" + "q".repeat(80); },
     async checkHealth() { hooks.health?.(); return hooks.reading?.() ?? { walletHeight: 1000, chainTip: 1000, spendableZats: 10_000_000n }; },
     async pay(req: Req) {
-      hooks.pay?.(req);
+      await hooks.pay?.(req);
       counts.sent++;
       return { txid: tx(77), amountZats: req.amountZats, recipient: req.recipient, mode: "live" };
     },
@@ -282,18 +187,17 @@ function liveChain(hooks: { health?: () => void; pay?: (req: Req) => void; readi
   return { chain, counts };
 }
 
-describe("F-14: nothing sends without the lease", () => {
-  it("a lease lost at the last moment before the wallet process starts stops the send", async () => {
+describe("F-14: nothing sends without the lock", () => {
+  it("a lock lost at the last moment before the wallet process starts stops the send", async () => {
     const config = liveCfg();
-    let dir = "";
     const { chain, counts } = liveChain({
-      pay: (req) => {
-        // Another process takes over right here, after every earlier check passed.
-        rmSync(join(dir, "wallet.lock"));
+      pay: async (req) => {
+        // The lock holder dies right here, after every earlier check passed.
+        for (const pid of execFileSync("pgrep", ["-P", String(process.pid), "perl"]).toString().trim().split("\n")) process.kill(Number(pid), "SIGKILL");
+        await new Promise((r) => setTimeout(r, 200));
         req.fence?.();
       },
     });
-    dir = storeFor(config, chain).dir;
     const r = await executePay({ amount_zec: "0.0001", recipient: R, idempotency_key: "k-fence" }, { config, chain });
     assert.equal(counts.sent, 0, "the send must not go out");
     assert.equal(r.code, "BUSY");
@@ -354,7 +258,7 @@ describe("F-14: bounded work", () => {
     assert.ok(rows.length <= 1, `handled ${rows.length}`);
   });
 
-  it("recovery lets timers run between calls, so the lease heartbeat is not starved", async () => {
+  it("recovery lets timers run between calls", async () => {
     const config = tempConfig();
     for (let i = 0; i < 60; i++) pending(config, `c${i}`, { idempotency_key: `k${i}`, recipient: R + i });
     let ticks = 0;
@@ -371,7 +275,7 @@ describe("F-14: bounded work", () => {
     const held = await acquireWalletLock(storeFor(config, c), 0, "other");
     const t = Date.now();
     const rows = await recoverPendingPayments(config, c, { now: T0 + 60_000, lockWaitMs: 50, lockAttempts: 2, lockPauseMs: 10 } as never);
-    held.release();
+    await held.release();
     assert.deepEqual(rows, []);
     assert.ok(Date.now() - t < 5000);
   });

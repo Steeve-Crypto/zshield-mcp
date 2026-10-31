@@ -103,17 +103,41 @@ function checkFd(fd: number, path: string): void {
  */
 export function appendPrivate(file: string, data: string): void {
   const isNew = !fs.existsSync(file);
-  const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | NOFOLLOW, 0o600);
+  const fd = fs.openSync(file, fs.constants.O_RDWR | fs.constants.O_APPEND | fs.constants.O_CREAT | NOFOLLOW, 0o600);
   try {
     checkFd(fd, file);
-    const buf = Buffer.from(data, "utf8");
-    let off = 0;
-    while (off < buf.length) off += fs.writeSync(fd, buf, off, buf.length - off);
+    // One buffer, one write call: a short write is an error and is never finished with a
+    // second call, which could land in the middle of another process's row. If the file
+    // does not end in a newline (a crash left a partial row) this row starts on a new line.
+    const size = fs.fstatSync(fd).size;
+    const last = Buffer.alloc(1);
+    const needsLead = size > 0 && fs.readSync(fd, last, 0, 1, size - 1) === 1 && last[0] !== 0x0a;
+    const buf = Buffer.from(needsLead ? `\n${data}` : data, "utf8");
+    try {
+      const n = fs.writeSync(fd, buf, 0, buf.length);
+      if (n !== buf.length) throw Object.assign(new Error(`short write to ${file}`), { code: "EIO" });
+    } catch (e) {
+      undoPartialAppend(fd, size, buf);
+      throw e;
+    }
     fs.fsyncSync(fd);
   } finally {
     fs.closeSync(fd);
   }
   if (isNew) fsyncDir(dirname(file));
+}
+
+/** Cut off what a failed append left, but only bytes that are exactly the start of our own row. */
+function undoPartialAppend(fd: number, size: number, buf: Buffer): void {
+  try {
+    const now = fs.fstatSync(fd).size;
+    if (now <= size || now > size + buf.length) return;
+    const got = Buffer.alloc(now - size);
+    fs.readSync(fd, got, 0, got.length, size);
+    if (got.equals(buf.subarray(0, got.length))) fs.ftruncateSync(fd, size);
+  } catch {
+    // Best effort: the next append starts on a new line either way.
+  }
 }
 
 /** Read a small private file without following a symlink. Undefined when missing. */
@@ -177,7 +201,17 @@ export function createExclusive(dir: string, name: string, data: string): boolea
       // Already gone.
     }
   }
-  fsyncDir(dir);
+  try {
+    fsyncDir(dir);
+  } catch (e) {
+    // Not durable: unbind the key so it is not consumed and the call can be retried.
+    try {
+      fs.unlinkSync(join(dir, name));
+    } catch {
+      // Already gone.
+    }
+    throw e;
+  }
   return true;
 }
 

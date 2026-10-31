@@ -14,7 +14,7 @@ import {
   type CliRunner,
 } from "../src/chain/live.ts";
 import type { WalletSyncer } from "../src/chain/sync.ts";
-import { WALLET_LOCK_FILE } from "../src/payments/filelock.ts";
+import { acquireWalletLock } from "../src/payments/lock.ts";
 import { resetPaymentStores as resetPaymentIndexes } from "../src/payments/store.ts";
 import { matchSend } from "../src/tools/pay.ts";
 import { paymentStatus } from "../src/tools/status.ts";
@@ -73,9 +73,6 @@ describe("zcash_payment_status syncs first, on real zingo-cli output", () => {
       { stateDir: dir },
       { ...base, ts: new Date(SENT_AT + 70_000).toISOString(), status: "ok", mock_txid: TXID }
     );
-    if (syncComplete === "busy") {
-      writeFileSync(join(dir, WALLET_LOCK_FILE), JSON.stringify({ pid: process.pid, host: hostname(), started: new Date().toISOString(), purpose: "zcash_pay", token: "t" }));
-    }
     const calls: string[][] = [];
     const syncs: number[] = [];
     const runner: CliRunner = async (_b, args) => {
@@ -125,11 +122,15 @@ describe("zcash_payment_status syncs first, on real zingo-cli output", () => {
     }
   });
 
-  it("does not wait for or disturb a send that holds the wallet: no sync, stale answer", async () => {
-    const { config, chain, syncs } = setup("busy");
-    const s = await paymentStatus(config, chain, { call_id: "806e0f74" });
+  it("does not wait for or disturb a send that holds the wallet: BUSY, no sync, no wallet read", async () => {
+    const { config, chain, syncs, calls } = setup("busy");
+    const held = await acquireWalletLock({ dir: chain.stateDir!, requireOsLock: true }, 0, "zcash_pay");
+    try {
+      await assert.rejects(() => paymentStatus(config, chain, { call_id: "806e0f74" }), (e: { code?: string }) => e.code === "BUSY");
+    } finally {
+      await held.release();
+    }
     assert.deepEqual(syncs, []);
-    assert.equal(s.stale, true);
-    assert.match(s.sync_note!, /Another send or sync holds the wallet/);
+    assert.deepEqual(calls, []);
   });
 });

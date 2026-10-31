@@ -64,6 +64,8 @@ export interface AuditEntry {
   possible_sends?: PossibleSend[];
   /** The caller's idempotency key, when one was given */
   idempotency_key?: string;
+  /** Made by ZShield when the payment was authorized; on every row of that payment */
+  operation_id?: string;
   /** sha256 of amount in zatoshis, recipient, and memo: what the key is bound to */
   params_sha256?: string;
   /** Replay rows only: the call whose outcome was returned. Nothing was sent */
