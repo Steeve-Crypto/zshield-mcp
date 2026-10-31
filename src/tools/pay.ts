@@ -631,6 +631,22 @@ async function runPay(
       }
     }
 
+    // Live mode: a signed payment that is not settled may already be on the network, and its
+    // notes are spoken for. No new send leaves this wallet until it is resolved (mined, or
+    // proven never sent) by recovery or zcash_payment_status.
+    if (policyPassed && amountZats !== undefined && lock && config.chainMode === "live") {
+      try {
+        const stuck = store.unresolvedSend(callId);
+        if (stuck) {
+          policyPassed = false;
+          fail("error", "UNRESOLVED_PAYMENT", `An earlier payment from this wallet (call ${stuck.callId}, transaction ${stuck.txid}) is not resolved. It may have been broadcast. Check it with zcash_payment_status. Nothing was sent.`);
+        }
+      } catch (e) {
+        policyPassed = false;
+        fail("error", "STATE_WRITE_FAILED", `The payment store could not be read, so the payment was not sent: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
     // The viewing key can run zingo-cli, so it is read here, under the lock, last of the
     // cheap checks: a read can never slip into a send's stage-to-transmit gap.
     if (policyPassed && amountZats !== undefined && lock) {

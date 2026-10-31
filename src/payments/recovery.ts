@@ -13,18 +13,24 @@ import type { SyncResult } from "../chain/sync.js";
  * up counts as not sent. Live mode needs proof by block height instead.
  */
 export const RECOVERY_EXPIRY_MS = 2 * 60 * 60_000;
-/** zingo-cli builds transactions that expire this many blocks after the tip it saw. */
-export const TX_EXPIRY_BLOCKS = 40;
+/**
+ * The most blocks past its target height (the tip plus one) that zingo-cli lets a
+ * transaction live. The pinned build uses 120 from the NU7 activation, which testnet is
+ * past (it was 40 before). Using 120 everywhere is safe: a bigger delta only makes the
+ * "not sent" proof slower, never wrong.
+ */
+export const TX_EXPIRY_BLOCKS = 120;
 /**
  * Extra blocks past expiry before a missing send counts as proven not sent. The
- * transaction is built when zingo-cli runs, up to SEND_TIMEOUT_MS (15 minutes, about 12
- * blocks) after the tip was recorded, so its expiry can sit that far above the recorded one.
+ * transaction is built when zingo-cli runs, up to SEND_TIMEOUT_MS (15 minutes, 36 blocks
+ * of 25 seconds) after the tip was recorded, so its expiry can sit that far above the
+ * recorded one. 60 covers that and leaves 24 blocks for a reorg.
  */
-export const EXPIRY_MARGIN_BLOCKS = 30;
+export const EXPIRY_MARGIN_BLOCKS = 60;
 /**
  * A live "not sent" proof also needs this much time since the call started, whatever the
- * heights say, so a wrong height alone can never make it. Blocks come about every 75
- * seconds: 40 + 30 of them, plus the send timeout, is well inside two hours.
+ * heights say, so a wrong height alone can never make it. Blocks come every 25 to 75
+ * seconds: 1 + 120 + 60 of them is at most about 75 minutes at 25 seconds.
  */
 export const LIVE_PROOF_MIN_AGE_MS = RECOVERY_EXPIRY_MS;
 
@@ -230,7 +236,8 @@ async function proveNotSent(base: Base, intent: NonNullable<CallRecord["intent"]
   if (now - startedAt < LIVE_PROOF_MIN_AGE_MS) {
     return { ...base, status: "unknown", note: "No match yet, and the send has not been outstanding long enough to prove it was not sent." };
   }
-  const provenAt = anchor + TX_EXPIRY_BLOCKS + EXPIRY_MARGIN_BLOCKS;
+  // The target height is the tip plus one, and expiry is that plus the delta.
+  const provenAt = anchor + 1 + TX_EXPIRY_BLOCKS + EXPIRY_MARGIN_BLOCKS;
   if (ev.walletHeight <= provenAt) {
     return {
       ...base,

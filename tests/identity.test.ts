@@ -14,7 +14,7 @@ import { tempConfig, seedCall } from "./helpers.ts";
 const R = "utest1" + "r".repeat(100);
 const T0 = Date.parse("2026-10-26T12:00:00Z");
 const TXID = "5c".repeat(32);
-const synced: ChainHealth = { walletHeight: 1000, chainTip: 1001, spendableZats: 0n };
+const synced: ChainHealth = { walletHeight: 1200, chainTip: 1201, spendableZats: 0n };
 
 const mined = (memo: string, extra: Partial<TxSummary> = {}): TxSummary => ({
   txid: TXID,

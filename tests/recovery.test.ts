@@ -72,7 +72,7 @@ function chain(history: TxSummary[] | (() => Promise<TxSummary[]>), health?: Cha
   return { c, calls };
 }
 
-const synced: ChainHealth = { walletHeight: 1000, chainTip: 1001, spendableZats: 0n };
+const synced: ChainHealth = { walletHeight: 1200, chainTip: 1201, spendableZats: 0n };
 const late = T0 + RECOVERY_EXPIRY_MS + 1;
 const recoveryRows = (config: Config) => readAuditRows(config).filter((r) => r.tool === "zcash_pay_recovery");
 
