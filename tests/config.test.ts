@@ -39,4 +39,21 @@ describe("loadConfig", () => {
     process.env.SPENDING_CAP_ZEC = "abc";
     assert.throws(() => loadConfig(emptyDir()), /SPENDING_CAP_ZEC/);
   });
+  it("keeps an env spending cap as an exact decimal string", () => {
+    delete process.env.CHAIN_MODE;
+    process.env.SPENDING_CAP_ZEC = "0.25";
+    assert.equal(loadConfig(emptyDir()).spendingCapZec, "0.25");
+  });
+  it("rejects a spending cap with more than 8 decimals", () => {
+    delete process.env.CHAIN_MODE;
+    process.env.SPENDING_CAP_ZEC = "0.123456789";
+    assert.throws(() => loadConfig(emptyDir()), /more than 8 decimal places/);
+  });
+  it("rejects zero, negative, and non-finite spending caps", () => {
+    delete process.env.CHAIN_MODE;
+    for (const v of ["0", "-0.1", "Infinity", "NaN"]) {
+      process.env.SPENDING_CAP_ZEC = v;
+      assert.throws(() => loadConfig(emptyDir()), /SPENDING_CAP_ZEC/, v);
+    }
+  });
 });

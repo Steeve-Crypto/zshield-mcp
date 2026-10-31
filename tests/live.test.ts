@@ -3,20 +3,23 @@ import { describe, it } from "node:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LiveChainAdapter, parseTxid, type CliRunner } from "../src/chain/live.ts";
+import { LiveChainAdapter, parseStaged, type CliRunner } from "../src/chain/live.ts";
 import { addressNetwork, assertTestnetAddress } from "../src/chain/network.ts";
 import { executePay } from "../src/tools/pay.ts";
 import type { Config } from "../src/types.ts";
+import { withUfvk } from "./helpers.ts";
 
 const UTEST = "utest1" + "q".repeat(100);
 const ZTEST = "ztestsapling1" + "q".repeat(70);
 const TM = "tmBsTi2xWTjUdEXnuTceL7fecEQKeWaPDJd";
 const TXID = "ab".repeat(32);
 
-const okRunner = (calls: string[][]): CliRunner => async (_bin, args) => {
-  calls.push(args);
-  return JSON.stringify({ txids: [TXID] });
-};
+const okRunner = (calls: string[][]): CliRunner =>
+  withUfvk(async (_bin, args, opts) => {
+    // Stdin, when used, is recorded as a final pseudo-argument so tests can inspect it.
+    calls.push(opts?.input === undefined ? args : [...args, opts.input]);
+    return JSON.stringify({ txids: [TXID] });
+  });
 
 describe("address network checks", () => {
   it("accepts testnet prefixes", () => {
@@ -44,16 +47,17 @@ describe("LiveChainAdapter", () => {
   it("sends via zingo-cli on testnet and parses txid", async () => {
     const calls: string[][] = [];
     const a = new LiveChainAdapter({ network: "testnet", runner: okRunner(calls) });
-    const r = await a.pay({ amountZec: 0.001, recipient: UTEST, memo: "hi" });
+    const r = await a.pay({ amountZats: 100_000n, recipient: UTEST, memo: "hi" });
     assert.equal(r.txid, TXID);
     const args = calls[0];
     assert.deepEqual(args.slice(0, 2), ["--chain", "testnet"]);
-    assert.deepEqual(args.slice(-4), ["quicksend", UTEST, "100000", "hi"]);
+    assert.ok(!args.slice(0, -1).includes("hi") && !args.slice(0, -1).includes(UTEST), "payment details stay out of argv");
+    assert.match(args.at(-1) ?? "", /"memo":"hi"/);
   });
   it("never calls the CLI for a mainnet recipient", async () => {
     const calls: string[][] = [];
     const a = new LiveChainAdapter({ network: "testnet", runner: okRunner(calls) });
-    await assert.rejects(a.pay({ amountZec: 0.001, recipient: "u1abc" }), /Mainnet/);
+    await assert.rejects(a.pay({ amountZats: 100_000n, recipient: "u1abc" }), /Mainnet/);
     assert.equal(calls.length, 0);
   });
   it("surfaces CLI failures", async () => {
@@ -61,11 +65,18 @@ describe("LiveChainAdapter", () => {
       network: "testnet",
       runner: async () => { throw new Error("zingo-cli failed: insufficient funds"); },
     });
-    await assert.rejects(a.pay({ amountZec: 0.001, recipient: UTEST }), /insufficient/);
+    await assert.rejects(a.pay({ amountZats: 100_000n, recipient: UTEST }), /insufficient/);
   });
-  it("parseTxid errors on missing or error output", () => {
-    assert.throws(() => parseTxid("Error: proposal failed"), /send error/);
-    assert.throws(() => parseTxid("{}"), /no txid/);
+  it("rejects non-positive zatoshi amounts before calling the CLI", async () => {
+    const calls: string[][] = [];
+    const a = new LiveChainAdapter({ network: "testnet", runner: okRunner(calls) });
+    await assert.rejects(a.pay({ amountZats: 0n, recipient: UTEST }), /positive integer/);
+    await assert.rejects(a.pay({ amountZats: -1n, recipient: UTEST }), /positive integer/);
+    assert.equal(calls.length, 0);
+  });
+  it("parseStaged errors on missing or error output", () => {
+    assert.throws(() => parseStaged("Error: proposal failed"), /send error/);
+    assert.throws(() => parseStaged("{}"), /exactly one transaction/);
   });
 });
 
@@ -80,15 +91,32 @@ describe("policy runs before chain in live mode", () => {
     const calls: string[][] = [];
     const chain = new LiveChainAdapter({ network: "testnet", runner: okRunner(calls) });
     const c = cfg();
-    const over = await executePay({ amount_zec: 1, recipient: UTEST }, { config: c, chain });
+    const over = await executePay({ idempotency_key: "t-live-1", amount_zec: 1, recipient: UTEST }, { config: c, chain });
     assert.equal(over.audit.status, "rejected");
-    const notListed = await executePay({ amount_zec: 0.001, recipient: ZTEST }, { config: c, chain });
+    const notListed = await executePay({ idempotency_key: "t-live-2", amount_zec: 0.001, recipient: ZTEST }, { config: c, chain });
     assert.equal(notListed.audit.status, "rejected");
-    const mainnet = await executePay({ amount_zec: 0.001, recipient: "u1mainnetlisted" }, { config: c, chain });
-    assert.equal(mainnet.audit.status, "error");
+    const mainnet = await executePay({ idempotency_key: "t-live-3", amount_zec: 0.001, recipient: "u1mainnetlisted" }, { config: c, chain });
+    assert.equal(mainnet.audit.status, "rejected");
+    assert.equal(mainnet.audit.code, "MAINNET_REFUSED");
     assert.equal(calls.length, 0);
-    const ok = await executePay({ amount_zec: 0.001, recipient: UTEST }, { config: c, chain });
+    const ok = await executePay({ idempotency_key: "t-live-4", amount_zec: 0.001, recipient: UTEST }, { config: c, chain });
     assert.equal(ok.audit.status, "ok");
     assert.equal(ok.audit.mock_txid, TXID);
+  });
+  it("passes exact zatoshis to zingo-cli without rounding", async () => {
+    const calls: string[][] = [];
+    const chain = new LiveChainAdapter({ network: "testnet", runner: okRunner(calls) });
+    const r = await executePay({ idempotency_key: "t-live-5", amount_zec: "0.00012345", recipient: UTEST }, { config: cfg(), chain });
+    assert.equal(r.audit.status, "ok");
+    assert.equal(r.audit.amount_zats, "12345");
+    assert.ok(calls[0].at(-1)?.startsWith(`quicksend '[{"address":"${UTEST}","amount":12345}]'`));
+  });
+  it("rejects sub-zatoshi amounts before any CLI call", async () => {
+    const calls: string[][] = [];
+    const chain = new LiveChainAdapter({ network: "testnet", runner: okRunner(calls) });
+    const r = await executePay({ idempotency_key: "t-live-6", amount_zec: "0.000000015", recipient: UTEST }, { config: cfg(), chain });
+    assert.equal(r.audit.status, "rejected");
+    assert.match(r.audit.error ?? "", /more than 8 decimal places/);
+    assert.equal(calls.length, 0);
   });
 });

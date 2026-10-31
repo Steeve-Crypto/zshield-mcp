@@ -1,0 +1,7 @@
+This session is deliberately offline (--offline): network-requiring commands are unavailable, and nothing touches the network. The only exit is to relaunch without --offline.
+Launching save task...
+{
+  "spendable_balance": 0
+}
+Save task shutdown successfully.
+Zingo CLI quit successfully.

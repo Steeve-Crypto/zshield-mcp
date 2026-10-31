@@ -1,0 +1,30 @@
+{
+  "ironwood_notes": { "note_summaries": [] },
+  "orchard_notes": {
+    "note_summaries": [
+      {
+        "value": 800000,
+        "status": "confirmed at block height 12",
+        "spend_status": "confirmed spent in 0505050505050505050505050505050505050505050505050505050505050505",
+        "memo": null,
+        "time": 0,
+        "txid": "0303030303030303030303030303030303030303030303030303030303030303",
+        "output_index": 1,
+        "account_id": 0,
+        "scope": "internal"
+      },
+      {
+        "value": 5000,
+        "status": "calculated at block height 20",
+        "spend_status": "unspent",
+        "memo": null,
+        "time": 0,
+        "txid": "0707070707070707070707070707070707070707070707070707070707070707",
+        "output_index": 0,
+        "account_id": 0,
+        "scope": "internal"
+      }
+    ]
+  },
+  "sapling_notes": { "note_summaries": [] }
+}
