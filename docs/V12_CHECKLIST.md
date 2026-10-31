@@ -265,3 +265,18 @@ Totals: 257 notes. Fixed before the sweep: 97. Fixed now: 81. Still true and not
 | 255 | F-36 | `src/payments/store.ts` | removed (imp) | Only readable pending rows reconstruct intents and key bindings. | fixed now (850b609) | the pending rows are no longer used to rebuild intents or bindings. `tests/v12r9.test.ts:51` `tests/v12r9.test.ts:61` |
 | 256 | F-36 | `src/tools/pay.ts` | `src/tools/pay.ts:364` | Absence of the legacy binding enters the new-payment path. | still true as a limit | a key that exists only in an audit log, never imported by an older version, is not known to the store and is treated as new. This is the accepted result of dropping the import (documented in RELIABILITY_DESIGN); keys already imported stay. `tests/v12r9.test.ts:87` |
 | 257 | F-36 | `src/tools/pay.ts` | `src/tools/pay.ts:745` | The old key is newly bound immediately before sending. | still true as a limit | same: with no import, such an old key is bound when it is first used again; stores that were imported keep their bindings. `tests/v12r9.test.ts:87` |
+
+## Run 7 (option B)
+
+The lease code (`src/payments/filelock.ts`, its heartbeat, renewal and stale-lock breaking, the send start deadline, and `ZSHIELD_LOCK_LEASE_MS`) is gone. Rows above that point at it (61 to 68, 122 to 129, 174 to 176, 180, 231) describe code that no longer exists; the lock is now one OS lock held for the whole send (see [RELIABILITY_DESIGN.md](RELIABILITY_DESIGN.md)). Each run 7 test fails on 0a27b20 and passes now.
+
+| Finding | Status | Proof |
+|---------|--------|-------|
+| F-14 A frozen or stalled holder lost its lock and a second process sent again (includes the start window gap) | fixed now | `tests/invariants/lock.test.ts`: frozen holders at both fences, a live stalled holder, a killed holder, a dead holder stops the send |
+| F-37 A key directory fsync failure consumed the key | fixed now | `tests/invariants/state.test.ts` (F-37) |
+| F-38 Reads ran between stage and transmit | fixed now | `tests/invariants/lock.test.ts` (F-38) |
+| F-39 Status idempotency_key had no length cap | fixed now | `tests/invariants/state.test.ts` (F-39) |
+| F-40 A short write could interleave audit rows | fixed now | `tests/invariants/state.test.ts` (F-40) |
+| F-41 WalletBusyError after staging was recorded not sent | fixed now | `tests/invariants/state.test.ts` (F-41) |
+| EACCES reading the keys dir made `zcash_pay` throw | fixed now | `tests/invariants/state.test.ts` |
+| Operation id made by ZShield, stored, on every audit row, usable for status | new | `tests/invariants/operation.test.ts` |
