@@ -25,7 +25,7 @@ import { ALLOWED, tempConfig } from "./helpers.ts";
 const R = "utest1" + "r".repeat(100);
 const OTHER = "utest1" + "o".repeat(100);
 const T0 = Date.parse("2026-10-26T12:00:00Z");
-const synced: ChainHealth = { walletHeight: 1000, chainTip: 1001, spendableZats: 0n };
+const synced: ChainHealth = { walletHeight: 1200, chainTip: 1201, spendableZats: 0n };
 
 beforeEach(() => resetPaymentStores());
 
@@ -328,12 +328,12 @@ describe("F-22: the chain tip cannot be trusted low", () => {
   it("expiry is measured from the wallet's own height at send time, not only the server's tip", async () => {
     const config = liveCfg();
     pending(config, "c1", { chain_tip: 100, wallet_height: 990 } as Partial<AuditEntry>);
-    const early = await recoverPendingPayments(config, chainOf([], { walletHeight: 1100, chainTip: 1101, spendableZats: 0n }), { now: T0 + recovery.RECOVERY_EXPIRY_MS + 1 });
-    assert.equal(early[0].status, "not_found", "1100 is past 990 + 40 + margin");
+    const early = await recoverPendingPayments(config, chainOf([], { walletHeight: 1200, chainTip: 1201, spendableZats: 0n }), { now: T0 + recovery.RECOVERY_EXPIRY_MS + 1 });
+    assert.equal(early[0].status, "not_found", "1100 is past 990 + 1 + 120 + margin");
     const config2 = liveCfg();
     pending(config2, "c2", { chain_tip: 100, wallet_height: 990 } as Partial<AuditEntry>);
-    const notYet = await recoverPendingPayments(config2, chainOf([], { walletHeight: 1000, chainTip: 1001, spendableZats: 0n }), { now: T0 + recovery.RECOVERY_EXPIRY_MS + 1 });
-    assert.equal(notYet[0].status, "unknown", "1000 is not past 990 + 40 + margin");
+    const notYet = await recoverPendingPayments(config2, chainOf([], { walletHeight: 1100, chainTip: 1101, spendableZats: 0n }), { now: T0 + recovery.RECOVERY_EXPIRY_MS + 1 });
+    assert.equal(notYet[0].status, "unknown", "1000 is not past 990 + 1 + 120 + margin");
   });
 
   it("a server tip below the anchor, or below the wallet, is no proof of expiry", async () => {
@@ -350,7 +350,7 @@ describe("F-22: the chain tip cannot be trusted low", () => {
     const config = liveCfg();
     pending(config, "c1", { chain_tip: 900, wallet_height: 900 } as Partial<AuditEntry>);
     storeFor(config, chainOf([])).raiseTipMark(5000);
-    const rows = await recoverPendingPayments(config, chainOf([], { walletHeight: 1100, chainTip: 1101, spendableZats: 0n }), { now: T0 + recovery.RECOVERY_EXPIRY_MS + 1 });
+    const rows = await recoverPendingPayments(config, chainOf([], { walletHeight: 1200, chainTip: 1201, spendableZats: 0n }), { now: T0 + recovery.RECOVERY_EXPIRY_MS + 1 });
     assert.equal(rows[0].status, "unknown");
   });
 

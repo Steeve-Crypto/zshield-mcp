@@ -360,17 +360,21 @@ export class LiveChainAdapter implements ChainAdapter {
     }
     const timeoutMs = healthTimeoutMs();
     let chainTip: number;
+    let branchProblem: string | undefined;
     try {
       // --nosync: a sync cut short by this one-shot run leaves new blocks marked unscanned,
       // and zingo-cli then reports a spendable balance of 0 until the next full sync.
       const args = ["--chain", "testnet", "--server", this.server, "--data-dir", this.walletPath, "--nosync", "info"];
-      chainTip = parseLatestBlockHeight(await this.exec(args, { timeoutMs }));
+      const info = await this.exec(args, { timeoutMs });
+      chainTip = parseLatestBlockHeight(info);
+      branchProblem = consensusProblem(info);
     } catch (e) {
       if (e instanceof WalletBusyError) throw e;
       throw new ChainUnreachableError(
         `lightwalletd at ${displayUrl(this.server)} did not report the chain tip: ${redact(e instanceof Error ? e.message : String(e))}`
       );
     }
+    if (branchProblem) throw new ChainUnreachableError(`lightwalletd at ${displayUrl(this.server)} ${branchProblem}`);
     const walletHeight = parseWalletHeight(await this.exec(this.offline("height"), { timeoutMs }));
     const spendableZats = parseSpendable(await this.exec(this.offline("spendable_balance"), { timeoutMs }));
     return { walletHeight, chainTip, spendableZats, ...(synced === undefined ? {} : { synced }), ...(syncDetail ? { syncDetail } : {}) };
@@ -531,6 +535,8 @@ export class LiveChainAdapter implements ChainAdapter {
       if (e instanceof CliTimeoutError) throw new Error(`zingo-cli did not finish building the transaction (${e.message}). Nothing was sent.`);
       throw e;
     }
+    // Built before anything is bound, so a bad txid can never become a bare `transmit`.
+    const transmitInput = transmitCommand(txid);
     // Bind the txid durably. If that fails the transaction is never transmitted.
     req.stage?.(txid);
     // A lost lock stops here, before the wallet process starts.
@@ -540,7 +546,7 @@ export class LiveChainAdapter implements ChainAdapter {
       this.assertPinned();
       sent = await this.exec(this.baseArgs(), {
         timeoutMs: SEND_TIMEOUT_MS,
-        input: `transmit ${txid}\nquit\n`,
+        input: transmitInput,
         lockWaitMs: SEND_LOCK_WAIT_MS,
       });
     } catch (e) {
@@ -598,6 +604,15 @@ export function parseStaged(out: string): string {
   return m[1].toLowerCase();
 }
 
+/**
+ * The input for the transmit run. A bare `transmit` sends every calculated transaction in
+ * the wallet, so the txid is always there and always 64 lowercase hex digits.
+ */
+export function transmitCommand(txid: string): string {
+  if (!/^[0-9a-f]{64}$/.test(txid)) throw new Error("Refusing to transmit without a valid transaction id.");
+  return `transmit ${txid}\nquit\n`;
+}
+
 /** Whether `transmit <txid>` reported exactly that txid and nothing else. */
 export function transmitted(out: string, txid: string): boolean {
   if (/error/i.test(out)) return false;
@@ -644,6 +659,20 @@ export function parseBalance(out: string): { confirmedZats: bigint; unconfirmedZ
 }
 
 /** Parse `zingo-cli spendable_balance`, which prints `{ "spendable_balance": 0 }`. */
+/** The consensus branch zingo-cli's testnet must be on (NU7). A server on another one is stale or on another chain. */
+export const EXPECTED_TESTNET_BRANCH = "77190ad9";
+
+/** A problem with the chain `info` reports, when it names the chain and branch. Undefined when fine or unreported. */
+export function consensusProblem(info: string): string | undefined {
+  const name = info.match(/"chain_name"\s*:\s*"([^"]*)"/)?.[1];
+  if (name !== undefined && name !== "test") return `reports chain "${name.slice(0, 20)}", not testnet. Nothing was sent.`;
+  const branch = info.match(/"consensus_branch_id"\s*:\s*"([^"]*)"/)?.[1];
+  if (branch !== undefined && branch.toLowerCase() !== EXPECTED_TESTNET_BRANCH) {
+    return `reports consensus branch ${branch.slice(0, 12)}, expected ${EXPECTED_TESTNET_BRANCH}. Nothing was sent.`;
+  }
+  return undefined;
+}
+
 /** `info` prints JSON with "latest_block_height". */
 export function parseLatestBlockHeight(out: string): number {
   const m = out.match(/"latest_block_height"\s*:\s*(\d+)/);

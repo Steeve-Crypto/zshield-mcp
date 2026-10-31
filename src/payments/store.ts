@@ -263,6 +263,19 @@ export class PaymentStore {
     return this.readJson<{ call_id: string }>(join(this.sub("ops"), `${operationId}.json`))?.call_id;
   }
 
+  /**
+   * A call from this wallet that was signed (its txid is on record) and is not settled: it
+   * may have been broadcast, and its notes are still spoken for. Undefined when there is none.
+   */
+  unresolvedSend(exceptCallId?: string): { callId: string; txid: string } | undefined {
+    for (const callId of this.pendingCalls()) {
+      if (callId === exceptCallId) continue;
+      const r = this.readCall(callId);
+      if (r && !isSettled(r.state) && (r.stagedTxid ?? r.txid)) return { callId, txid: (r.stagedTxid ?? r.txid)! };
+    }
+    return undefined;
+  }
+
   /** Add one event. Events are never rewritten. */
   appendEvent(event: CallEvent): void {
     const dir = this.callDir(event.call_id);

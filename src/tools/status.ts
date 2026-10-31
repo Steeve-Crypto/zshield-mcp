@@ -69,8 +69,14 @@ function lookup(config: Config, chain: ChainAdapter, input: PaymentStatusInput):
   const store = storeFor(config, chain);
   if (byOp) {
     const callId = store.callForOperation(input.operation_id!);
-    const record = callId ? store.readCall(callId) : undefined;
-    if (callId && record) return { callId, key: record.intent?.idempotency_key, record, store };
+    let record: ReturnType<typeof store.readCall>;
+    try {
+      record = callId ? store.readCall(callId) : undefined;
+    } catch {
+      record = undefined;
+    }
+    // The call must carry this very id, so an index entry that points at another call finds nothing.
+    if (callId && record && record.intent?.operation_id === input.operation_id) return { callId, key: record.intent?.idempotency_key, record, store };
     throw new ReadRejection("PAYMENT_NOT_FOUND", "No zcash_pay call with this operation_id for this wallet.");
   }
   if (byCall) {

@@ -115,9 +115,10 @@ export interface WalletLock {
  * and forgotten.
  */
 const HOLDER = [
-  "use strict; use Fcntl qw(:flock O_WRONLY O_APPEND O_CREAT O_NOFOLLOW); use Time::HiRes qw(time sleep);",
+  "use strict; use Fcntl qw(:flock O_WRONLY O_APPEND O_CREAT O_NOFOLLOW O_NONBLOCK); use Time::HiRes qw(time sleep);",
   "$| = 1; my ($file, $wait) = @ARGV; umask(077);",
-  "sysopen(my $fh, $file, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW, 0600) or do { print \"ERR\\n\"; exit 77 };",
+  "sysopen(my $fh, $file, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_NONBLOCK, 0600) or do { print \"ERR\\n\"; exit 77 };",
+  "my @st = stat($fh); unless (-f $fh && @st && $st[4] == $<) { print \"ERR\\n\"; exit 77 }",
   "my $end = time() + $wait / 1000;",
   "until (flock($fh, LOCK_EX | LOCK_NB)) { if (time() >= $end) { print \"BUSY\\n\"; exit 75 } sleep(0.05) }",
   "print \"LOCKED\\n\";",

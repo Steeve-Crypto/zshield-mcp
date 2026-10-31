@@ -133,7 +133,7 @@ export interface TxSummary {
   blockHeight?: number;
   /**
    * For a transaction that is not confirmed, the height it was built for. It expires
-   * unmined about 40 blocks later. Not a mined height
+   * unmined 120 blocks later. Not a mined height
    */
   targetHeight?: number;
   /** For example sent or received */
