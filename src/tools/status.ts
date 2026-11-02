@@ -1,3 +1,4 @@
+import { findTransaction } from "../chain/types.js";
 import { z } from "zod";
 import { TESTNET_EXPLORER } from "../chain/live.js";
 import type { ChainAdapter } from "../chain/types.js";
@@ -109,7 +110,7 @@ async function byTxid(
   now: number,
   offline: boolean
 ): Promise<Partial<PaymentStatus> & { state: PaymentState; message: string }> {
-  const found = (await chain.getHistory(Infinity, { offline })).filter((t) => t.txid === txid);
+  const found = await findTransaction(chain, txid, { offline });
   // Listed twice, or not vouched for by the wallet's JSON: a memo may have forged it. Nothing
   // is read from it and nothing is recorded.
   if (found.length > 1 || found[0]?.verified === false) {
@@ -159,9 +160,9 @@ export async function paymentStatus(
     const r = found.refused;
     return { ...base, state: "failed", amount_zats: r.amount_zats, code: r.code, message: `Not sent: ${r.error ?? r.code ?? "refused"}.` };
   }
-  const settled = settledStatus(found.record, base);
+  const settled = settledStatus(found.record, base, config.chainMode === "live");
   if (settled) return settled;
-  if (!chain.syncWallet) return fromChain(config, chain, found.store, found.record, base, now, undefined);
+  if (!chain.syncWallet && config.chainMode !== "live" && chain.mode !== "live") return fromChain(config, chain, found.store, found.record, base, now, undefined);
 
   // Live: sync first, bounded by STATUS_SYNC_TIMEOUT_MS, so a mined payment reads as
   // mined. Only while no send holds the wallet; never wait for one.
@@ -177,8 +178,8 @@ export async function paymentStatus(
     const sync = await boundedSync(chain);
     // Re-read: another process may have settled the call while this one synced.
     const record = found.store.readCall(found.callId) ?? found.record;
-    const s = settledStatus(record, base) ?? (await fromChain(config, chain, found.store, record, base, now, sync ?? { complete: false, elapsedMs: 0, detail: "not synced" }));
-    if (sync?.complete) return s;
+    const s = settledStatus(record, base, config.chainMode === "live") ?? (await fromChain(config, chain, found.store, record, base, now, sync ?? { complete: false, elapsedMs: 0, detail: "not synced" }));
+    if (!chain.syncWallet || sync?.complete) return s;
     let walletHeight = s.wallet_height;
     if (walletHeight === undefined) {
       try {
@@ -205,13 +206,13 @@ function failedStatus(base: { call_id: string; idempotency_key?: string }, amoun
 }
 
 /** The answer for a call whose state needs no chain read: not sent, or proven expired. */
-function settledStatus(record: CallRecord, base: { call_id: string; idempotency_key?: string }): PaymentStatus | undefined {
+function settledStatus(record: CallRecord, base: { call_id: string; idempotency_key?: string }, live: boolean): PaymentStatus | undefined {
   const amount = record.intent?.amount_zats;
   if (record.state === "not_sent") {
     const top = record.top;
     return { ...base, state: "failed", amount_zats: amount, code: top?.code, message: `Not sent: ${top?.error ?? top?.code ?? "refused"}.` };
   }
-  if (record.state === "expired") {
+  if (record.state === "expired" && !live) {
     return { ...base, state: "expired", amount_zats: amount, code: "PAYMENT_EXPIRED", message: record.top?.note ?? "Proven not sent." };
   }
   return undefined;
@@ -233,7 +234,7 @@ async function fromChain(
   const intent = record.intent;
   const amount = intent?.amount_zats;
   const started = intent ? Date.parse(intent.ts) : now;
-  const common = { ...base, amount_zats: amount, code: record.top?.code };
+  const common = { ...base, amount_zats: amount, code: record.state === "expired" && config.chainMode === "live" ? undefined : record.top?.code };
 
   if (record.txid && (record.state === "sent" || record.state === "mined" || record.state === "failed")) {
     const s = await byTxid(chain, record.txid, started, now, offline);
@@ -280,6 +281,7 @@ async function fromChain(
   if (r.status === "confirmed" && r.txid && (!after || after.txid === r.txid)) {
     return { ...common, ...(await byTxid(chain, r.txid, started, now, offline)) };
   }
+  if (r.status === "not_sent") return { ...common, state: "failed", message: r.note };
   if (r.status === "not_found") return { ...common, state: "expired", code: "PAYMENT_EXPIRED", message: r.note };
   if (r.status === "failed") return failedStatus(base, amount, r.txid, r.note);
   if (r.status === "broadcast") return { ...common, state: "broadcast", txid: r.txid, message: r.note };

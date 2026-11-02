@@ -17,16 +17,19 @@ function slowChain() {
   const real = chain.pay.bind(chain);
   const stats = { running: 0, maxRunning: 0, sends: 0 };
   let open!: () => void;
+  let markStarted!: () => void;
+  const started = new Promise<void>((r) => (markStarted = r));
   const gate = new Promise<void>((r) => (open = r));
   chain.pay = async (req: PaymentRequest): Promise<PaymentReceipt> => {
     stats.running++;
+    markStarted();
     stats.sends++;
     stats.maxRunning = Math.max(stats.maxRunning, stats.running);
     await gate;
     stats.running--;
     return real(req);
   };
-  return { chain, stats, open };
+  return { chain, stats, open, started };
 }
 
 beforeEach(() => resetPaymentIndexes());
@@ -34,10 +37,10 @@ beforeEach(() => resetPaymentIndexes());
 describe("single-flight sends", () => {
   it("runs one send at a time per wallet; the next one queues", async () => {
     const config = tempConfig({ sendQueueWaitMs: 5_000 });
-    const { chain, stats, open } = slowChain();
+    const { chain, stats, open, started } = slowChain();
     const a = executePay({ amount_zec: "0.001", recipient: ALLOWED }, { config, chain });
     const b = executePay({ amount_zec: "0.002", recipient: ALLOWED }, { config, chain });
-    await new Promise((r) => setTimeout(r, 30));
+    await started;
     assert.equal(stats.sends, 1);
     open();
     const [ra, rb] = await Promise.all([a, b]);
@@ -50,9 +53,9 @@ describe("single-flight sends", () => {
 
   it("returns BUSY after the bounded wait and sends nothing", async () => {
     const config = tempConfig({ sendQueueWaitMs: 50 });
-    const { chain, stats, open } = slowChain();
+    const { chain, stats, open, started } = slowChain();
     const a = executePay({ amount_zec: "0.001", recipient: ALLOWED }, { config, chain });
-    await new Promise((r) => setTimeout(r, 10));
+    await started;
     const b = await executePay({ amount_zec: "0.002", recipient: ALLOWED }, { config, chain });
     assert.equal(b.code, "BUSY");
     assert.equal(JSON.parse(b.text).status, "error");

@@ -443,11 +443,11 @@ function refuseKey(
 /** What a caller is told about a call in each state, for a replay. */
 const PENDING_MESSAGE =
   "A payment with this idempotency key was started and has no recorded result yet. It was not sent again. Call zcash_payment_status with this idempotency_key.";
-const EXPIRED_MESSAGE =
+const MOCK_EXPIRED_MESSAGE =
   "The first payment with this idempotency key was proven never sent: the wallet scanned past its expiry height and found no matching transaction. Use a new idempotency key to pay.";
 
 const FAILED_MESSAGE =
-  "The first payment with this idempotency key returned a txid, but the wallet has since marked that transaction failed. It was not sent again, and this key will not send again. Check the explorer; if it did not go through, use a new idempotency key to pay.";
+  "The wallet marked the first transaction failed. This observation is not irreversible proof of non-payment across a reorg. Nothing was sent again. Do not pay again with a new key; check payment_status for this transaction.";
 
 /** Same key, same parameters: report the first call's outcome from the store. Nothing is sent. */
 function replay(input: PayInput, deps: PayDeps, callId: string, originalCallId: string, record?: CallRecord): PayResult {
@@ -498,8 +498,11 @@ function replay(input: PayInput, deps: PayDeps, callId: string, originalCallId: 
       "PAYMENT_FAILED"
     );
   }
+  if (state === "expired" && config.chainMode === "live") {
+    return respond(false, { status: "unknown", code: "SEND_UNCONFIRMED", message: "An earlier version recorded expiry from a finite chain view. That does not prove non-payment across a reorg. Check payment_status. Do not pay again with a new key." }, "SEND_UNCONFIRMED");
+  }
   if (state === "expired") {
-    return respond(false, { status: "expired", code: "PAYMENT_EXPIRED", message: EXPIRED_MESSAGE, error: EXPIRED_MESSAGE }, "PAYMENT_EXPIRED");
+    return respond(false, { status: "expired", code: "PAYMENT_EXPIRED", message: MOCK_EXPIRED_MESSAGE, error: MOCK_EXPIRED_MESSAGE }, "PAYMENT_EXPIRED");
   }
   if (state === "unknown") {
     const message = top?.error ?? SEND_UNCONFIRMED_GUIDANCE;
@@ -646,7 +649,7 @@ async function runPay(
         const stuck = store.unresolvedSend(callId);
         if (stuck) {
           policyPassed = false;
-          fail("error", "UNRESOLVED_PAYMENT", `An earlier payment from this wallet (call ${stuck.callId}, transaction ${stuck.txid}) is not resolved. It may have been broadcast. Check it with zcash_payment_status. Nothing was sent.`);
+          fail("error", "UNRESOLVED_PAYMENT", `An earlier payment from this wallet (call ${stuck.callId}, ${stuck.txid ? `transaction ${stuck.txid}` : "legacy expiry observation"}) is not resolved. It may have been broadcast. Check it with zcash_payment_status. Nothing was sent.`);
         }
       } catch (e) {
         policyPassed = false;
@@ -743,7 +746,7 @@ async function runPay(
         ...keyFields,
         chain_tip: chainTip,
         wallet_height: walletHeight,
-        ...(chain.mode === "live" ? { two_step: true } : {}),
+        ...(chain.stagesBeforeBroadcast ? { two_step: true } : {}),
       };
       // Charge audit capacity before creating durable payment state. A flood after
       // exhaustion must not grow calls/ or ops/ with intents that cannot be sent.

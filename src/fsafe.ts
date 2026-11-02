@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve, parse } from "node:path";
 
 /**
  * File helpers for the audit log and the payment store. They refuse symlinks and files
@@ -32,6 +32,7 @@ function checkOwner(path: string, st: fs.Stats): void {
 /** Flush a directory entry to disk. Windows cannot open a directory for fsync; NTFS journals it. */
 export function fsyncDir(dir: string): void {
   if (process.platform === "win32") return;
+  dir = dirname(safeRecordPath(join(dir, ".flush")));
   const fd = fs.openSync(dir, "r");
   try {
     fs.fsyncSync(fd);
@@ -46,6 +47,7 @@ export function fsyncDir(dir: string): void {
  * group or other bits to 0700. Returns a note when a mode was repaired.
  */
 export function ensurePrivateDir(dir: string): string | undefined {
+  dir = safeRecordPath(dir);
   const missing: string[] = [];
   for (let d = dir; !fs.existsSync(d); d = dirname(d)) {
     missing.unshift(d);
@@ -71,6 +73,7 @@ export function ensurePrivateDir(dir: string): string | undefined {
  * tighten a loose mode to 0600. Missing files are fine. Returns a note when repaired.
  */
 export function checkPrivateFile(path: string): string | undefined {
+  path = safeRecordPath(path);
   let st: fs.Stats;
   try {
     st = fs.lstatSync(path);
@@ -102,6 +105,7 @@ function checkFd(fd: number, path: string): void {
  * entry fsynced.
  */
 export function appendPrivate(file: string, data: string): void {
+  file = safeRecordPath(file);
   const isNew = !fs.existsSync(file);
   const fd = fs.openSync(file, fs.constants.O_RDWR | fs.constants.O_APPEND | fs.constants.O_CREAT | NOFOLLOW, 0o600);
   try {
@@ -142,6 +146,7 @@ function undoPartialAppend(fd: number, size: number, buf: Buffer): void {
 
 /** Read a small private file without following a symlink. Undefined when missing. */
 export function readPrivate(path: string, maxBytes: number): string | undefined {
+  path = safeRecordPath(path);
   let fd: number;
   try {
     fd = fs.openSync(path, fs.constants.O_RDONLY | NOFOLLOW);
@@ -168,6 +173,7 @@ export function readPrivate(path: string, maxBytes: number): string | undefined 
 }
 
 function writeTemp(dir: string, data: string): string {
+  dir = dirname(safeRecordPath(join(dir, "placeholder")));
   const tmp = join(dir, `.tmp-${process.pid}-${randomBytes(6).toString("hex")}`);
   const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NOFOLLOW, 0o600);
   try {
@@ -195,6 +201,7 @@ function writeTemp(dir: string, data: string): string {
  * Returns false when the name already existed.
  */
 export function createExclusive(dir: string, name: string, data: string): boolean {
+  dir = dirname(safeRecordPath(join(dir, name)));
   const tmp = writeTemp(dir, data);
   try {
     fs.linkSync(tmp, join(dir, name));
@@ -224,6 +231,7 @@ export function createExclusive(dir: string, name: string, data: string): boolea
 
 /** Replace `dir/name` with `data` atomically (write, fsync, rename, fsync the dir). */
 export function replaceAtomic(dir: string, name: string, data: string): void {
+  dir = dirname(safeRecordPath(join(dir, name)));
   const tmp = writeTemp(dir, data);
   fs.renameSync(tmp, join(dir, name));
   fsyncDir(dir);
@@ -237,16 +245,64 @@ export function replaceAtomic(dir: string, name: string, data: string): void {
  */
 export function assertSafeAncestors(path: string, me: number | undefined = myUid()): void {
   if (process.platform === "win32" || me === undefined) return;
-  let d = dirname(path);
-  while (!fs.existsSync(d) && dirname(d) !== d) d = dirname(d);
-  for (let cur = fs.realpathSync(d); ; cur = dirname(cur)) {
-    const st = fs.statSync(cur);
-    if ((st.mode & 0o022) !== 0 && (st.mode & 0o1000) === 0) {
-      throw new UnsafePathError(`${cur} is writable by other users and not sticky (mode ${(st.mode & 0o7777).toString(8)}), so ${path} could be swapped. Run: chmod go-w '${cur}'`);
+  validateComponents(dirname(resolve(path)), me);
+}
+
+function checkNamespace(path: string, st: fs.Stats, me: number): void {
+  if (st.uid !== 0 && st.uid !== me) throw new UnsafePathError(`${path} is owned by uid ${st.uid}, who could swap the configured namespace.`);
+  if (!st.isSymbolicLink() && (st.mode & 0o022) && !(st.mode & 0o1000)) throw new UnsafePathError(`${path} is writable by other users and not sticky.`);
+}
+
+/** Judge lexical components BEFORE following links, then judge their targets too.
+ * Every accepted namespace component is controlled by root or this service's uid.
+ * Sticky shared directories protect the next service-owned component from other uids.
+ * No other local user can swap a component between validation and open; same-uid/root
+ * compromise remains outside this boundary. Root-owned OS aliases (/var on macOS)
+ * are supported, but attacker-owned aliases to an otherwise safe target are refused.
+ */
+function validateComponents(dir: string, me: number): void {
+  const root = parse(dir).root;
+  let cur = root;
+  for (const part of ["", ...dir.slice(root.length).split(/[\\/]/).filter(Boolean)]) {
+    if (part) cur = join(cur, part);
+    let st: fs.Stats;
+    try { st = fs.lstatSync(cur); } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") break;
+      throw e;
     }
-    if (st.uid !== 0 && st.uid !== me) {
-      throw new UnsafePathError(`${cur} is owned by uid ${st.uid}, who could swap ${path}. Use a path under a directory you own.`);
+    checkNamespace(cur, st, me);
+    const old = recordParents.get(cur);
+    if (old) {
+      const real = fs.realpathSync(cur), now = fs.statSync(real);
+      if (old.real !== real || old.dev !== now.dev || old.ino !== now.ino) throw new UnsafePathError("A record ancestor no longer matches its pinned namespace.");
     }
-    if (dirname(cur) === cur) break;
+    if (st.isSymbolicLink()) {
+      const real = fs.realpathSync(cur);
+      // realpath contains no links. Check the entire resolved chain, not just its leaf.
+      for (let p = real; ; p = dirname(p)) {
+        const target = fs.lstatSync(p);
+        checkNamespace(p, target, me);
+        if (!target.isDirectory()) throw new UnsafePathError("A record ancestor is not a directory.");
+        if (dirname(p) === p) break;
+      }
+    } else if (!st.isDirectory()) throw new UnsafePathError("A record ancestor is not a directory.");
   }
+}
+
+const recordParents = new Map<string, { real: string; dev: number; ino: number }>();
+/** Retain canonical parent identity; runtime operations use the canonical namespace.
+ * Missing suffixes are resolved beneath the nearest existing, checked parent. Pins
+ * survive for the process lifetime, so retargeting an accepted alias fails closed.
+ */
+export function safeRecordPath(path: string): string {
+  if (process.platform === "win32") return path;
+  const absolute = resolve(path), parent = dirname(absolute);
+  assertSafeAncestors(absolute);
+  let existing = parent;
+  while (!fs.existsSync(existing) && dirname(existing) !== existing) existing = dirname(existing);
+  const real = fs.realpathSync(existing), st = fs.statSync(real);
+  const old = recordParents.get(existing);
+  if (old && (old.real !== real || old.dev !== st.dev || old.ino !== st.ino)) throw new UnsafePathError("A record directory no longer matches its pinned namespace.");
+  if (!old) recordParents.set(existing, { real, dev: st.dev, ino: st.ino });
+  return join(real, absolute.slice(existing.length));
 }

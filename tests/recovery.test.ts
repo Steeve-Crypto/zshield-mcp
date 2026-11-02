@@ -114,7 +114,7 @@ describe("crash recovery on startup", () => {
     assert.equal(row.txid, undefined);
   });
 
-  it("not_found only once a synced wallet has scanned past the expiry height", async () => {
+  it("chain absence remains unknown even after sync and expiry thresholds", async () => {
     const config = tempConfig();
     pending(config, "c1");
     const early = await recoverPendingPayments(config, chain([], { walletHeight: 940, chainTip: 941, spendableZats: 0n }).c, { now: late });
@@ -129,7 +129,7 @@ describe("crash recovery on startup", () => {
     assert.equal(offline[0].status, "unknown");
 
     const done = await recoverPendingPayments(config, chain([], synced).c, { now: late });
-    assert.equal(done[0].status, "not_found");
+    assert.equal(done[0].status, "unknown");
   });
 
   it("a match that is not mined yet stays unknown with the candidate", async () => {

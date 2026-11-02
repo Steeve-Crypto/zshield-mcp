@@ -61,14 +61,14 @@ describe("expiry: the pinned wallet lets a transaction live 120 blocks past its 
     }
   });
 
-  it("is proven not sent once the wallet is past the expiry plus margin, with the wall clock floor met", async () => {
+  it("remains unresolved even past the expiry margin and wall-clock floor", async () => {
     const config = tempConfig();
     pendingRow(config, "c1", 1000);
     const chain = readOnlyChain({ walletHeight: 1182, chainTip: 1183, spendableZats: 0n });
     const [early] = await recoverPendingPayments(config, chain, { now: T0 + 60_000 });
     assert.equal(early.status, "unknown", "the wall clock floor still applies");
     const [row] = await recoverPendingPayments(config, chain, { now: later });
-    assert.equal(row.status, "not_found");
+    assert.equal(row.status, "unknown");
   });
 });
 

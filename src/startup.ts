@@ -35,7 +35,7 @@ export function checkRecordPaths(config: Config, stateDir: string, platform: str
   };
   // No directory above these paths may let another user swap them. The allow-list file
   // itself must not be a symlink, another user's, or writable by group or other.
-  for (const p of [config.auditDir, stateDir, config.allowlistPath]) assertSafeAncestors(p);
+  for (const p of [config.auditDir, stateDir, config.allowlistPath, fallbackAuditPath(config.auditDir, config.auditFallbackPath), `${config.auditDir}.budget`, `${fallbackAuditPath(config.auditDir, config.auditFallbackPath)}.budget`]) assertSafeAncestors(p);
   assertAllowlistFileSafe(config.allowlistPath);
   for (const dir of [config.auditDir, stateDir]) {
     note(ensurePrivateDir(dir));
