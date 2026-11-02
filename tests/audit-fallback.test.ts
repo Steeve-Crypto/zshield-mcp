@@ -28,7 +28,7 @@ describe("audit fallback (V12 F-6)", () => {
     const res = await executePay({ amount_zec: "0.001", recipient: ALLOWED }, { config, chain });
     assert.equal(res.ok, true);
     const body = JSON.parse(res.text);
-    assert.match(body.audit_warning, /audit-fallback\.jsonl/);
+    assert.match(body.audit_warning, /fallback file/);
     assert.deepEqual(rows(fallback).map((r) => r.status), ["pending", "ok"]);
     assert.equal(statSync(fallback).mode & 0o777, 0o600);
   });
@@ -84,7 +84,7 @@ describe("audit fallback (V12 F-6)", () => {
     const fallback = join(mkdtempSync(join(tmpdir(), "zshield-fb-")), "fb.jsonl");
     const { client } = await connect(tempConfig({ auditDir: join(blocked(), "audits"), auditFallbackPath: fallback }));
     const body = JSON.parse(textOf(await client.callTool({ name: "zcash_balance", arguments: {} })));
-    assert.match(body.audit_warning, /fb\.jsonl/);
+    assert.match(body.audit_warning, /fallback file/);
     assert.equal(rows(fallback)[0].tool, "zcash_balance");
   });
 });

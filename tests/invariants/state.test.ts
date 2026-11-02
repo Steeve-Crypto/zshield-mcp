@@ -51,7 +51,7 @@ describe("state invariants", { timeout: 180_000 }, () => {
     const store = storeFor(config, chain);
     const callId = body.call_id as string;
     const rec = store.readCall(callId);
-    assert.ok(rec?.staged_txid === STAGED || JSON.stringify(rec).includes(STAGED), `the staged txid should be on record: ${JSON.stringify(rec)}`);
+    assert.ok(rec?.stagedTxid === STAGED || JSON.stringify(rec).includes(STAGED), `the staged txid should be on record: ${JSON.stringify(rec)}`);
     assert.notEqual(
       rec?.state,
       "not_sent",

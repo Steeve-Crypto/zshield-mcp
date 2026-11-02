@@ -1,3 +1,4 @@
+import type { AuditBudget } from "../audit/budget.js";
 import { writeAuditRow } from "../audit/log.js";
 import type { RateLimitAuditEntry } from "../types.js";
 
@@ -8,14 +9,14 @@ export const RATE_LIMIT_WINDOW_MS = 60_000;
 export const RATE_LIMITED_MESSAGE = "Too many tool calls this minute. Wait and try again.";
 
 /**
- * Per-process limit on tool calls, counted in fixed one-minute windows across all tools.
+ * Per-process limit on tool calls, counted in fixed one-minute windows, independently for payments, status and ordinary reads.
  * Refused calls write no audit row of their own. They are counted, and the count goes into
  * one summary row when the window rolls over or on the next call after it, so a flood of
  * refused calls adds at most one row per minute to the log.
  */
 export class RateLimiter {
   private windowStart: number;
-  private allowed = 0;
+  private allowed: Record<string, number> = {};
   private refused: Record<string, number> = {};
   private timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -24,7 +25,8 @@ export class RateLimiter {
     private readonly auditDir: string,
     private readonly now: () => number = Date.now,
     private readonly windowMs: number = RATE_LIMIT_WINDOW_MS,
-    private readonly auditFallbackPath?: string
+    private readonly auditFallbackPath?: string,
+    private readonly budget: AuditBudget = {}
   ) {
     this.windowStart = this.now();
   }
@@ -35,10 +37,12 @@ export class RateLimiter {
     if (now >= this.windowStart + this.windowMs) {
       this.flush();
       this.windowStart = now - ((now - this.windowStart) % this.windowMs);
-      this.allowed = 0;
+      this.allowed = {};
     }
-    if (this.allowed < this.limitPerMin) {
-      this.allowed++;
+    // Independent allowances: cheap reads cannot consume payment or status capacity.
+    const group = tool === "zcash_pay" ? "pay" : tool === "zcash_payment_status" ? "status" : "read";
+    if ((this.allowed[group] ?? 0) < this.limitPerMin) {
+      this.allowed[group] = (this.allowed[group] ?? 0) + 1;
       return true;
     }
     this.refused[tool] = (this.refused[tool] ?? 0) + 1;
@@ -75,7 +79,7 @@ export class RateLimiter {
     };
     this.refused = {};
     // Never throws: falls back to the fallback file, then stderr.
-    writeAuditRow({ auditDir: this.auditDir, auditFallbackPath: this.auditFallbackPath }, row);
+    writeAuditRow({ auditDir: this.auditDir, auditFallbackPath: this.auditFallbackPath, ...this.budget }, row);
   }
 }
 

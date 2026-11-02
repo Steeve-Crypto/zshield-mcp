@@ -13,18 +13,18 @@ export class BusyError extends Error {
 }
 
 /**
- * A mutex with a bounded wait. One holder at a time; others queue in arrival order and
+ * A mutex with a bounded wait. One holder at a time; queued payments go first, FIFO within each class, and
  * give up with BusyError after `waitMs`.
  */
 export class SendLock {
   private held = false;
-  private readonly waiters: { grant: () => void; done: boolean }[] = [];
+  private readonly waiters: { grant: () => void; done: boolean; payment: boolean }[] = [];
 
   get locked(): boolean {
     return this.held;
   }
 
-  acquire(waitMs: number): Promise<() => void> {
+  acquire(waitMs: number, payment = false): Promise<() => void> {
     const release = () => this.release();
     if (!this.held) {
       this.held = true;
@@ -33,6 +33,7 @@ export class SendLock {
     return new Promise((resolve, reject) => {
       const waiter = {
         done: false,
+        payment,
         grant: () => {
           clearTimeout(timer);
           waiter.done = true;
@@ -50,7 +51,8 @@ export class SendLock {
   }
 
   private release(): void {
-    const next = this.waiters.shift();
+    const payment = this.waiters.findIndex((w) => w.payment);
+    const next = this.waiters.splice(payment < 0 ? 0 : payment, 1)[0];
     if (next) next.grant();
     else this.held = false;
   }
@@ -116,20 +118,20 @@ export interface WalletLock {
  */
 const HOLDER = [
   "use strict; use Fcntl qw(:flock O_WRONLY O_APPEND O_CREAT O_NOFOLLOW O_NONBLOCK); use Time::HiRes qw(time sleep);",
-  "$| = 1; my ($file, $wait) = @ARGV; umask(077);",
+  "$| = 1; my ($file, $wait, $shared) = @ARGV; umask(077);",
   "sysopen(my $fh, $file, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_NONBLOCK, 0600) or do { print \"ERR\\n\"; exit 77 };",
   "my @st = stat($fh); unless (-f $fh && @st && $st[4] == $<) { print \"ERR\\n\"; exit 77 }",
   "my $end = time() + $wait / 1000;",
-  "until (flock($fh, LOCK_EX | LOCK_NB)) { if (time() >= $end) { print \"BUSY\\n\"; exit 75 } sleep(0.05) }",
+  "until (flock($fh, ($shared ? LOCK_SH : LOCK_EX) | LOCK_NB)) { if (time() >= $end) { print \"BUSY\\n\"; exit 75 } sleep(0.05) }",
   "print \"LOCKED\\n\";",
   "1 while sysread(STDIN, my $buf, 4096);",
 ].join(" ");
 
 const RELEASE_GRACE_MS = 3000;
 
-function takeOsLock(file: string, waitMs: number): Promise<WalletLock> {
+function takeOsLock(file: string, waitMs: number, shared = false): Promise<WalletLock> {
   return new Promise((resolve, reject) => {
-    const child = spawn("perl", ["-e", HOLDER, "--", file, String(Math.max(0, Math.floor(waitMs)))], { stdio: ["pipe", "pipe", "ignore"] });
+    const child = spawn("perl", ["-e", HOLDER, "--", file, String(Math.max(0, Math.floor(waitMs))), shared ? "1" : "0"], { stdio: ["pipe", "pipe", "ignore"] });
     let exited = false;
     let settled = false;
     let out = "";
@@ -189,16 +191,23 @@ function takeOsLock(file: string, waitMs: number): Promise<WalletLock> {
 export async function acquireWalletLock(
   store: { dir: string; requireOsLock?: boolean },
   waitMs: number,
-  _purpose?: string
+  purpose?: string
 ): Promise<WalletLock> {
   const start = Date.now();
-  const releaseLocal = await sendLockFor(store.dir).acquire(waitMs);
+  const releaseLocal = await sendLockFor(store.dir).acquire(waitMs, purpose === "zcash_pay");
+  let priority: WalletLock | undefined;
   try {
     let os: WalletLock | undefined;
     try {
       if (process.platform === "win32") throw new Error("The OS wallet lock is not supported on this platform.");
+      // A writer owns the turnstile while waiting for the wallet. Readers hold it
+      // only during admission, so later readers cannot overtake an admitted writer.
+      priority = await takeOsLock(join(store.dir, "send-priority.flock"), Math.max(0, waitMs - (Date.now() - start)), purpose !== "zcash_pay");
       os = await takeOsLock(join(store.dir, WALLET_LOCK_FILE), Math.max(0, waitMs - (Date.now() - start)));
+      if (purpose !== "zcash_pay") { await priority.release(); priority = undefined; }
     } catch (e) {
+      await priority?.release();
+      priority = undefined;
       if (e instanceof BusyError || store.requireOsLock) throw e;
     }
     let released = false;
@@ -206,6 +215,7 @@ export async function acquireWalletLock(
       assertHeld() {
         if (released) throw new LockLostError();
         os?.assertHeld();
+        priority?.assertHeld();
       },
       async release() {
         if (released) return;
@@ -213,11 +223,13 @@ export async function acquireWalletLock(
         try {
           await os?.release();
         } finally {
+          await priority?.release();
           releaseLocal();
         }
       },
     };
   } catch (e) {
+    await priority?.release();
     releaseLocal();
     throw e;
   }

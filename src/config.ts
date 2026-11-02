@@ -1,3 +1,4 @@
+import { DEFAULT_AUDIT_MAX_BYTES, parseAuditBudget } from "./audit/budget.js";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -45,6 +46,7 @@ export function checkServerUrl(url: string | undefined, env: NodeJS.ProcessEnv =
   }
   if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("LIGHTWALLETD_URL must start with http:// or https://.");
   if (!urlHasCredentials(url)) return url;
+  if (u.protocol !== "https:") throw new Error("Credential-bearing LIGHTWALLETD_URL requires https://.");
   if (env.ZSHIELD_ALLOW_URL_CREDENTIALS !== "1") {
     throw new Error(
       "LIGHTWALLETD_URL carries credentials (a user, password, query string, or fragment). zingo-cli takes the server only on its command line, where other local users can read it. Use a URL without credentials, or set ZSHIELD_ALLOW_URL_CREDENTIALS=1 to accept that risk."
@@ -96,7 +98,7 @@ export function loadConfig(cwd = process.cwd()): Config {
 
   const fallbackPath = envOr<string | undefined>("AUDIT_FALLBACK_PATH", fromFile.audit_fallback_path, (v) => v);
 
-  return {
+  const config: Config = {
     spendingCapZec,
     allowlistPath: resolve(
       cwd,
@@ -105,6 +107,8 @@ export function loadConfig(cwd = process.cwd()): Config {
     chainMode,
     auditDir: resolve(cwd, envOr("AUDIT_DIR", fromFile.audit_dir ?? "./audits", (v) => v)),
     auditFallbackPath: fallbackPath === undefined ? undefined : resolve(cwd, fallbackPath),
+    auditMaxBytes: parseAuditBudget(process.env.AUDIT_MAX_BYTES ?? DEFAULT_AUDIT_MAX_BYTES),
+    auditDiagnosticMaxBytes: parseAuditBudget(process.env.AUDIT_DIAGNOSTIC_MAX_BYTES ?? DEFAULT_AUDIT_MAX_BYTES),
     viewKeyFingerprintSalt: envOr(
       "VIEW_KEY_FINGERPRINT_SALT",
       fromFile.view_key_fingerprint_salt ?? "dev-only-change-me",
@@ -125,4 +129,13 @@ export function loadConfig(cwd = process.cwd()): Config {
       envOr<number | string>("RATE_LIMIT_PER_MIN", fromFile.rate_limit_per_min ?? RATE_LIMIT_DEFAULT_PER_MIN, (v) => v)
     ),
   };
+  assertFingerprintSalt(config);
+  return config;
+}
+
+/** Public development salts cannot identify live wallets safely across deployments. */
+export function assertFingerprintSalt(config: Pick<Config, "chainMode" | "viewKeyFingerprintSalt">): void {
+  if (config.chainMode === "live" && (!config.viewKeyFingerprintSalt?.trim() || config.viewKeyFingerprintSalt === "dev-only-change-me")) {
+    throw new Error("Live mode requires a deployment-specific VIEW_KEY_FINGERPRINT_SALT. Generate one with openssl rand -hex 32.");
+  }
 }

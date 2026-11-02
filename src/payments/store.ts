@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { createExclusive, ensurePrivateDir, readPrivate, replaceAtomic } from "../fsafe.js";
+import { createExclusive, ensurePrivateDir, fsyncDir, readPrivate, replaceAtomic } from "../fsafe.js";
 import { parseZecToZats } from "../policy/amount.js";
 import type { ChainAdapter } from "../chain/types.js";
 import type { Config, PossibleSend } from "../types.js";
@@ -203,6 +203,7 @@ export class PaymentStore {
 
   /** The call bound to an idempotency key, if any. One small file read. */
   readKey(key: string): KeyBinding | undefined {
+    if (typeof key !== "string" || key.length > 128) throw new Error("Invalid idempotency key length.");
     const b = this.readJson<KeyBinding>(join(this.sub("keys"), `${sha(key)}.json`));
     return b && b.key === key ? b : undefined;
   }
@@ -217,6 +218,21 @@ export class PaymentStore {
     const existing = this.readKey(key);
     if (!existing) throw new Error("The idempotency key file exists but cannot be read.");
     return { won: false, existing };
+  }
+
+  /** Only the bind-failure path may free a key: a durable, explicit no-send proof is required. */
+  bindingRetryable(binding: KeyBinding): boolean {
+    const record = this.readCall(binding.call_id);
+    return record?.state === "not_sent" && record.top?.note === "key_binding_failed"
+      && !record.stagedTxid && !record.txid;
+  }
+
+  /** Caller MUST hold the wallet lock. Never frees an active, signed, sent or ambiguous call. */
+  releaseFailedBinding(key: string, paramsSha256: string): void {
+    const binding = this.readKey(key);
+    if (!binding || binding.params_sha256 !== paramsSha256 || !this.bindingRetryable(binding)) return;
+    fs.unlinkSync(join(this.sub("keys"), `${sha(key)}.json`));
+    fsyncDir(this.sub("keys"));
   }
 
   private callDir(callId: string): string {

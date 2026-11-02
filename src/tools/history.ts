@@ -5,6 +5,7 @@ import { formatZats } from "../policy/amount.js";
 import type { TxSummary } from "../types.js";
 import { ReadRejection, runReadTool, withWalletRead, type ReadDeps } from "./read.js";
 
+export const HISTORY_READ_TIMEOUT_MS = 2000;
 export const HISTORY_DEFAULT_LIMIT = 10;
 export const HISTORY_MAX_LIMIT = 50;
 
@@ -46,7 +47,7 @@ export async function executeHistory(input: HistoryInput, deps: ReadDeps) {
       reading.add(wallet);
       try {
         // Refused while a send or sync holds the wallet lock: no read between stage and transmit.
-        return await withWalletRead(store, "zcash_history", () => deps.chain.getHistory(limit, { offline: true, verifiedOnly: true }));
+        return await withWalletRead(store, "zcash_history", () => deps.chain.getHistory(limit, { offline: true, verifiedOnly: true, timeoutMs: HISTORY_READ_TIMEOUT_MS }));
       } finally {
         reading.delete(wallet);
       }

@@ -1,7 +1,8 @@
+import { childPids } from "../child-pids.ts";
 // The wallet lock (V12 F-14, F-38): one OS lock held by the paying process for the whole send,
 // stage and transmit, and released only when it finishes or dies.
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -120,7 +121,7 @@ describe("wallet lock", { timeout: 180_000 }, () => {
     const p = pauseFile(w, "pause-lost");
     const a = proc(w, "a", ["pay", "inv-lost"], { PAUSE_AT: "fence1", PAUSE_FILE: p.f });
     await until(p.reached, "A to reach its first fence");
-    const holderPid = execFileSync("pgrep", ["-P", String(a.child.pid), "perl"]).toString().trim().split("\n")[0];
+    const holderPid = childPids(a.child.pid!, "perl")[0];
     assert.ok(holderPid, "the paying process has a lock holder child");
     process.kill(Number(holderPid), "SIGKILL");
     await sleep(300);

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../src/config.ts";
 
-const KEYS = ["CHAIN_MODE", "SPENDING_CAP_ZEC"];
+const KEYS = ["CHAIN_MODE", "SPENDING_CAP_ZEC", "VIEW_KEY_FINGERPRINT_SALT"];
 const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
 const emptyDir = () => mkdtempSync(join(tmpdir(), "zshield-cfg-"));
 
@@ -26,6 +26,7 @@ describe("loadConfig", () => {
   });
   it("maps testnet to the live adapter on testnet", () => {
     process.env.CHAIN_MODE = "testnet";
+    process.env.VIEW_KEY_FINGERPRINT_SALT = "independent-test-deployment";
     const c = loadConfig(emptyDir());
     assert.equal(c.chainMode, "live");
     assert.equal(c.chainNetwork, "testnet");

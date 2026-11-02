@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { childPids } from "./child-pids.ts";
 import { chmodSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -193,7 +193,9 @@ describe("F-14: nothing sends without the lock", () => {
     const { chain, counts } = liveChain({
       pay: async (req) => {
         // The lock holder dies right here, after every earlier check passed.
-        for (const pid of execFileSync("pgrep", ["-P", String(process.pid), "perl"]).toString().trim().split("\n")) process.kill(Number(pid), "SIGKILL");
+        const holders = childPids(process.pid, "perl");
+        assert.ok(holders.length > 0, "the test must kill an actual lock holder");
+        for (const pid of holders) process.kill(pid, "SIGKILL");
         await new Promise((r) => setTimeout(r, 200));
         req.fence?.();
       },

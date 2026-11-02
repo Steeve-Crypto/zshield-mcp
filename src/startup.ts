@@ -1,3 +1,4 @@
+import { assertFingerprintSalt } from "./config.js";
 import { resolveWalletDir } from "./chain/live.js";
 import { assertWalletPrivate } from "./chain/perms.js";
 import type { Config } from "./types.js";
@@ -57,6 +58,7 @@ export function checkRecordPaths(config: Config, stateDir: string, platform: str
  * has no wallet to check.
  */
 export function startupChecks(config: Config, platform: string = process.platform, deps: StartupDeps = {}): string[] {
+  assertFingerprintSalt(config);
   if (config.chainMode !== "live") {
     return checkRecordPaths(config, deps.stateDir ?? stateDirFor(config), platform);
   }

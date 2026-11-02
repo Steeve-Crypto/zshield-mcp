@@ -3,7 +3,7 @@ import { MockChainAdapter } from "./chain/mock.js";
 import { executePaymentStatus, paymentStatusInputSchema } from "./tools/status.js";
 import { LiveChainAdapter } from "./chain/live.js";
 import type { ChainAdapter } from "./chain/types.js";
-import { loadConfig } from "./config.js";
+import { assertFingerprintSalt, checkServerUrl, loadConfig } from "./config.js";
 import { executePay, payInputSchema } from "./tools/pay.js";
 import { balanceInputSchema, executeBalance } from "./tools/balance.js";
 import { executeReceiveAddress, receiveAddressInputSchema } from "./tools/address.js";
@@ -11,9 +11,10 @@ import { executeHistory, historyInputSchema, HISTORY_MAX_LIMIT } from "./tools/h
 import { describePolicy, POLICY_URI } from "./policy/describe.js";
 import { RATE_LIMITED_MESSAGE, RateLimiter, RATE_LIMIT_DEFAULT_PER_MIN } from "./policy/rate.js";
 import type { Config } from "./types.js";
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { fallbackAuditPath } from "./audit/log.js";
-import { redact, registerRedaction, registerServerUrl } from "./redact.js";
+import { createRedactor, redact, registerRedaction, registerServerUrl } from "./redact.js";
 import { resolveStateDir, walletStateDir } from "./payments/store.js";
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError: boolean };
@@ -33,14 +34,20 @@ export function rateLimitedResult(): ToolResult {
 }
 
 export function createChain(config: Config): ChainAdapter {
-  return config.chainMode === "live"
-    ? new LiveChainAdapter({
-        network: config.chainNetwork,
-        zingoBin: config.zingoBin,
-        dataDir: config.zingoDataDir,
-        server: config.lightwalletd,
-      })
-    : new MockChainAdapter({ stateDir: config.zingoDataDir ? walletStateDir(config.zingoDataDir) : undefined });
+  assertFingerprintSalt(config);
+  checkServerUrl(config.lightwalletd);
+  const privacy = createRedactor();
+  return privacy.run(() => {
+    registerRedactions(config);
+    return config.chainMode === "live"
+      ? new LiveChainAdapter({
+          network: config.chainNetwork,
+          zingoBin: config.zingoBin,
+          dataDir: config.zingoDataDir,
+          server: config.lightwalletd,
+        })
+      : new MockChainAdapter({ stateDir: config.zingoDataDir ? walletStateDir(config.zingoDataDir) : undefined });
+  });
 }
 
 /**
@@ -53,6 +60,13 @@ export function registerRedactions(config: Config, chain?: ChainAdapter): void {
   registerRedaction(fallbackAuditPath(config.auditDir, config.auditFallbackPath), "[audit fallback]");
   registerRedaction(config.allowlistPath, "[allowlist]");
   registerRedaction(config.zingoDataDir, "[wallet dir]");
+  if (config.zingoDataDir) {
+    try {
+      registerRedaction(realpathSync(config.zingoDataDir), "[wallet dir]");
+    } catch {
+      /* startup reports missing paths */
+    }
+  }
   if (chain) registerRedaction(resolveStateDir(config, chain), "[state dir]");
   const home = homedir();
   if (home && home !== "/" && home.length >= 4) registerRedaction(home, "~");
@@ -63,20 +77,24 @@ function redactResult(r: ToolResult): ToolResult {
 }
 
 export function createServer(config: Config = loadConfig(), chain: ChainAdapter = createChain(config)): McpServer {
-  registerRedactions(config, chain);
+  assertFingerprintSalt(config);
+  checkServerUrl(config.lightwalletd);
+  const privacy = createRedactor();
+  privacy.run(() => registerRedactions(config, chain));
   const limiter = new RateLimiter(
     config.rateLimitPerMin ?? RATE_LIMIT_DEFAULT_PER_MIN,
     config.auditDir,
     Date.now,
     undefined,
-    config.auditFallbackPath
+    config.auditFallbackPath,
+    config,
   );
-  // Every tool call and resource read passes the rate limit first. A refused call never
+  // Every tool call and resource read passes its admission budget first. A refused call never
   // reaches the tool. Every answer is redacted on the way out.
   const limited =
     <A extends unknown[]>(tool: string, fn: (...args: A) => Promise<ToolResult>) =>
     async (...args: A): Promise<ToolResult> =>
-      redactResult(limiter.take(tool) ? await fn(...args) : rateLimitedResult());
+      privacy.run(async () => redactResult(limiter.take(tool) ? await fn(...args) : rateLimitedResult()));
   const server = new McpServer({
     name: "zshield-mcp",
     version: "0.1.0",
@@ -93,7 +111,7 @@ export function createServer(config: Config = loadConfig(), chain: ChainAdapter 
         content: [{ type: "text" as const, text: result.text }],
         isError: !result.ok,
       };
-    })
+    }),
   );
 
   server.tool(
@@ -106,7 +124,7 @@ export function createServer(config: Config = loadConfig(), chain: ChainAdapter 
         content: [{ type: "text" as const, text: result.text }],
         isError: !result.ok,
       };
-    })
+    }),
   );
 
   server.tool(
@@ -119,7 +137,7 @@ export function createServer(config: Config = loadConfig(), chain: ChainAdapter 
         content: [{ type: "text" as const, text: result.text }],
         isError: !result.ok,
       };
-    })
+    }),
   );
 
   server.tool(
@@ -132,7 +150,7 @@ export function createServer(config: Config = loadConfig(), chain: ChainAdapter 
         content: [{ type: "text" as const, text: result.text }],
         isError: !result.ok,
       };
-    })
+    }),
   );
 
   server.tool(
@@ -145,20 +163,24 @@ export function createServer(config: Config = loadConfig(), chain: ChainAdapter 
         content: [{ type: "text" as const, text: result.text }],
         isError: !result.ok,
       };
-    })
+    }),
   );
 
-  server.resource("policy", POLICY_URI, { mimeType: "application/json" }, async () => ({
-    contents: [
-      {
-        uri: POLICY_URI,
-        mimeType: "application/json",
-        text: redact(
-          limiter.take("policy_resource") ? JSON.stringify(describePolicy(config), null, 2) : rateLimitedResult().content[0].text
-        ),
-      },
-    ],
-  }));
+  server.resource("policy", POLICY_URI, { mimeType: "application/json" }, async () =>
+    privacy.run(() => ({
+      contents: [
+        {
+          uri: POLICY_URI,
+          mimeType: "application/json",
+          text: redact(
+            limiter.take("policy_resource")
+              ? JSON.stringify(describePolicy(config), null, 2)
+              : rateLimitedResult().content[0].text,
+          ),
+        },
+      ],
+    })),
+  );
 
   return server;
 }

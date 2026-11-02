@@ -1,5 +1,6 @@
+import { reserveAudit, type AuditBudget } from "./budget.js";
 import { createHash } from "node:crypto";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { appendPrivate, ensurePrivateDir } from "../fsafe.js";
 import { redactDeep } from "../redact.js";
 import { MAX_AUDIT_ROW_BYTES, MAX_RECIPIENT_LENGTH } from "../policy/limits.js";
@@ -61,6 +62,13 @@ export function boundAuditEntry<T extends object>(entry: T): T {
     truncated = true;
   }
   if (truncated) row.truncated = true;
+  // The truncation marker itself consumes bytes. Keep the capacity reservation a
+  // hard upper bound even when adding it takes a near-limit row over the boundary.
+  if (size(row) > MAX_AUDIT_ROW_BYTES) {
+    const identity = ["ts", "tool", "call_id", "operation_id", "status", "code", "txid", "mock_txid", "idempotency_key", "view_key_fingerprint"];
+    row = Object.fromEntries(identity.filter((k) => row[k] !== undefined).map((k) => [k, typeof row[k] === "string" ? cut(row[k] as string, 128) : row[k]]));
+    row.truncated = true;
+  }
   return row as unknown as T;
 }
 
@@ -82,11 +90,14 @@ export function appendDurable(file: string, line: string): void {
 /** Appends one bounded row, flushed to disk, and returns the file it went to. */
 export function appendAuditEntry(
   auditDir: string,
-  entry: AuditEntry | ReadAuditEntry | RateLimitAuditEntry | RecoveryAuditEntry
+  entry: AuditEntry | ReadAuditEntry | RateLimitAuditEntry | RecoveryAuditEntry,
+  budget: AuditBudget = {}
 ): string {
   ensureDurableDir(auditDir);
   const day = entry.ts.slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error("Invalid audit date.");
   const file = join(auditDir, `${day}.jsonl`);
+  reserveAudit(file, financialRow(entry), budget, true);
   appendDurable(file, `${JSON.stringify(boundAuditEntry(entry))}\n`);
   return file;
 }
@@ -106,13 +117,17 @@ export interface AuditWriteResult {
 }
 
 type AuditRow = AuditEntry | ReadAuditEntry | RateLimitAuditEntry | RecoveryAuditEntry;
+function financialRow(row: AuditRow): boolean {
+  return row.tool === "zcash_pay" ? row.status !== "replayed" && Boolean(row.operation_id) : row.tool === "zcash_pay_recovery";
+}
+// Capacity refusals must not turn stderr into an unbounded replacement audit sink.
+const capacityWarnings = new Set<string>();
 type StderrWrite = (line: string) => void;
 
 /** Why a write failed, without the absolute path a filesystem error message carries. */
 function msg(e: unknown): string {
   const code = (e as NodeJS.ErrnoException)?.code;
-  if (typeof code === "string") return code;
-  return e instanceof Error ? e.message.replace(/(?:[A-Za-z]:)?[\\/][^\s'"]+/g, "[path]") : String(e);
+  return typeof code === "string" && ["EACCES", "EPERM", "ENOENT", "ENOTDIR", "ENOSPC", "EIO", "EDQUOT", "ELOOP", "AUDIT_CAPACITY"].includes(code) ? code : "storage failure";
 }
 
 /**
@@ -121,7 +136,7 @@ function msg(e: unknown): string {
  * the result says it is not durable. Any failure is reported in `warning`.
  */
 export function writeAuditRow(
-  target: { auditDir: string; auditFallbackPath?: string },
+  target: { auditDir: string; auditFallbackPath?: string } & AuditBudget,
   entry: AuditRow,
   stderr: StderrWrite = (line) => process.stderr.write(line)
 ): AuditWriteResult {
@@ -131,7 +146,7 @@ export function writeAuditRow(
   let mainError = "";
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      return { durable: true, file: appendAuditEntry(auditDir, entry) };
+      return { durable: true, file: appendAuditEntry(auditDir, entry, target) };
     } catch (e) {
       mainError = msg(e);
     }
@@ -140,21 +155,28 @@ export function writeAuditRow(
   const fallback = fallbackAuditPath(auditDir, target.auditFallbackPath);
   try {
     ensureDurableDir(dirname(fallback));
+    reserveAudit(fallback, financialRow(entry), target, false);
     appendDurable(fallback, line);
     return {
       durable: true,
       file: fallback,
-      warning: `Audit row could not be written to the audit dir (${mainError}); it was written to the fallback file ${basename(fallback)}.`,
+      warning: `Audit row could not be written to the audit dir (${mainError}); it was written to the fallback file.`,
     };
   } catch (e) {
     try {
-      stderr(`zshield-mcp audit (not written to disk): ${line}`);
+      if (mainError !== "AUDIT_CAPACITY" && msg(e) !== "AUDIT_CAPACITY") {
+        stderr(`zshield-mcp audit (not written to disk): ${line}`);
+      } else if (!capacityWarnings.has(auditDir)) {
+        if (capacityWarnings.size >= 128) capacityWarnings.clear();
+        capacityWarnings.add(auditDir);
+        stderr("zshield-mcp: audit capacity exhausted; further audit rows are refused until capacity is renewed.\n");
+      }
     } catch {
       // Nothing left to try.
     }
     return {
       durable: false,
-      warning: `Audit row could not be written to the audit dir (${mainError}) or the fallback file ${basename(fallback)} (${msg(e)}); it was printed to stderr only.`,
+      warning: `Audit row could not be written to the audit dir (${mainError}) or the fallback file (${msg(e)}); it was printed to stderr only.`,
     };
   }
 }

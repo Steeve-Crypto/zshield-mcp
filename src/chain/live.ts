@@ -1,3 +1,4 @@
+import { checkServerUrl } from "../config.js";
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -7,7 +8,7 @@ import { assertTestnetAddress, NetworkError } from "./network.js";
 import { addNoteFacts, corroborate, extractJson, messageFacts, type TxFacts, type WalletFacts } from "./corroborate.js";
 import { ChainUnreachableError, CliTimeoutError, SendOutcomeUnknownError } from "./outcome.js";
 import { defaultSyncer, type SyncResult, type WalletSyncer } from "./sync.js";
-import { displayUrl, redact, registerServerUrl } from "../redact.js";
+import { bindRedactor, createRedactor, displayUrl, redact, registerRedaction, registerServerUrl } from "../redact.js";
 import { memoProblem } from "../policy/limits.js";
 import { walletStateDir } from "../payments/store.js";
 import { checkPin, pinDir, type DirPin } from "./pin.js";
@@ -275,10 +276,24 @@ export class LiveChainAdapter implements ChainAdapter {
       if (!opts.runner) throw new WalletDirError("zshield-mcp: the wallet directory does not exist or cannot be resolved. Create it with zingo-cli first.");
     }
     this.walletPath = this.pin?.path ?? this.dataDir;
-    this.server = opts.server ?? "https://testnet.zec.rocks:443";
-    registerServerUrl(this.server);
-    this.runner = redactingRunner(opts.runner ?? defaultRunner);
-    this.syncer = opts.syncer ?? (opts.runner ? skipSync : defaultSyncer);
+    this.server = checkServerUrl(opts.server) ?? "https://testnet.zec.rocks:443";
+    const privacy = createRedactor();
+    this.runner = privacy.run(() => {
+      registerServerUrl(this.server);
+      registerRedaction(this.dataDir, "[wallet dir]");
+      registerRedaction(this.walletPath, "[wallet dir]");
+      return bindRedactor(redactingRunner(opts.runner ?? defaultRunner));
+    });
+    const syncer = opts.syncer ?? (opts.runner ? skipSync : defaultSyncer);
+    this.syncer = privacy.run(() => bindRedactor(async (...args: Parameters<WalletSyncer>) => {
+      try {
+        const result = await syncer(...args);
+        return result.detail ? { ...result, detail: redact(result.detail) } : result;
+      } catch (e) {
+        if (e instanceof Error) e.message = redact(e.message);
+        throw e;
+      }
+    }));
     this.stateDir = opts.stateDir ?? (opts.runner ? undefined : walletStateDir(this.walletPath));
     this.now = opts.now ?? Date.now;
     this.lockFile = this.stateDir ? join(this.stateDir, "zingo.flock") : undefined;
@@ -397,13 +412,14 @@ export class LiveChainAdapter implements ChainAdapter {
    * `verified`. With `verifiedOnly`, an entry the wallet's JSON does not vouch for, or one
    * listed twice, is left out before the limit applies, and unreadable JSON is an error.
    */
-  async getHistory(limit: number, opts: { offline?: boolean; verifiedOnly?: boolean } = {}): Promise<TxSummary[]> {
+  async getHistory(limit: number, opts: { offline?: boolean; verifiedOnly?: boolean; timeoutMs?: number } = {}): Promise<TxSummary[]> {
     // Reads that overlap share one scan, and only a few scans run at once.
-    const key = `${this.epoch}:${opts.offline === true}`;
+    const budget = opts.timeoutMs === undefined ? readTimeoutMs() : Math.min(readTimeoutMs(), Math.max(1, Math.floor(opts.timeoutMs)));
+    const key = `${this.epoch}:${opts.offline === true}:${budget}`;
     let scan = this.scans.get(key);
     if (!scan) {
       if (this.scans.size >= MAX_HISTORY_SCANS) throw new Error("Too many wallet history reads are running. Try again shortly.");
-      scan = this.scanHistory(opts.offline === true).finally(() => this.scans.delete(key));
+      scan = this.scanHistory(opts.offline === true, budget).finally(() => this.scans.delete(key));
       this.scans.set(key, scan);
     }
     const { entries, checked } = await scan;
@@ -422,9 +438,9 @@ export class LiveChainAdapter implements ChainAdapter {
   }
 
   /** One full read: the wallet's JSON, then the listing, all under one deadline. */
-  private async scanHistory(offline: boolean): Promise<{ entries: TxSummary[]; checked: boolean }> {
+  private async scanHistory(offline: boolean, budget: number): Promise<{ entries: TxSummary[]; checked: boolean }> {
     // One deadline for the whole read, not a full timeout for each command.
-    const deadline = Date.now() + readTimeoutMs();
+    const deadline = Date.now() + budget;
     const run = (...cmd: string[]) => {
       const timeoutMs = deadline - Date.now();
       if (timeoutMs <= 0) throw new Error("Reading the wallet history ran out of time.");
