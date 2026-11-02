@@ -1,27 +1,45 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 /**
  * Redaction of secrets and local paths from anything the server returns, logs, or
  * writes to the audit log. Values are registered once at startup; redact() replaces
  * every occurrence, longest first.
  */
 
-const entries = new Map<string, string>();
+const scope = new AsyncLocalStorage<Map<string, string>>();
+const entries = () => scope.getStore();
+
+/** Isolated privacy context. Async work retains its owning server's registry. */
+export function createRedactor() {
+  const values = new Map<string, string>();
+  return { run: <T>(fn: () => T): T => scope.run(values, fn) };
+}
+
+/** Bind deferred logging/CLI work to the current instance. */
+export function bindRedactor<A extends unknown[], T>(fn: (...args: A) => T): (...args: A) => T {
+  const values = scope.getStore() ?? new Map<string, string>();
+  return (...args) => scope.run(values, () => fn(...args));
+}
 
 /** Register a value to hide and the label that replaces it. Values under 4 characters are ignored. */
 export function registerRedaction(value: string | undefined, label: string): void {
   if (!value || value.length < 4) return;
-  entries.set(value, label);
+  const values = entries();
+  if (!values) throw new Error("Register redactions inside a createRedactor context.");
+  values.set(value, label);
 }
 
 /** Forget every registered value. For tests. */
 export function resetRedactions(): void {
-  entries.clear();
+  entries()?.clear();
 }
 
 /** Replace every registered value in `text`. */
 export function redact(text: string): string {
-  if (entries.size === 0 || !text) return text;
+  const values = entries();
+  if (!values || values.size === 0 || !text) return text;
   let out = text;
-  for (const [value, label] of [...entries].sort((a, b) => b[0].length - a[0].length)) {
+  for (const [value, label] of [...values].sort((a, b) => b[0].length - a[0].length)) {
     if (out.includes(value)) out = out.split(value).join(label);
   }
   return out;

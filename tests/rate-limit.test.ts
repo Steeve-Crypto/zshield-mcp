@@ -37,8 +37,8 @@ describe("RateLimiter", () => {
     assert.equal(rows.length, 1);
     assert.equal(rows[0].tool, "rate_limit");
     assert.equal(rows[0].code, "RATE_LIMITED");
-    assert.equal(rows[0].refused_calls, 998);
-    assert.deepEqual(rows[0].refused_by_tool, { zcash_balance: 499, zcash_pay: 499 });
+    assert.equal(rows[0].refused_calls, 996);
+    assert.deepEqual(rows[0].refused_by_tool, { zcash_balance: 498, zcash_pay: 498 });
     assert.equal(rows[0].window_start, "2026-10-27T00:00:00.000Z");
     assert.equal(rows[0].limit_per_min, 2);
   });
@@ -108,13 +108,16 @@ describe("rate limit docs", () => {
 });
 
 describe("rate limit over MCP", () => {
-  it("refuses calls over the limit with RATE_LIMITED across all tools", async () => {
+  it("enforces separate payment, status and ordinary-read allowances", async () => {
     assert.deepEqual([...RATE_LIMIT_CODES], ["RATE_LIMITED"]);
     const { client, config } = await connect(tempConfig({ rateLimitPerMin: 2 }));
     const ok1 = await client.callTool({ name: "zcash_balance", arguments: {} });
     const ok2 = await client.callTool({ name: "zcash_pay", arguments: { amount_zec: "0.01", recipient: ALLOWED } });
     assert.equal(ok1.isError, false);
     assert.equal(ok2.isError, false);
+    // One allowance remains for payments, regardless of the balance call.
+    const extra = await client.callTool({ name: "zcash_pay", arguments: { amount_zec: "0.01", recipient: ALLOWED } });
+    assert.equal(extra.isError, false);
     const rowsBefore = readAuditRows(config).length;
 
     for (let i = 0; i < 20; i++) {
@@ -129,11 +132,13 @@ describe("rate limit over MCP", () => {
       assert.ok(!textOf(res).includes("spam"));
     }
     const hist = await client.callTool({ name: "zcash_history", arguments: {} });
-    assert.equal(JSON.parse(textOf(hist)).code, "RATE_LIMITED");
+    assert.equal(hist.isError, false);
+    const refusedRead = await client.callTool({ name: "zcash_history", arguments: {} });
+    assert.equal(JSON.parse(textOf(refusedRead)).code, "RATE_LIMITED");
 
     // No row per refused call, and nothing was paid.
     const rows = readAuditRows(config);
-    assert.equal(rows.length, rowsBefore);
-    assert.equal(rows.filter((r) => r.tool === "zcash_pay" && r.status === "ok").length, 1);
+    assert.equal(rows.length, rowsBefore + 1);
+    assert.equal(rows.filter((r) => r.tool === "zcash_pay" && r.status === "ok").length, 2);
   });
 });

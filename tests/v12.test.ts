@@ -160,8 +160,9 @@ describe("V12 F-16: endpoint credentials never reach the caller", () => {
   });
 
   it("a failing health check does not echo the server URL secret", async () => {
+    await withEnv("ZSHIELD_ALLOW_URL_CREDENTIALS", "1", async () => {
     const config = liveConfig();
-    const server = "https://alice:hunter2secret@lwd.example:443/?key=tok3nsecretvalue";
+    const server = "https://aliceuser:hunter2secret@lwd.example:443/?key=tok3nsecretvalue";
     const runner: CliRunner = async (_b, args) => {
       throw new Error(`zingo-cli: cannot connect to ${args[args.indexOf("--server") + 1]}`);
     };
@@ -177,6 +178,7 @@ describe("V12 F-16: endpoint credentials never reach the caller", () => {
       assert.ok(!r.text.includes(secret), r.text);
       assert.ok(!JSON.stringify(readAll(config)).includes(secret));
     }
+    });
   });
 });
 

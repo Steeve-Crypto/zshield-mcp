@@ -44,6 +44,8 @@ export function describePolicy(config: Config) {
       amount_unit: "integer zatoshis, 1 ZEC = 100000000",
       max_decimals: MAX_DECIMALS,
       tool_calls_per_min: config.rateLimitPerMin ?? RATE_LIMIT_DEFAULT_PER_MIN,
+      admission_budgets: "independent payments, payment_status, and ordinary reads; each has tool_calls_per_min",
+      history_deadline_ms: 2000,
     },
     allowlist: {
       size: allowlistSize,

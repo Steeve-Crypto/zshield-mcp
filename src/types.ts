@@ -25,6 +25,9 @@ export interface Config {
   sendQueueWaitMs?: number;
   /** Where audit rows go when auditDir cannot be written. Default: audit-fallback.jsonl beside auditDir. */
   auditFallbackPath?: string;
+  /** Lifetime byte budgets per destination, separately for payment evidence and diagnostics. */
+  auditMaxBytes?: number;
+  auditDiagnosticMaxBytes?: number;
   lightwalletd?: string;
   /** Tool calls allowed per minute in this process; default 60 */
   rateLimitPerMin?: number;

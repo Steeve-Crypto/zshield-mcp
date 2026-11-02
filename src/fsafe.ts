@@ -173,8 +173,15 @@ function writeTemp(dir: string, data: string): string {
   try {
     const buf = Buffer.from(data, "utf8");
     let off = 0;
-    while (off < buf.length) off += fs.writeSync(fd, buf, off, buf.length - off);
+    while (off < buf.length) {
+      const n = fs.writeSync(fd, buf, off, buf.length - off);
+      if (n <= 0) throw Object.assign(new Error("State write made no progress."), { code: "EIO" });
+      off += n;
+    }
     fs.fsyncSync(fd);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch { /* retain original failure */ }
+    throw e;
   } finally {
     fs.closeSync(fd);
   }

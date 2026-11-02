@@ -1,3 +1,4 @@
+import { assertFingerprintSalt } from "../config.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { ChainAdapter } from "../chain/types.js";
@@ -381,6 +382,9 @@ function priorUse(
       `idempotency_key was already used by call ${other.callId} with different parameters. Nothing was sent.`
     );
   }
+  // The only retryable binding is backed by an explicit, durable no-send event.
+  // Removal happens later, under the wallet lock, never during this optimistic lookup.
+  if (bound && store.bindingRetryable(bound)) return undefined;
   return replay(input, deps, callId, other.callId, store.readCall(other.callId));
 }
 
@@ -579,6 +583,7 @@ async function runPay(
     // Bound caller strings first. The schema enforces the same limits for MCP calls; this
     // covers direct callers and keeps oversized values out of errors and audit rows.
     assertPayInputBounded(input.recipient, input.memo);
+    assertFingerprintSalt(config);
     const allowlist = loadAllowlist(config.allowlistPath);
     allowlistHit = isRecipientAllowed(input.recipient, allowlist);
     // Order decides which code wins when several rules fail.
@@ -623,6 +628,8 @@ async function runPay(
     // Under the lock, read the binding fresh; if taken, this call becomes a replay or a
     // conflict and sends nothing.
     if (lock && keyFields.idempotency_key) {
+      lock.assertHeld();
+      store.releaseFailedBinding(keyFields.idempotency_key, keyFields.params_sha256!);
       const other = store.readKey(keyFields.idempotency_key);
       if (other && other.call_id !== callId) {
         await lock.release();
@@ -717,7 +724,7 @@ async function runPay(
     }
 
     if (policyPassed && amountZats !== undefined && lock) {
-      // Record the intent, then the audit pending row, then bind the key: all on disk
+      // Record the audit pending row, then the intent, then bind the key: all on disk
       // before the broadcast. The key is bound last so a call that stops here leaves it
       // free; once bound, nothing slow runs before the send.
       status = "pending";
@@ -738,22 +745,23 @@ async function runPay(
         wallet_height: walletHeight,
         ...(chain.mode === "live" ? { two_step: true } : {}),
       };
-      let ready = false;
-      try {
-        store.writeIntent(intent);
-        wroteIntent = true;
-        ready = true;
-      } catch (e) {
-        fail("error", "STATE_WRITE_FAILED", `The payment store could not be written before the send: ${e instanceof Error ? e.message : String(e)}. Nothing was sent.`);
+      // Charge audit capacity before creating durable payment state. A flood after
+      // exhaustion must not grow calls/ or ops/ with intents that cannot be sent.
+      let ready = true;
+      const pendingRow = boundAuditEntry(entry());
+      const written = writeAuditRow(config, pendingRow);
+      if (written.warning) warnings.push(written.warning);
+      if (!written.durable) {
+        ready = false;
+        fail("error", "AUDIT_WRITE_FAILED", `Audit write failed before send; payment not sent: ${written.warning}`);
       }
-
       if (ready) {
-        const pendingRow = boundAuditEntry(entry());
-        const written = writeAuditRow(config, pendingRow);
-        if (written.warning) warnings.push(written.warning);
-        if (!written.durable) {
+        try {
+          store.writeIntent(intent);
+          wroteIntent = true;
+        } catch (e) {
           ready = false;
-          fail("error", "AUDIT_WRITE_FAILED", `Audit write failed before send; payment not sent: ${written.warning}`);
+          fail("error", "STATE_WRITE_FAILED", `The payment store could not be written before the send: ${e instanceof Error ? e.message : String(e)}. Nothing was sent.`);
         }
       }
 
@@ -767,12 +775,14 @@ async function runPay(
         }
       }
 
+      let bindingFailed = false;
       if (ready && keyFields.idempotency_key) {
         let bound: ReturnType<PaymentStore["bindKey"]> | undefined;
         try {
           bound = store.bindKey(keyFields.idempotency_key, callId, keyFields.params_sha256!);
         } catch (e) {
           ready = false;
+          bindingFailed = true;
           fail("error", "STATE_WRITE_FAILED", `The idempotency key could not be bound: ${e instanceof Error ? e.message : String(e)}. Nothing was sent.`);
         }
         if (bound && !bound.won) {
@@ -787,7 +797,7 @@ async function runPay(
       }
 
       if (!ready && wroteIntent) {
-        recordSafely(store, { ts: now(), call_id: callId, state: "not_sent", code, error, by: "send" }, warnings);
+        recordSafely(store, { ts: now(), call_id: callId, state: "not_sent", code, error, note: bindingFailed ? "key_binding_failed" : undefined, by: "send" }, warnings);
       }
 
       if (ready) {

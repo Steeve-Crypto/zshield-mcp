@@ -15,7 +15,7 @@ export type PaymentState = "pending" | "broadcast" | "mined" | "expired" | "fail
 export const paymentStatusInputSchema = z.object({
   // Kept loose here so a bad lookup reaches executePaymentStatus and is audited as a rejection.
   call_id: z.string().optional().describe("The call_id a zcash_pay response returned."),
-  idempotency_key: z.string().optional().describe("The idempotency_key passed to zcash_pay. Give exactly one of call_id, operation_id or idempotency_key."),
+  idempotency_key: z.string().max(MAX_IDEMPOTENCY_KEY_LENGTH).optional().describe("The idempotency_key passed to zcash_pay. Give exactly one of call_id, operation_id or idempotency_key."),
   operation_id: z.string().optional().describe("The operation_id a zcash_pay response returned (op_ and 32 hex digits)."),
 });
 

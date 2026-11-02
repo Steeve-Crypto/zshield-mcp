@@ -434,3 +434,48 @@ One real shielded 0.001 TAZ payment through `zcash_pay`, plus a blocked over-cap
 ## License
 
 MIT
+
+
+### October 31 review hardening
+
+`RATE_LIMIT_PER_MIN` is an independent allowance for each of payments, payment status,
+and ordinary reads (including the policy resource). Exhausting read capacity does not
+consume either payment allowance. Ordinary history calls always read offline and share
+one deadline capped at 2 seconds, followed by the existing 5-second hard-kill grace. A wallet admission
+turnstile prevents new reads from overtaking a writer that has reached the OS gate;
+local queued sends have priority. Existing sends retain their OS lock throughout
+signing and transmission. Reads never run between those stages.
+
+`AUDIT_MAX_BYTES` and `AUDIT_DIAGNOSTIC_MAX_BYTES` each default to 64 MiB **per
+destination**, for payment/recovery evidence and diagnostics respectively. Primary
+and fallback have independent capacity. Each append reserves a durable maximum-row
+slot before writing, so retries and failed writes conservatively consume capacity.
+Reservations are exclusive across processes and survive restarts. Existing logs are
+charged conservatively to both pools on first use. The configured bounds cover JSONL
+bytes; bounded reservation files also consume filesystem metadata/inodes. Payment
+state is never pruned. Replays and rejected calls use diagnostic capacity; a send must
+obtain protected capacity before it creates its intent. At exhaustion new sends fail
+closed, while recorded outcomes and idempotency bindings remain available. Capacity
+warnings are coalesced instead of streaming refused rows to stderr.
+
+To renew capacity: stop **all** writers sharing either destination, archive its JSONL
+files and matching `.budget` directory together, then restart. For the primary log the
+budget directory is `AUDIT_DIR.budget`; for fallback it is `AUDIT_FALLBACK_PATH.budget`
+(or the default fallback path with `.budget` appended). Never reset only reservation
+files while retaining the corresponding active logs, and never remove `.zshield-state`,
+key bindings, pending calls, or transaction ownership records. This is an explicit
+archive boundary, not automatic deletion of payment history.
+
+Live/testnet operation requires an explicit, non-default `VIEW_KEY_FINGERPRINT_SALT`.
+Generate it with `openssl rand -hex 32`, keep it stable for that deployment, and use a
+different value elsewhere. Existing replay records retain their original fingerprints.
+Credential-bearing `LIGHTWALLETD_URL` values require HTTPS even with
+`ZSHIELD_ALLOW_URL_CREDENTIALS=1`; that opt-in still acknowledges process-list exposure.
+Each server owns its redaction context, including resolved wallet symlink targets.
+Audit warnings contain generic sink labels and allowlisted error codes only.
+
+A failed key bind can be retried after its filesystem fault clears, including failure
+of the rollback unlink, only when a durable event proves that binding failed before
+any chain call. Cleanup requires the wallet lock and refuses signed, transmitted,
+active, ambiguous, or differently parameterized calls. Status keys are bounded both
+at the MCP schema and before direct store hashing.

@@ -2,7 +2,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadConfig } from "./config.js";
 import { createChain, createServer, registerRedactions } from "./server.js";
-import { redact } from "./redact.js";
+import { createRedactor, redact } from "./redact.js";
 import { recoverPendingPayments } from "./payments/recovery.js";
 import { runStartup } from "./startup.js";
 
@@ -35,7 +35,7 @@ async function main() {
     .catch((e: unknown) => log(`zshield-mcp recovery failed: ${e instanceof Error ? e.message : String(e)}`));
 }
 
-main().catch((err) => {
+createRedactor().run(() => main().catch((err) => {
   log(err instanceof Error ? (err.stack ?? err.message) : String(err));
   process.exit(1);
-});
+}));

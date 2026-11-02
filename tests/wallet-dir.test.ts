@@ -13,7 +13,7 @@ describe("wallet directory (V12 F-9)", () => {
       const dir = defaultWalletDir();
       assert.ok(isAbsolute(dir), dir);
       assert.ok(!dir.includes("undefined"), dir);
-      const adapter = new LiveChainAdapter({ network: "testnet" });
+      const adapter = new LiveChainAdapter({ network: "testnet", runner: async () => "" });
       assert.ok(isAbsolute(adapter.dataDir), adapter.dataDir);
     });
   });

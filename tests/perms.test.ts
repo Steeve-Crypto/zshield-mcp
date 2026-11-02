@@ -119,7 +119,7 @@ describe("server entry point", () => {
     const dir = wallet(0o755, 0o644);
     const r = spawnSync(process.execPath, ["--import", "tsx", join(root, "src/index.ts")], {
       cwd: root,
-      env: { ...process.env, CHAIN_MODE: "testnet", ZINGO_DATA_DIR: dir, AUDIT_DIR: join(dir, "..", "audits") },
+      env: { ...process.env, CHAIN_MODE: "testnet", VIEW_KEY_FINGERPRINT_SALT: "permissions-test", ZINGO_DATA_DIR: dir, AUDIT_DIR: join(dir, "..", "audits") },
       input: "",
       encoding: "utf8",
       timeout: 30_000,
