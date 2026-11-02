@@ -93,15 +93,15 @@ describe("zcash_payment_status", () => {
     assert.notEqual((await paymentStatus(config, chain([]).c, { call_id: "c1" })).state, "expired");
   });
 
-  it("expired only with proof: synced, whole history, past the expiry height (V12 F-18)", async () => {
+  it("live chain absence is not terminal even past historical expiry thresholds", async () => {
     const config = tempConfig();
     pending(config, "c2", { chain_tip: 400, wallet_height: 400 });
     // Wallet at 575: not yet past 400 + 1 + 120 + 60.
     assert.equal((await paymentStatus(config, chain([], 575).c, { call_id: "c2" }, T0 + RECOVERY_EXPIRY_MS + 1)).state, "unknown");
     const s = await paymentStatus(config, chain([], 585).c, { call_id: "c2" }, T0 + RECOVERY_EXPIRY_MS + 1);
-    assert.equal(s.state, "expired");
+    assert.equal(s.state, "unknown");
     await recoverPendingPayments(config, chain([]).c, { now: T0 + RECOVERY_EXPIRY_MS + 1 });
-    assert.equal((await paymentStatus(config, chain([tx()]).c, { call_id: "c2" })).state, "expired");
+    assert.equal((await paymentStatus(config, chain([tx()]).c, { call_id: "c2" })).state, "mined");
   });
 
   it("no recorded chain height means no proof: unknown, never expired", async () => {

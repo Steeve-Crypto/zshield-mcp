@@ -87,7 +87,7 @@ describe("recovery identity", () => {
       const c = chain([mined(memo ?? "")]);
       unstagedTwoStepCall(config, c, memo);
       const [row] = await recoverPendingPayments(config, c, { now: T0 + 60_000 });
-      assert.equal(row.status, "unknown", JSON.stringify(row));
+      assert.equal(row.status, "not_sent", JSON.stringify(row));
       assert.notEqual(row.txid, TXID);
     }
   });
@@ -97,6 +97,6 @@ describe("recovery identity", () => {
     const c = chain([]);
     unstagedTwoStepCall(config, c, "rent");
     const [row] = await recoverPendingPayments(config, c, { now: T0 + RECOVERY_EXPIRY_MS + 1 });
-    assert.equal(row.status, "not_found", JSON.stringify(row));
+    assert.equal(row.status, "not_sent", JSON.stringify(row));
   });
 });

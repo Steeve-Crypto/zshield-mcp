@@ -1,3 +1,4 @@
+import { findTransaction } from "../chain/types.js";
 import type { ChainAdapter } from "../chain/types.js";
 import { writeAuditRow } from "../audit/log.js";
 import { capCandidates, lookalikeSends, MATCH_AFTER_MS, MATCH_SKEW_MS, matchHistory, placedInTime } from "../tools/pay.js";
@@ -17,14 +18,14 @@ export const RECOVERY_EXPIRY_MS = 2 * 60 * 60_000;
  * The most blocks past its target height (the tip plus one) that zingo-cli lets a
  * transaction live. The pinned build uses 120 from the NU7 activation, which testnet is
  * past (it was 40 before). Using 120 everywhere is safe: a bigger delta only makes the
- * "not sent" proof slower, never wrong.
+ * historical expiry observation later; it does not establish chain finality.
  */
 export const TX_EXPIRY_BLOCKS = 120;
 /**
  * Extra blocks past expiry before a missing send counts as proven not sent. The
  * transaction is built when zingo-cli runs, up to SEND_TIMEOUT_MS (15 minutes, 36 blocks
  * of 25 seconds) after the tip was recorded, so its expiry can sit that far above the
- * recorded one. 60 covers that and leaves 24 blocks for a reorg.
+ * recorded one. A finite margin is not chain finality.
  */
 export const EXPIRY_MARGIN_BLOCKS = 60;
 /**
@@ -46,7 +47,7 @@ export const RECOVERY_LOCK_ATTEMPTS = 5;
 export const RECOVERY_LOCK_PAUSE_MS = 5_000;
 
 /** Recovery outcome for a call with no settled result. */
-export type RecoveryStatus = "confirmed" | "broadcast" | "failed" | "not_found" | "unknown";
+export type RecoveryStatus = "confirmed" | "broadcast" | "failed" | "not_sent" | "not_found" | "unknown";
 
 export interface RecoveryAuditEntry {
   ts: string;
@@ -116,9 +117,9 @@ export function countRivals(store: PaymentStore, record: CallRecord): number {
  * Decide what happened to one unsettled send. Never sends anything. Reads the whole
  * wallet history, never a recent slice.
  * - confirmed: exactly one mined transaction matches on recipient, amount, and memo when given.
- * - not_found: nothing matches and the payment is proven never sent: live, the wallet is
- *   synced, the whole history was read, and the wallet has scanned past the height where
- *   the transaction would have expired. Mock: the expiry window has passed.
+ * - not_sent: local two-step protocol proves that no transaction could be transmitted.
+ * - not_found: mock mode only; its synthetic expiry window has passed.
+ * Live chain absence never proves irreversible non-payment.
  * - unknown: anything else. Without proof, the answer stays unknown.
  */
 export async function reconcile(record: CallRecord, chain: ChainAdapter, opts: ReconcileOptions): Promise<RecoveryAuditEntry> {
@@ -134,7 +135,12 @@ export async function reconcile(record: CallRecord, chain: ChainAdapter, opts: R
     return { ...base, status: "unknown", note: "The call has no recorded amount in zatoshis; check by hand." };
   }
   const startedAt = Date.parse(intent.ts);
-  if (record.stagedTxid) return reconcileStaged(base, record, record.stagedTxid, intent, chain, opts, now, startedAt);
+  // Local protocol proof, independent of chain finality: this version cannot
+  // transmit until its staged txid has been durably recorded.
+  if (opts.live && intent.two_step && !record.stagedTxid && !record.txid) {
+    return { ...base, status: "not_sent", note: "No transaction was durably staged for this two-step call, so its send path could not transmit. Nothing was sent." };
+  }
+  if (record.stagedTxid ?? record.txid) return reconcileStaged(base, record, (record.stagedTxid ?? record.txid)!, intent, chain, opts, now, startedAt);
   const target = { amountZats: BigInt(intent.amount_zats), recipient: intent.recipient, memo: intent.memo, notBeforeHeight: intent.wallet_height ?? intent.chain_tip };
   let matches: PossibleSend[];
   let lookalikes: PossibleSend[] = [];
@@ -199,16 +205,15 @@ export async function reconcile(record: CallRecord, chain: ChainAdapter, opts: R
 type Base = Pick<RecoveryAuditEntry, "ts" | "tool" | "call_id" | "idempotency_key">;
 
 /**
- * Nothing in the history is this call's send. Say "not sent" only with proof: live, the
- * wallet is synced, the tip is trusted, enough time and blocks have passed that a
- * transaction built for this call would have been mined or expired.
+ * Preserve diagnostics for absent transactions, but never promote a live chain
+ * observation to irreversible non-payment. No finite reorg margin establishes finality.
  */
 async function proveNotSent(base: Base, intent: NonNullable<CallRecord["intent"]>, now: number, startedAt: number, opts: ReconcileOptions): Promise<RecoveryAuditEntry> {
   if (!opts.live) {
     if (now - startedAt < RECOVERY_EXPIRY_MS) {
       return { ...base, status: "unknown", note: "No match yet, and the send has not passed its expiry window." };
     }
-    return { ...base, status: "not_found", note: NOT_SENT_NOTE };
+    return { ...base, status: "not_found", note: MOCK_NOT_SENT_NOTE };
   }
   const ev = await opts.evidence();
   if (!ev.synced) {
@@ -242,10 +247,10 @@ async function proveNotSent(base: Base, intent: NonNullable<CallRecord["intent"]
     return {
       ...base,
       status: "unknown",
-      note: `No match yet. The payment can only be proven not sent once the wallet has scanned past the expiry height plus margin, ${provenAt}${ev.walletHeight !== undefined ? ` (now ${ev.walletHeight})` : ""}.`,
+      note: `No match yet. The wallet has not scanned past the historical expiry threshold, ${provenAt}${ev.walletHeight !== undefined ? ` (now ${ev.walletHeight})` : ""}.`,
     };
   }
-  return { ...base, status: "not_found", note: NOT_SENT_NOTE };
+  return { ...base, status: "unknown", note: "Absent from this wallet view. Neither elapsed time nor an expiry height proves non-payment across a reorg. Keep this call unresolved; do not pay again with a new key." };
 }
 
 /**
@@ -265,7 +270,7 @@ async function reconcileStaged(
 ): Promise<RecoveryAuditEntry> {
   let txs;
   try {
-    txs = await chain.getHistory(Infinity, { offline: opts.offline });
+    txs = await findTransaction(chain, txid, { offline: opts.offline });
   } catch (e) {
     return { ...base, status: "unknown", note: `Wallet history could not be read: ${e instanceof Error ? e.message : String(e)}` };
   }
@@ -297,13 +302,13 @@ async function reconcileStaged(
 }
 
 
-const NOT_SENT_NOTE =
-  "No matching transaction in the whole history of a synced wallet, scanned past the expiry height. It was not sent; a new payment needs a new idempotency key.";
+const MOCK_NOT_SENT_NOTE =
+  "The mock expiry window elapsed with no matching mock transaction. A new mock payment needs a new idempotency key.";
 
 /** The store event a recovery result moves the call to. */
 export function eventFor(row: RecoveryAuditEntry, by: CallEvent["by"]): CallEvent {
   const state: CallState =
-    row.status === "confirmed" ? "mined" : row.status === "broadcast" ? "sent" : row.status === "failed" ? "failed" : row.status === "not_found" ? "expired" : "unknown";
+    row.status === "confirmed" ? "mined" : row.status === "broadcast" ? "sent" : row.status === "failed" ? "failed" : row.status === "not_sent" ? "not_sent" : row.status === "not_found" ? "expired" : "unknown";
   return {
     ts: row.ts,
     call_id: row.call_id,
@@ -408,7 +413,7 @@ async function recoverLocked(
       break;
     }
     const record = store.readCall(callId);
-    if (!record || isSettled(record.state)) {
+    if (!record || isSettled(record.state) || (!chain.checkHealth && (record.state === "expired" || record.state === "failed"))) {
       store.clearPending(callId);
       continue;
     }
@@ -435,7 +440,13 @@ async function recoverLocked(
 /** The chain with one full history read, shared by every caller of the wrapper. */
 export function onceHistory(chain: ChainAdapter): ChainAdapter {
   let history: ReturnType<ChainAdapter["getHistory"]> | undefined;
+  let last: { key: string; value: Promise<import("../types.js").TxSummary[]> } | undefined;
   return Object.create(chain, {
+    getTransaction: { value: chain.getTransaction ? (txid: string, opts?: { offline?: boolean }) => {
+      const key = `${txid}:${opts?.offline === true}`;
+      if (last?.key !== key) last = { key, value: chain.getTransaction!(txid, opts) };
+      return last.value;
+    } : undefined },
     getHistory: { value: (limit: number, o?: { offline?: boolean; verifiedOnly?: boolean }) => (history ??= chain.getHistory(limit, o)) },
   });
 }

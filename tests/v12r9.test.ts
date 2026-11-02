@@ -201,7 +201,7 @@ describe("F-24, F-31: the allow-list file", posix, () => {
     const real = process.getuid;
     (process as { getuid: () => number }).getuid = () => uid + 1;
     try {
-      assert.throws(() => loadAllowlist(f), /owned by another user/);
+      assert.throws(() => loadAllowlist(f), /owned by another user|namespace is unsafe/);
     } finally {
       (process as { getuid: typeof real }).getuid = real;
     }

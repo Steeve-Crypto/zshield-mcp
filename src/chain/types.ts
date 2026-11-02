@@ -3,6 +3,8 @@ import type { ChainHealth, PaymentReceipt, PaymentRequest, TxSummary, WalletBala
 
 export interface ChainAdapter {
   readonly mode: "mock" | "live";
+  /** This adapter cannot transmit until req.stage has durably recorded the txid. */
+  readonly stagesBeforeBroadcast?: true;
   /**
    * The payment store folder for this wallet, absolute, shared by every process on it.
    * Undefined for a chain with no wallet directory; the store then sits beside the audit dir.
@@ -18,6 +20,7 @@ export interface ChainAdapter {
    * history. `offline` reads the wallet as last synced, without starting a sync.
    * `verifiedOnly` leaves out entries the wallet's JSON does not vouch for (live chain).
    */
+  getTransaction?(txid: string, opts?: { offline?: boolean }): Promise<TxSummary[]>;
   getHistory(limit: number, opts?: { offline?: boolean; verifiedOnly?: boolean; timeoutMs?: number }): Promise<TxSummary[]>;
   /**
    * Read-only. The wallet's unified full viewing key, used only to compute the salted
@@ -36,4 +39,9 @@ export interface ChainAdapter {
   syncWallet?(timeoutMs: number): Promise<SyncResult>;
   /** Read-only, offline. The height the wallet has synced to, for confirmation counts. */
   walletHeight?(): Promise<number>;
+}
+
+/** Adapters with exact lookup must never fall back to full history on lookup failure. */
+export function findTransaction(chain: ChainAdapter, txid: string, opts: { offline?: boolean } = {}): Promise<TxSummary[]> {
+  return chain.getTransaction ? chain.getTransaction(txid, opts) : chain.getHistory(Infinity, opts).then((txs) => txs.filter((t) => t.txid === txid));
 }

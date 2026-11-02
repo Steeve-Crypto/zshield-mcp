@@ -171,7 +171,7 @@ Branch on `code`. It is stable. `message` is for people and may change. `error` 
 | `CHAIN_UNREACHABLE` | Testnet mode: the lightwalletd server did not report the chain tip within `ZINGO_HEALTH_TIMEOUT_MS`. Nothing was sent |
 | `CONFIG_ERROR` | The server is misconfigured, for example testnet mode without the testnet adapter. Nothing was sent |
 | `STATE_WRITE_FAILED` | The payment store in the wallet dir could not be opened or written before the send, so the payment was not sent |
-| `PAYMENT_EXPIRED` | A repeat call whose first call was proven never sent: the synced wallet scanned its whole history past the expiry height and found no match. Pay with a new idempotency key |
+| `PAYMENT_EXPIRED` | Mock expiry only. Legacy live expiry is unresolved, rechecked, and never authorizes a replacement payment |
 | `PAYMENT_FAILED` | A repeat call whose first call returned a txid that the wallet has since marked failed. Nothing is sent again, and the key stays bound to that failed send. Check the explorer, then pay with a new idempotency key |
 
 `status` is `unknown` when the send was started but its result is not known:
@@ -296,7 +296,7 @@ Looks the call up in the payment store, then in the whole wallet history. Never 
 | `pending` | Started and no outcome yet: being sent now, or interrupted and not found in history so far |
 | `broadcast` | Sent, not mined yet |
 | `mined` | In a block. `confirmations` counts from the wallet's synced height. If a later read no longer shows it mined, the answer is `broadcast` or `unknown` with `reorged: true` |
-| `expired` | Proven never sent: not in the whole history of a synced wallet that has scanned past the expiry height. Safe to pay again with a new key |
+| `expired` | Mock expiry only. Live chain absence cannot prove final non-payment; legacy live expiry is rechecked and remains interlocked |
 | `failed` | Not sent (refused or errored, `code` says why), or the wallet marks the transaction failed (`PAYMENT_FAILED`, with its `txid`). The failed record stays unless the transaction is later seen mined |
 | `unknown` | Cannot tell, for example two matching sends or history that could not be read. `possible_sends` lists up to 10 candidates |
 
@@ -479,3 +479,30 @@ of the rollback unlink, only when a durable event proves that binding failed bef
 any chain call. Cleanup requires the wallet lock and refuses signed, transmitted,
 active, ambiguous, or differently parameterized calls. Status keys are bounded both
 at the MCP schema and before direct store hashing.
+
+
+### Reorg, large-history, and path follow-up (November 2)
+
+Live expiry and wallet-failure observations are not irreversible proof of non-payment.
+Recovery keeps signed, unresolved transactions under review and does not authorize a
+new-key retry merely because enough time or blocks passed. Startup restores the pending
+index for legacy expired/failed records so they can be found after a reorg. Positive transaction evidence or a local non-transmission proof can resolve those calls;
+absence/failure observations alone cannot.
+The explicit `stagesBeforeBroadcast` adapter capability authorizes the latter proof;
+custom adapters must not claim it unless they enforce the durable stage callback.
+
+Known txids are reconciled through streamed, bounded projections of `notes all`,
+`coins all`, `messages`, and `transactions`. The CLI still traverses its wallet; ZShield
+retains only the selected identity's evidence, not its entire history. Duplicate listing
+entries and missing/malformed JSON remain unsafe and never confirm a payment. Time,
+record-size, and selected-evidence limits still apply. Ordinary recent-history reads and
+legacy content matching retain their existing limits; neither is the recovery dependency
+for a known staged txid. A genuinely unresolvable broadcast still blocks new live sends;
+clearing that lock by pretending it was never sent would risk duplicate payments.
+
+Record I/O validates lexical ancestor components before following aliases, validates
+resolved ancestors too, retains canonical parent identities, and uses canonical names
+for opens. A different uid cannot control any accepted component. Retargeting an alias
+or replacing a pinned ancestor fails closed. This includes the independent fallback,
+allow-list, state, and audit-quota namespaces. Trusted root/owner aliases remain supported;
+root or service-uid compromise is outside this local-user boundary.

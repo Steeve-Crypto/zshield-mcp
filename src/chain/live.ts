@@ -1,3 +1,4 @@
+import { projectHistory, streamingHistoryRunner, type HistorySelection } from "./history-stream.js";
 import { checkServerUrl } from "../config.js";
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
@@ -20,6 +21,8 @@ const skipSync: WalletSyncer = async () => ({ complete: true, elapsedMs: 0 });
 export const TESTNET_EXPLORER = "https://blockexplorer.one/zcash/testnet/tx/";
 
 export interface RunOptions {
+  /** Stream and project only these identities; never buffer the complete wallet. */
+  historySelect?: HistorySelection;
   /** Stop the CLI after this many milliseconds: SIGTERM, then SIGKILL after killGraceMs. */
   timeoutMs?: number;
   /** How long a CLI that ignores SIGTERM gets before SIGKILL. Default RUNNER_KILL_GRACE_MS. */
@@ -129,7 +132,7 @@ export function redactingRunner(runner: CliRunner): CliRunner {
 /** A CLI that ignores SIGTERM after its timeout is killed outright after this long. */
 export const RUNNER_KILL_GRACE_MS = 5_000;
 
-export const defaultRunner: CliRunner = (bin, args, opts = {}) =>
+export const defaultRunner: CliRunner = (bin, args, opts = {}) => opts.historySelect ? streamingHistoryRunner(bin, args, opts) :
   new Promise((resolve, reject) => {
     const timeout = opts.timeoutMs ?? SEND_TIMEOUT_MS;
     let wrapped: Wrapped | undefined;
@@ -244,6 +247,7 @@ export const VIEWKEY_BACKOFF_MAX_MS = 60_000;
  * Refuses to construct unless network is exactly "testnet".
  */
 export class LiveChainAdapter implements ChainAdapter {
+  readonly stagesBeforeBroadcast = true as const;
   readonly mode = "live" as const;
   readonly bin: string;
   readonly dataDir: string;
@@ -426,6 +430,29 @@ export class LiveChainAdapter implements ChainAdapter {
     if (!opts.verifiedOnly) return entries.slice(0, limit);
     if (!checked) throw new Error("zingo-cli's JSON output could not be read, so the listing cannot be checked.");
     return entries.filter((t) => t.verified).slice(0, limit);
+  }
+
+  /** Exact identity lookup streams all records but materializes only matching evidence.
+   * The CLI has no txid-filtered transactions command; do not invent one or use a
+   * recent slice. Existing corroboration and duplicate checks still apply.
+   */
+  async getTransaction(txid: string, opts: { offline?: boolean } = {}): Promise<TxSummary[]> {
+    if (!/^[0-9a-f]{64}$/.test(txid)) throw new Error("Invalid transaction id.");
+    const deadline = Date.now() + readTimeoutMs();
+    const run = async (cmd: string[]) => {
+      const timeoutMs = deadline - Date.now();
+      if (timeoutMs <= 0) throw new Error("Transaction lookup ran out of time.");
+      const selection: HistorySelection = { txids: [txid], format: cmd[0] === "transactions" ? "transactions" : "json" };
+      const result = await this.exec(opts.offline ? [...this.offline(cmd[0]), ...cmd.slice(1)] : [...this.baseArgs(), ...cmd], { timeoutMs, historySelect: selection });
+      // Fake/injected runners may return full output. Apply the same projection there.
+      return projectHistory(result, selection);
+    };
+    const byTxid = new Map<string, TxFacts>();
+    addNoteFacts(extractJson(await run(["notes", "all"])), byTxid);
+    addNoteFacts(extractJson(await run(["coins", "all"])), byTxid);
+    const messages = messageFacts(extractJson(await run(["messages"])));
+    const entries = parseTransactions(await run(["transactions"]));
+    return entries.filter((e) => e.txid === txid).map((e) => ({ ...e, verified: corroborate(e, { byTxid, messages }, entries.filter((t) => t.txid === txid).length) }));
   }
 
   /** Scans in flight, by send epoch and offline flag. */

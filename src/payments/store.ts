@@ -31,9 +31,9 @@ export type CallState = "pending" | "unknown" | "not_sent" | "expired" | "sent" 
  */
 export const STATE_RANK: Record<CallState, number> = { pending: 0, unknown: 1, not_sent: 2, expired: 2, sent: 3, failed: 4, mined: 5 };
 
-/** A state at or above this rank is settled: recovery leaves it alone. */
+/** Expiry and wallet failure are observations, not chain finality. Historical ranks are retained. */
 export function isSettled(state: CallState): boolean {
-  return STATE_RANK[state] >= 2;
+  return state !== "expired" && state !== "failed" && STATE_RANK[state] >= 2;
 }
 
 /** What a call set out to do, written before anything is sent. */
@@ -180,6 +180,13 @@ export class PaymentStore {
       const n = ensurePrivateDir(d);
       if (n) notes.push(n);
     }
+    // Older versions cleared the pending index for expired and failed calls. Rebuild once per
+    // store instance before live use; failure aborts store initialization.
+    for (const callId of fs.readdirSync(this.sub("calls"))) {
+      if (callId.startsWith(".tmp-")) continue;
+      const state = this.readCall(callId)?.state;
+      if (state === "expired" || state === "failed") this.markPending(callId);
+    }
     return notes;
   }
 
@@ -283,11 +290,11 @@ export class PaymentStore {
    * A call from this wallet that was signed (its txid is on record) and is not settled: it
    * may have been broadcast, and its notes are still spoken for. Undefined when there is none.
    */
-  unresolvedSend(exceptCallId?: string): { callId: string; txid: string } | undefined {
+  unresolvedSend(exceptCallId?: string): { callId: string; txid?: string } | undefined {
     for (const callId of this.pendingCalls()) {
       if (callId === exceptCallId) continue;
       const r = this.readCall(callId);
-      if (r && !isSettled(r.state) && (r.stagedTxid ?? r.txid)) return { callId, txid: (r.stagedTxid ?? r.txid)! };
+      if (r && !isSettled(r.state) && ((r.stagedTxid ?? r.txid) || (this.requireOsLock && r.state === "expired"))) return { callId, txid: r.stagedTxid ?? r.txid };
     }
     return undefined;
   }
@@ -336,7 +343,8 @@ export class PaymentStore {
       current?.state === event.state && event.block_height !== undefined && current.blockHeight === undefined && current.txid === event.txid;
     if (movesForward(current, event.state) || sameTxGainsHeight) this.appendEvent(event);
     const after = this.readCall(event.call_id) ?? foldEvents(event.call_id, undefined, [event]);
-    if (isSettled(after.state)) this.clearPending(event.call_id);
+    if (isSettled(after.state) || (!this.requireOsLock && (after.state === "expired" || after.state === "failed"))) this.clearPending(event.call_id);
+    else this.markPending(event.call_id);
     return after;
   }
 

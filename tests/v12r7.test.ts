@@ -100,6 +100,7 @@ describe("staged live send binds the txid before it is transmitted", () => {
   function historyChain(base: ChainAdapter, history: Record<string, unknown>[]) {
     return Object.assign(Object.create(base), {
       getHistory: async () => history,
+      getTransaction: async (txid: string) => history.filter((t) => t.txid === txid),
       checkHealth: async () => ({ walletHeight: 1000, chainTip: 1001, spendableZats: 0n }),
     }) as ChainAdapter;
   }

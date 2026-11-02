@@ -1,3 +1,4 @@
+import { safeRecordPath } from "../fsafe.js";
 import fs from "node:fs";
 import type { AllowlistFile, RecipientEntry } from "../types.js";
 import { PolicyError } from "./caps.js";
@@ -56,6 +57,7 @@ export function assertAllowlistFileSafe(path: string): void {
  * bytes and entries. Errors name neither the path nor the file content.
  */
 export function loadAllowlist(path: string): RecipientEntry[] {
+  try { path = safeRecordPath(path); } catch { throw new PolicyError("ALLOWLIST_UNAVAILABLE", "The allow-list namespace is unsafe or changed."); }
   let st: fs.Stats;
   try {
     st = fs.lstatSync(path);

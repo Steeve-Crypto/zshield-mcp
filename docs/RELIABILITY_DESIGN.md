@@ -74,25 +74,34 @@ Staging the txid before `transmit` means a timeout or crash during the broadcast
 
 ## Recovery and status
 
-Recovery runs at startup and settles pending calls, one at a time, under the wallet lock, each with a fresh read of the call's events. It reads the full wallet history once per run, never a fixed number of entries, and skips txids claimed by other calls. Candidate lists in outputs and audit rows are capped at 10 (`MAX_CANDIDATES`). The cap applies only to what is shown. Decisions use the whole list, so a flood of lookalikes can only block, never prove `not sent`. A repeated `unknown` decision writes another audit row only when its candidate set changed.
+Recovery handles pending records under the wallet lock, never resends, and keeps
+transaction identity separate from content similarity. Known staged/returned txids use
+bounded-memory streaming projection over the CLI output; the complete output is read,
+including duplicate occurrences after a match. JSON corroboration (`notes all`, `coins
+all`, `messages`) is retained. Missing, malformed, duplicated, or inconsistent evidence
+never confirms a payment. A status request caches its last identity lookup so reconcile
+and confirmation counting do not repeat the same four process reads.
 
-**A call with a staged txid** is settled by that txid: mined, still pending, failed, or absent. A different transaction with the same recipient, amount, and memo is never taken for it. **A call made by the two-step flow without a staged txid** never transmitted, so no history entry is attributed to it. It is `unknown` when lookalike sends exist, and otherwise the normal proof below applies. **A legacy call** (imported from an old audit log, or recorded before the two-step flow) has no txid, so it is matched by content: a lone match confirms it only when it carries the call's exact memo. A lone match for a call that had no memo cannot be told from any other payment of that amount, so it stays `unknown` with the candidate listed, and `zcash_payment_status` never claims such a candidate as the call's txid.
+Live absence stays `unknown`, irrespective of the old 120-block delta, 60-block margin,
+or two-hour floor. Those thresholds are diagnostics, not proof against arbitrary reorgs.
+No new-key retry is suggested. Existing expired and failed records are re-indexed at
+startup and remain in the live wallet interlock until positive evidence or a local
+non-transmission proof resolves them. Historical events are not rewritten.
 
-**Machine-readable corroboration.** `zingo-cli` prints its history as text, so the text listing is never trusted alone. For each entry the adapter also reads `notes all`, `coins all` and `messages` as JSON and checks the transaction against them: for a send, the amount, the recipient (or its unified address), the memo, and the txid, status and height. An entry the JSON does not vouch for, or one the listing shows more than once, is `unverified`: it never confirms a call, and it still blocks a "not sent" proof. `zingo-cli` gives no JSON listing of the outgoing recipient of a memo-less send, so for those the recipient and amount come from the text and are only tied to the JSON by txid, status and height. `zcash_history` returns only verified entries, and fails if the JSON cannot be read. Status refuses a txid that is listed twice or not vouched for (`unknown`, nothing recorded). Recovery still receives unverified entries, as blockers and never as evidence.
+An adapter declaring `stagesBeforeBroadcast: true` cannot transmit before `req.stage`
+has durably stored the signed txid. An intent created by that protocol without a staged
+or returned txid therefore has a local `not_sent` proof, independent of chain history.
+Adapters without that capability and older records without transaction identity keep
+legacy content matching: recipient, amount, exact memo, time/height placement, ownership,
+and rival-call checks. Candidate lists are bounded; truncated lists are not absence proofs.
 
-A history entry is this call's send only if all of these hold: it is a sent transaction that is not failed; the amount is equal; the memo is equal (a call with no memo matches only a transaction with no memo, never someone else's memo payment); the recipient is equal, or equal to the note's unified address; and the entry is placed after the call started, by its time or, when it has none, by a block height that is not before the wallet height recorded at the send (less 5 blocks for a reorg). A single mined match that is not placed in time stays `unknown`. If another unsettled call has the same recipient, amount, and memo and started close in time, one transaction cannot be told apart between them, so both stay `unknown`. If nothing matches but an unclaimed sent transaction of the same amount sits near the call's time, the call stays `unknown` (the wallet may have listed the recipient in another form), never proven not sent.
-
-- One unclaimed, placed match: claim the txid and record mined or sent.
-- No match: `expired` only with proof that the transaction can no longer be mined. In testnet mode all of these must hold: the wallet is synced (within 10 blocks, after a complete bounded sync); the full history was read; the call recorded the wallet's own height at the time; the server tip now is not below the wallet's height, the expiry anchor, or the highest tip recorded, by more than 10 blocks; the wallet height is past the anchor plus the 120 block expiry (the pinned zingolib sets target plus 120 on testnet) plus a 60 block margin (the transaction is built up to 15 minutes, about 36 blocks at 25 seconds, after the tip was read, and a reorg allowance); and at least two hours have passed since the call started, whatever the heights say. A server that reports a low tip therefore cannot prove anything. Without all of that, `unknown`.
-- Several matches: `unknown`, with the candidates listed.
-
-Recovery is bounded: at most 100 calls per run, a 2 minute budget, a bounded sync (2 minutes), and a lock wait of at most 5 tries of 60 seconds with a 5 second pause. It yields to timers between calls. Calls left over wait for the next start.
-
-`zcash_payment_status` reads the store fresh on each call, never a cached view. It may record the same forward moves under the wallet lock, and it is `BUSY` while a send holds it. It takes `call_id`, `operation_id` or `idempotency_key`, exactly one, each checked for format and length before anything is read. It only says to pay again, with a new key, for `expired`, which now means proven. One status call reads the history once. Overlapping history reads on one adapter share one scan, a third distinct scan is refused, and a send discards scans that began before it.
+Recovery retains its existing call-count, time, sync, and lock-wait budgets. Status reads
+fresh state under the lock, syncs when supported, and never races stage/transmit. Mock
+expiry remains a synthetic terminal result; it is not a live-chain finality policy.
 
 ## Failed sends and key reuse
 
-A send that returned a txid is `sent`. If the wallet later lists that transaction as failed (rejected, or expired without being mined), `zcash_payment_status` records `failed` for the call and reports `PAYMENT_FAILED`. A repeat call with the same key then returns `ok: false` with `PAYMENT_FAILED` and the txid, and sends nothing. The same key is not reused for a retry after a failure. The wallet's word `failed` is its own judgment, a wrong one would double pay, and the caller can decide with the explorer in hand. To pay again, use a new idempotency key. Status never moves a mined call to failed, and a transaction later seen mined moves a failed call to mined. If the wallet no longer shows a mined call as mined, the answer follows the wallet (`broadcast` or `unknown`, `reorged: true`), while the record stays `mined`.
+A send that returned a txid is `sent`. If the wallet later lists that transaction as failed (rejected, or expired without being mined), `zcash_payment_status` records `failed` for the call and reports `PAYMENT_FAILED`. A repeat call with the same key then returns `ok: false` with `PAYMENT_FAILED` and the txid, and sends nothing. The same key is not reused for a retry after a failure. The wallet's word `failed` is its own judgment, a wrong one would double pay, and the caller can decide with the explorer in hand. A wallet failure observation does not authorize a new-key retry. Live signed failures remain interlocked and are rechecked; a later mined sighting can resolve them. Status never moves a mined call to failed, and a transaction later seen mined moves a failed call to mined. If the wallet no longer shows a mined call as mined, the answer follows the wallet (`broadcast` or `unknown`, `reorged: true`), while the record stays `mined`.
 
 A replay of a `sent` call that nobody has checked with `zcash_payment_status` still returns the original success, since the txid was broadcast. Check status before treating it as final.
 
@@ -107,13 +116,13 @@ Every timeout comes from a bounded setting. Values outside the range stop the se
 - A long read (history, status) makes a payment wait up to `SEND_QUEUE_WAIT_MS`, then `BUSY`.
 - A transaction that was built (`calculate`) but never transmitted can stay in the wallet's pending list and hold its notes until the wallet drops it. It is never broadcast by this server, so it cannot pay anyone.
 - Live payments require an idempotency key. Only mock payments may go without one, and they move no money.
-- The expiry proof trusts the wallet's scan and the 120 block expiry that the pinned `zingo-cli` sets, plus the 60 block margin and the two hour floor. A wallet that skips a block range could still fool it. A call recorded before the wallet height was kept is never proven expired and stays `unknown`.
+- No finite live expiry margin proves non-payment. Unresolved signed transactions remain interlocked and may require operator investigation when reliable evidence is unavailable.
 - The tip mark (`tip.json` in the store) only rises. After a deliberate testnet reset, or a wallet moved to a different chain, sends are refused with `CHAIN_ERROR` until the file is removed by hand.
 - `zingo-cli` prints its history as human text, and a third party's incoming memo is part of that text. Newlines in memos are refused on the way out, but an incoming memo with crafted lines could still fake a transaction block in the listing. The JSON corroboration above catches a fake block (no matching note, coin or message), but a memo-less send is vouched for only by txid, status and height. This is why a match needs time or height placement, equal memo, a claim check and JSON corroboration, and why unplaced or unverified matches stay `unknown`.
 - A call from before the two-step flow, with no memo, never confirms from history. Its candidate is listed for a human to check.
 - Calls with identical recipient, amount, and memo started close together stay `unknown` until checked by hand.
 - The store needs hard links (`link`) for exclusive creates. On a filesystem without them, such as FAT, the first exclusive write fails and nothing is sent.
-- A call that crashed after its intent but before binding stays `unknown` in status until the expiry proof, even though the unbound key shows it never reached the send. Retrying with the same key is safe.
+- A two-step intent that never staged a transaction is locally proven not transmitted. Unbound keys remain retryable; no chain-absence assumption is required.
 - Audit rows are never imported. A store that never had a key imported from an audit log (a very old install) has no record of that key, so the same key can pay again. Keep using the store: its keys and calls stay.
 - The wallet path is checked before each send, not during it. A directory swapped in the moments between that check and zingo-cli opening the path is not caught. A hostile local user with write access to the data directories is out of scope (see SECURITY_MODEL.md).
 - The allow-list cache trusts the file's identity, size, mtime, and ctime. On a filesystem with coarse timestamps, an edit that keeps the size within the same tick is seen on the next change.
@@ -121,7 +130,7 @@ Every timeout comes from a bounded setting. Values outside the range stop the se
 ## Hardening pass (run 7)
 
 - **Expiry.** The pinned zingolib expires a transaction 120 blocks after its target height. Not sent is proven only after the wallet passes anchor + 1 + 120 + 60.
-- **Unresolved sends block the wallet.** In live mode, a call with a signed txid that is not settled (mined, expired, failed, not sent) refuses every new send with `UNRESOLVED_PAYMENT`. A transmit error or a wallet Failed status is `unknown`, never `not_sent`.
+- **Unresolved sends block the wallet.** In live mode, a call with a signed txid that is not settled (mined or locally proven not sent) refuses every new send with `UNRESOLVED_PAYMENT`. A transmit error or a wallet Failed status is `unknown`, never `not_sent`.
 - **No bare transmit.** `transmit` always carries a validated 64 hex txid. A bare one would send every calculated transaction in the wallet.
 - **Chain check.** When `info` names the chain and consensus branch, a testnet server must say `test` and `77190ad9`, or the send is refused.
 - **Lock file.** The holder refuses a lock file that is not a regular file owned by this user, and never blocks on a FIFO.

@@ -331,7 +331,7 @@ describe("F-22: the chain tip cannot be trusted low", () => {
     const config = liveCfg();
     pending(config, "c1", { chain_tip: 100, wallet_height: 990 } as Partial<AuditEntry>);
     const early = await recoverPendingPayments(config, chainOf([], { walletHeight: 1200, chainTip: 1201, spendableZats: 0n }), { now: T0 + recovery.RECOVERY_EXPIRY_MS + 1 });
-    assert.equal(early[0].status, "not_found", "1100 is past 990 + 1 + 120 + margin");
+    assert.equal(early[0].status, "unknown", "a finite margin cannot establish finality");
     const config2 = liveCfg();
     pending(config2, "c2", { chain_tip: 100, wallet_height: 990 } as Partial<AuditEntry>);
     const notYet = await recoverPendingPayments(config2, chainOf([], { walletHeight: 1100, chainTip: 1101, spendableZats: 0n }), { now: T0 + recovery.RECOVERY_EXPIRY_MS + 1 });
