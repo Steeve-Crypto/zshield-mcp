@@ -9,7 +9,7 @@ function envOr<T>(key: string, fallback: T, parse: (v: string) => T): T {
   return parse(v);
 }
 
-const KNOWN_MODES = ["mock", "live", "testnet"];
+const KNOWN_MODES = ["mock", "live", "testnet", "zkool"];
 
 export function loadConfig(cwd = process.cwd()): Config {
   const yamlPath = resolve(cwd, "config/default.yaml");
@@ -50,7 +50,10 @@ export function loadConfig(cwd = process.cwd()): Config {
       fromFile.view_key_fingerprint_salt ?? "dev-only-change-me",
       (v) => v
     ),
-    chainNetwork: rawMode === "testnet" ? "testnet" : undefined,
+    chainNetwork: rawMode === "testnet" || rawMode === "zkool" ? "testnet" : undefined,
+    chainBackend: rawMode === "zkool" ? "zkool" : "zingo",
+    zkoolUrl: process.env.ZKOOL_URL,
+    zkoolAccount: process.env.ZKOOL_ACCOUNT ? Number(process.env.ZKOOL_ACCOUNT) : undefined,
     zingoBin: process.env.ZINGO_BIN,
     zingoDataDir: process.env.ZINGO_DATA_DIR,
     lightwalletd: process.env.LIGHTWALLETD_URL,

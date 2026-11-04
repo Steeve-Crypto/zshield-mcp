@@ -1,12 +1,16 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { MockChainAdapter } from "./chain/mock.js";
 import { LiveChainAdapter } from "./chain/live.js";
+import { ZkoolChainAdapter } from "./chain/zkool.js";
 import type { ChainAdapter } from "./chain/types.js";
 import { loadConfig } from "./config.js";
 import { executePay, payInputSchema } from "./tools/pay.js";
 import type { Config } from "./types.js";
 
 export function createChain(config: Config): ChainAdapter {
+  if (config.chainMode === "live" && config.chainBackend === "zkool") {
+    return new ZkoolChainAdapter({ network: config.chainNetwork, url: config.zkoolUrl, account: config.zkoolAccount });
+  }
   return config.chainMode === "live"
     ? new LiveChainAdapter({
         network: config.chainNetwork,
