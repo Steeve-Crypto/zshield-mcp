@@ -146,6 +146,19 @@ npm run demo:testnet
 
 The demo creates a second fresh testnet wallet as the recipient, writes a one-entry allow-list for it, and sends 0.001 TAZ through `executePay`, the same policy path the `zcash_pay` tool uses. It prints the txid and a link on https://blockexplorer.one/zcash/testnet. A confirmed txid proves the full path works end to end: policy checks, audit write, and a real shielded transaction on the Zcash testnet.
 
+## zkool_graphql backend (no Rust build)
+
+`CHAIN_MODE=zkool` sends real testnet payments through a running [zkool_graphql](https://github.com/hhanh00/zkool2) server instead of zingo-cli. zkool ships a release binary, so there is nothing to compile.
+
+```bash
+# start zkool_graphql on a fresh testnet database (keep it on localhost: the API exposes the seed when unauthenticated)
+./zkool_graphql -d wallet.db -p 8000 --bind-address 127.0.0.1 -l https://testnet.zec.rocks:443 -C 1 --allow-unauthenticated --allow-unencrypted-database
+# create an account once, fund its utest1 address from a faucet, then:
+CHAIN_MODE=zkool ZKOOL_URL=http://127.0.0.1:8000 ZKOOL_ACCOUNT=1 ALLOWLIST_PATH=./allowlists/testnet.json npm start
+```
+
+The adapter checks the wallet's own address is testnet before every payment, synchronizes the account, calls `pay` with the memo, and returns the txid. Mainnet addresses are refused on both sides.
+
 ## Proof: live testnet payment
 
 One real shielded 0.001 TAZ payment through `zcash_pay`, plus a blocked over-cap attempt: [tx 59d9cb1b5a47... on blockexplorer.one](https://blockexplorer.one/zcash/testnet/tx/59d9cb1b5a473a84602c4812a7809217f6e9d359174deb178e7fd52c151ae8fc)

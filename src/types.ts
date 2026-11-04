@@ -16,6 +16,10 @@ export interface Config {
   auditDir: string;
   viewKeyFingerprintSalt: string;
   chainNetwork?: string;
+  /** Which live backend: zingo-cli (default) or a zkool_graphql server. */
+  chainBackend?: "zingo" | "zkool";
+  zkoolUrl?: string;
+  zkoolAccount?: number;
   zingoBin?: string;
   zingoDataDir?: string;
   lightwalletd?: string;
