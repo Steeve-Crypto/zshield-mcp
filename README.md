@@ -12,6 +12,8 @@ Open-source **MCP server** that exposes `zcash_pay` for agent-initiated **shield
 
 Spend keys never belong in the model. Mock chain by default. A live adapter sends real shielded payments on Zcash **testnet only** through zingo-cli.
 
+Financial-use release status and outstanding validation: [production readiness](docs/PRODUCTION_READINESS.md).
+
 ![Flow: AI agent to zshield-mcp to Zcash testnet](docs/images/flow.png)
 
 ## Purpose

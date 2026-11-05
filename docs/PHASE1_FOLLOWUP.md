@@ -21,7 +21,30 @@ Local test success is not a fresh V12 approval or a funded testnet integration r
 
 - `npm run build`: passed.
 - `npm run typecheck`: passed.
-- `npm test`: 516 tests passed, zero failures, zero skips.
+- Previous local run: 516 tests passed. The native testnet suite was disabled;
+  Node's zero skipped-case count did not mean that suite executed.
 - The resume sweep verified 26 instrumented durable-write crash points.
 - Tests run against the final source include the audit-capacity isolation and original
   call status fixes, not just the initial outbox implementation.
+
+
+## Financial-use review follow-up (2026-11-04)
+
+Added eight cases for missing/false wallet verification, unknown/empty transaction
+states, extra outgoing payments, and calculated transactions in payment status.
+Four new recovery cases reproduced false settlement before the fix; the negative
+verification case verifies an existing refusal. Positive live fixtures now carry
+explicit verified evidence without weakening their original assertions.
+
+Updated five vulnerable production dependencies, including Zod 4.6.7, and checked
+the MCP integration against that major upgrade. `npm audit` now reports zero known
+vulnerabilities across production and development dependencies.
+
+`npm run test:testnet` fails without the native testnet prerequisites. See
+[financial-use release assessment](PRODUCTION_READINESS.md) for the release gates
+that local subprocess fixtures cannot satisfy.
+
+Final follow-up validation: clean dependency install, build and typecheck passed;
+`npm test` passed 524 tests with zero failures (native suite disabled). The run
+verified 62 payment crash points and 26 resume crash points. The explicit testnet
+command failed its prerequisite check as intended; it did not run native tests.

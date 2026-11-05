@@ -114,7 +114,7 @@ async function byTxid(
   const found = await findTransaction(chain, txid, { offline });
   // Listed twice, or not vouched for by the wallet's JSON: a memo may have forged it. Nothing
   // is read from it and nothing is recorded.
-  if (found.length > 1 || found[0]?.verified === false) {
+  if (found.length > 1 || found[0]?.verified === false || (found[0] && (chain.mode === "live" || chain.checkHealth !== undefined) && found[0].verified !== true)) {
     return { state: "unknown", txid, message: "The wallet's listing for this transaction is ambiguous or not confirmed by the wallet's own JSON, so nothing was recorded. Check the explorer. Do not pay again." };
   }
   const tx = found[0];
@@ -124,7 +124,8 @@ async function byTxid(
       : { state: "unknown", txid, message: "Sent, but not in the wallet's history. Check the explorer. Do not pay again." };
   }
   if (tx.status === "failed") return { state: "failed", txid, message: "The wallet marks this transaction failed." };
-  if (tx.status !== "confirmed") return { state: "broadcast", txid, message: `Sent; the wallet reports it as ${tx.status}.` };
+  if (tx.status === "transmitted" || tx.status === "mempool") return { state: "broadcast", txid, message: `Sent; the wallet reports it as ${tx.status}.` };
+  if (tx.status !== "confirmed") return { state: "unknown", txid, message: "The wallet does not currently establish transmission or confirmation. Do not pay again." };
   let walletHeight: number | undefined;
   try {
     walletHeight = await chain.walletHeight?.();
