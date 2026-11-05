@@ -133,7 +133,7 @@ describe("Phase 1 follow-up regressions", () => {
   it("327847 local admission precedes OS holders; wallet lock still excludes cross-process reads", async () => {
     const store = new PaymentStore(fs.mkdtempSync(join(tmpdir(), "review-gate-")));
     store.requireOsLock = true;
-    const read = await acquireWalletLock(store, 0, "balance");
+    const read = await acquireWalletLock(store, 0, "zcash_balance");
     const writer = acquireWalletLock(store, 3000, "zcash_pay");
     try {
       // Local-first: a payment waiting behind an in-process read has not spawned its OS holder yet.
