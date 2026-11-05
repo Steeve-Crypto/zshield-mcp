@@ -156,6 +156,8 @@ export function foldEvents(callId: string, intent: CallIntent | undefined, event
 
 /** Whether `next` moves a call in `current` state forward. */
 export function movesForward(current: CallRecord | undefined, next: CallState): boolean {
+  // Historical live expiry keeps the interlock; proven local non-transmission may clear it.
+  if (current?.state === "expired" && next === "not_sent") return true;
   return STATE_RANK[next] > STATE_RANK[current?.state ?? "pending"];
 }
 
@@ -345,6 +347,10 @@ export class PaymentStore {
    */
   advance(event: CallEvent): CallRecord {
     const current = this.readCall(event.call_id);
+    // After transmit authorization, local busy/fence errors are not proof of non-transmission.
+    if (event.state === "not_sent" && current?.stagedTxid && current.events.some((e) => e.transmit_authorized)) {
+      event = { ...event, state: "unknown" };
+    }
     const sameTxGainsHeight =
       current?.state === event.state && event.block_height !== undefined && current.blockHeight === undefined && current.txid === event.txid;
     if (movesForward(current, event.state) || sameTxGainsHeight) this.appendEvent(event);

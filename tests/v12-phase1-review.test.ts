@@ -10,7 +10,7 @@ import { reserveAudit, AUDIT_SLOT_BYTES } from "../src/audit/budget.ts";
 import { LiveChainAdapter, defaultRunner } from "../src/chain/live.ts";
 import { WalletBusyError } from "../src/chain/walletlock.ts";
 import { withWalletRead } from "../src/tools/read.ts";
-import { acquireWalletLock } from "../src/payments/lock.ts";
+import { acquireWalletLock, BusyError } from "../src/payments/lock.ts";
 import { PaymentStore } from "../src/payments/store.ts";
 import { reconcile } from "../src/payments/recovery.ts";
 import { withReadBudget, withOperationBudget, WALLET_READ_BUDGET_MS, LIVE_PAYMENT_READ_WAIT_MS } from "../src/chain/read-budget.ts";
@@ -122,20 +122,17 @@ describe("Phase 1 follow-up regressions", () => {
     finally { hook.mock.restore(); }
     assert.deepEqual(timers, [40, 5]);
   });
-  it("327847 a locally queued writer closes the cross-process read gate before handoff", async () => {
+  it("327847 local admission precedes OS holders; wallet lock still excludes cross-process reads", async () => {
     const store = new PaymentStore(fs.mkdtempSync(join(tmpdir(), "review-gate-")));
     store.requireOsLock = true;
     const read = await acquireWalletLock(store, 0, "balance");
     const writer = acquireWalletLock(store, 3000, "zcash_pay");
-    let blocked = false;
     try {
-      for (let i = 0; i < 20; i++) {
-        await new Promise(r => setTimeout(r, 10));
-        const probe = spawnSync("perl", ["-e", "use Fcntl qw(:flock); open(my $f,'>>',$ARGV[0]) or die; exit(flock($f,LOCK_SH|LOCK_NB)?0:75)", join(store.dir, "send-priority.flock")]);
-        if (probe.status === 75) { blocked = true; break; }
-        assert.equal(probe.status, 0);
-      }
-      assert.ok(blocked, "waiting local payment must already own the OS turnstile");
+      // Local-first: a payment waiting behind an in-process read has not spawned its OS holder yet.
+      const priority = spawnSync("perl", ["-e", "use Fcntl qw(:flock); open(my $f,'>>',$ARGV[0]) or die; exit(flock($f,LOCK_SH|LOCK_NB)?0:75)", join(store.dir, "send-priority.flock")]);
+      assert.equal(priority.status, 0, "waiting payment must not hold the turnstile before local admission");
+      // The wallet lock itself still excludes another process's zero-wait read.
+      await assert.rejects(() => acquireWalletLock({ dir: store.dir, requireOsLock: true }, 0, "zcash_balance"), (e) => e instanceof BusyError || /Busy/.test(String(e)));
     } finally {
       await read.release();
       const lock = await writer;

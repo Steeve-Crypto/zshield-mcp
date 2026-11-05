@@ -39,10 +39,12 @@ export function checkRecordPaths(config: Config, stateDir: string, platform: str
   };
   // No directory above these paths may let another user swap them. The allow-list file
   // itself must not be a symlink, another user's, or writable by group or other.
-  for (const p of [config.auditDir, stateDir, config.allowlistPath, fallbackAuditPath(config.auditDir, config.auditFallbackPath), `${config.auditDir}.budget`, `${fallbackAuditPath(config.auditDir, config.auditFallbackPath)}.budget`]) assertSafeAncestors(p);
+  for (const p of [config.auditDir, stateDir, config.allowlistPath, fallbackAuditPath(config.auditDir, config.auditFallbackPath), `${config.auditDir}.budget`, `${fallbackAuditPath(config.auditDir, config.auditFallbackPath)}.budget`, config.approvalDir]) {
+    if (p) assertSafeAncestors(p);
+  }
   assertAllowlistFileSafe(config.allowlistPath);
-  for (const dir of [config.auditDir, stateDir]) {
-    note(ensurePrivateDir(dir));
+  for (const dir of [config.auditDir, stateDir, config.approvalDir]) {
+    if (dir) note(ensurePrivateDir(dir));
   }
   for (const name of readdirSync(config.auditDir)) {
     if (name.endsWith(".jsonl")) note(checkPrivateFile(join(config.auditDir, name)));
@@ -81,6 +83,7 @@ export function startupChecks(config: Config, platform: string = process.platfor
   // Pin its real path, and judge the directories above that path, not above a symlink to it.
   const pin = pinDir(dataDir);
   assertSafeAncestors(pin.path);
+  assertCoherentWalletFilesystem(pin.path, platform);
   const stateDir = deps.stateDir ?? walletStateDir(pin.path);
   const warnings = assertWalletPrivate(pin.path, platform);
   warnings.push(...checkRecordPaths(config, stateDir, platform));
@@ -124,8 +127,15 @@ export function assertFinancialProfile(config: Config, platform: string = proces
   if (approvalKeys(config).threshold < 2) throw new Error("Financial controls require at least two distinct approval authorities.");
   if (!config.zingoBin || !isAbsolute(config.zingoBin) || !/^[a-f0-9]{64}$/.test(config.zingoBinarySha256 ?? "")) throw new Error("Financial controls require an absolute ZINGO_BIN and approved ZINGO_BINARY_SHA256.");
   if (!config.zingoDataDir) throw new Error("Financial controls require an explicit wallet directory.");
-  // Refuse network filesystems, tmpfs and unqualified container overlays. Local fsync
-  // and flock behavior still require deployment drills on the actual storage stack.
+  assertCoherentWalletFilesystem(config.zingoDataDir, platform);
+}
+
+/** All live flocks need a coherent local lock domain; not only the strict financial profile. */
+export function assertCoherentWalletFilesystem(walletDir: string, platform: string = process.platform): void {
+  if (platform !== "linux") return;
+  // Refuse network filesystems, tmpfs and unqualified container overlays.
   const supported = new Set([0xef53, 0x58465342, 0x9123683e]); // ext4, XFS, Btrfs
-  if (!supported.has(statfsSync(config.zingoDataDir).type)) throw new Error("Financial controls require a local ext4, XFS or Btrfs wallet volume; validate its durability before release.");
+  if (!supported.has(statfsSync(walletDir).type)) {
+    throw new Error("Live mode requires a local ext4, XFS or Btrfs wallet volume so advisory locks and fsync stay coherent.");
+  }
 }
