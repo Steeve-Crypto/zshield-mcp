@@ -686,8 +686,8 @@ export class LiveChainAdapter implements ChainAdapter {
     // A lost lock stops here, before the wallet process starts.
     req.fence?.();
     this.assertPinned();
-    // Durable transmit authorization stays before the backend-lock wait so a crash here
-    // cannot leave a gate-waiter holding zingo.flock. Expiry is re-checked afterLock.
+    // Policy fence before waiting on the backend lock. Durable transmit authorization
+    // happens in afterLock once the lock is held, so a WalletBusyError here stays not_sent.
     req.beforeTransmit?.();
     let sent: string;
     try {

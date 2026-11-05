@@ -54,10 +54,16 @@ export function reserveSpending(config: Config, store: PaymentStore, lock: Walle
       ledger = { version: 2, total: ledger.total };
       replaceAtomic(dir, "ledger.json", JSON.stringify(ledger));
     }
-    const charge: Charge = { id: hash(callId), amount: amount.toString(), identity: hash(JSON.stringify([key, paramsHash])) };
+    // Receipt id follows payment identity (key + params + role), not the ephemeral call id.
+    // Retries that never sent must not permanently consume the allowance again (F-72).
+    // Fee reservations use callId prefix "fee:" so they stay distinct from the principal.
+    const role = callId.startsWith("fee:") ? "fee" : "principal";
+    const identity = hash(JSON.stringify([key, paramsHash, role]));
+    const charge: Charge = { id: identity, amount: amount.toString(), identity };
     const prior = readPrivate(join(receipts, charge.id), 4096);
     if (prior !== undefined) {
-      if (prior !== JSON.stringify(charge)) throw new Error("Spending reservation identity changed");
+      const prev = JSON.parse(prior) as Charge;
+      if (!validCharge(prev) || prev.identity !== identity || prev.amount !== charge.amount) throw new Error("Spending reservation identity changed");
       if (BigInt(ledger.total) > cap) throw new Error("Current spending allowance is below reserved spending");
       return;
     }
