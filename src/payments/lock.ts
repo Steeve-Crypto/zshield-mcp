@@ -237,3 +237,13 @@ export async function acquireWalletLock(
     throw e;
   }
 }
+
+
+/** Maintenance must also exclude CLI children left alive by a killed server. */
+export async function acquireMaintenanceLock(store: { dir: string; requireOsLock?: boolean }, waitMs = 30_000): Promise<WalletLock> {
+  const app = await acquireWalletLock(store, waitMs, "maintenance");
+  try {
+    const backend = await takeOsLock(join(store.dir, "zingo.flock"), waitMs);
+    return { assertHeld() { app.assertHeld(); backend.assertHeld(); }, async release() { await backend.release(); await app.release(); } };
+  } catch (error) { await app.release(); throw error; }
+}
