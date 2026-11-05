@@ -591,6 +591,7 @@ export class LiveChainAdapter implements ChainAdapter {
     // `send` and `calculate` build and sign it, `transmit <txid>` broadcasts exactly that.
     // Nothing is broadcast in step one, so every failure there is a clean "not sent".
     let txid: string;
+    let feeZats: bigint;
     try {
       // The last check, with nothing between it and the start of the wallet process.
       req.fence?.();
@@ -603,6 +604,7 @@ export class LiveChainAdapter implements ChainAdapter {
         lockWaitMs: SEND_LOCK_WAIT_MS,
       });
       txid = parseStaged(built);
+      feeZats = parseStagedFee(built);
     } catch (e) {
       if (e instanceof CliTimeoutError) throw new Error(`zingo-cli did not finish building the transaction (${e.message}). Nothing was sent.`);
       throw e;
@@ -611,6 +613,7 @@ export class LiveChainAdapter implements ChainAdapter {
     const transmitInput = transmitCommand(txid);
     // Bind the txid durably. If that fails the transaction is never transmitted.
     req.stage?.(txid);
+    req.authorizeFee?.(feeZats);
     // A lost lock stops here, before the wallet process starts.
     req.fence?.();
     this.assertPinned();
@@ -667,13 +670,23 @@ export function buildStageInput(req: PaymentRequest): string {
  * `calculate` prints `{ "txids": [...] }`; both must be there, in that order, with no error
  * text, and exactly one txid. Anything else is a refusal. Nothing was broadcast.
  */
+/** Refuse ambiguous or non-integer fee reports; never truncate a JSON number. */
+export function parseStagedFee(out: string): bigint {
+  const reports = [...out.matchAll(/"fee"\s*:\s*([^,}\s]+)/g)];
+  if (reports.length !== 1 || !/^(0|[1-9][0-9]{0,15})$/.test(reports[0][1])) throw new Error("Missing or ambiguous calculated fee");
+  const fee = BigInt(reports[0][1]);
+  if (fee <= 0n) throw new Error("Calculated fee must be positive");
+  return fee;
+}
+
 export function parseStaged(out: string): string {
   if (/error/i.test(out)) throw new Error(`zingo-cli send error: ${out.trim().slice(0, 500)}`);
   const fee = out.search(/"fee"\s*:\s*\d+/);
   const m = out.match(/"txids"\s*:\s*\[\s*"([0-9a-f]{64})"\s*\]/i);
-  if (fee < 0 || !m || m.index === undefined || m.index < fee) {
+  if (fee < 0 || !m || m.index === undefined || m.index < fee || !transmitted(out, m[1].toLowerCase())) {
     throw new Error(`zingo-cli did not build exactly one transaction: ${out.trim().slice(0, 300)}`);
   }
+  parseStagedFee(out);
   return m[1].toLowerCase();
 }
 

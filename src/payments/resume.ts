@@ -1,5 +1,5 @@
 import { assertApproval } from "./approval.js";
-import { reserveSpending } from "./budget.js";
+import { reserveSpending, reserveFee } from "./budget.js";
 import { assertPaymentsEnabled } from "./pause.js";
 import { fingerprintViewKey, writeAuditRow } from "../audit/log.js";
 import { assertFingerprintSalt } from "../config.js";
@@ -82,11 +82,15 @@ export async function resumeOriginal(
     // capacity refusal must not be bypassed by calling this a diagnostic replay.
     const audit = writeAuditRow(config, { ...base, status: "unknown", note: "Resuming only the originally signed transaction by exact txid; no replacement transaction authorized." });
     if (!audit.durable) return unknown("Audit evidence could not be persisted; no resume attempted.");
+    const fees = record.events.filter(e => e.calculated_fee_zats !== undefined).map(e => e.calculated_fee_zats!);
+    const originalFee = fees.length === 1 && /^[1-9][0-9]{0,15}$/.test(fees[0]) ? BigInt(fees[0]) : undefined;
+    if (config.totalSpendingCapZec !== undefined && originalFee !== entry.feeZats) return unknown("The original durable fee does not match the wallet transaction.");
     reserveSpending(config, store, lock, record.callId, amount, paymentParamsHash(intent), intent.idempotency_key!);
+    reserveFee(config, store, lock, record.callId, originalFee, paymentParamsHash(intent), intent.idempotency_key!);
     if (!hasTransmitAuthorization(record)) store.authorizeTransmit(record.callId, new Date().toISOString());
     lock.assertHeld();
     attempted = true;
-    await chain.resumeSigned(txid, { fence: () => { lock.assertHeld(); assertPaymentsEnabled(store); assertApproval(config, store, intent.idempotency_key!, paymentParamsHash(intent), fingerprint); reserveSpending(config, store, lock, record.callId, amount, paymentParamsHash(intent), intent.idempotency_key!); }, timeoutMs: RESUME_TIMEOUT_MS });
+    await chain.resumeSigned(txid, { fence: () => { lock.assertHeld(); reserveFee(config, store, lock, record.callId, originalFee, paymentParamsHash(intent), intent.idempotency_key!); assertPaymentsEnabled(store); assertApproval(config, store, intent.idempotency_key!, paymentParamsHash(intent), fingerprint); reserveSpending(config, store, lock, record.callId, amount, paymentParamsHash(intent), intent.idempotency_key!); }, timeoutMs: RESUME_TIMEOUT_MS });
     return { attempted, row: { ...base, status: "broadcast", confidence: "high", note: "Resumed the original signed transaction by exact txid. No replacement was built." } };
   } catch {
     // Even a proven refusal of THIS retry says nothing about the FIRST attempt.

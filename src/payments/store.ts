@@ -83,6 +83,7 @@ export interface CallEvent {
   /** The txid of the signed transaction, written before it was transmitted */
   staged_txid?: string;
   transmit_authorized?: boolean;
+  calculated_fee_zats?: string;
   /** Who wrote it. "import" only on events an older version wrote */
   by: "send" | "recovery" | "status" | "import";
 }

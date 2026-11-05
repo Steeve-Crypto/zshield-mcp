@@ -70,6 +70,8 @@ export class MockChainAdapter implements ChainAdapter {
       .digest("hex");
 
     const mockTxid = `mock_${txid.slice(0, 32)}`;
+    req.authorizeFee?.(MOCK_FEE_ZATS);
+    req.beforeTransmit?.();
     this.balanceZats -= needed;
     this.txs.push({
       txid: mockTxid,

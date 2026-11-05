@@ -1,5 +1,5 @@
 import { assertApproval } from "../payments/approval.js";
-import { reserveSpending } from "../payments/budget.js";
+import { reserveSpending, reserveFee } from "../payments/budget.js";
 import { assertPaymentsEnabled } from "../payments/pause.js";
 import { resumeOriginal, RESUME_TIMEOUT_MS } from "../payments/resume.js";
 import { eventFor, recordReconcile } from "../payments/recovery.js";
@@ -892,7 +892,14 @@ async function runPay(
 
       if (ready) {
         try {
+          let calculatedFee: bigint | undefined;
           const receipt = await chain.pay({
+            authorizeFee: (fee) => {
+              lock!.assertHeld();
+              store.appendEvent({ ts: now(), call_id: callId, state: "pending", calculated_fee_zats: fee.toString(), by: "send" });
+              reserveFee(config, store, lock!, callId, fee, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
+              calculatedFee = fee;
+            },
             amountZats,
             recipient: input.recipient,
             memo: input.memo,
@@ -908,6 +915,7 @@ async function runPay(
               assertPaymentsEnabled(store);
               assertApproval(config, store, keyFields.idempotency_key ?? callId, keyFields.params_sha256 ?? paymentParamsHash(input), viewKeyFingerprint);
               reserveSpending(config, store, lock!, callId, amountZats!, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
+              reserveFee(config, store, lock!, callId, calculatedFee, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
               store.authorizeTransmit(callId, now());
             },
             stage: (txid) => {

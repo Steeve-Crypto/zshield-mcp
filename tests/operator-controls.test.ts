@@ -43,7 +43,7 @@ it("pause arriving during signing prevents transmit authorization", async () => 
 });
 
 it("cumulative allowance survives restart, new keys and configuration removal", async () => {
-  const config = tempConfig({ totalSpendingCapZec: "0.002" }), chain = new MockChainAdapter();
+  const config = tempConfig({ totalSpendingCapZec: "0.0022" }), chain = new MockChainAdapter();
   const pay = (key: string) => executePay({ recipient: ALLOWED, amount_zec: "0.001", idempotency_key: key }, { config, chain });
   assert.equal((await pay("one")).ok, true);
   assert.equal((await pay("one")).ok, true);
@@ -57,7 +57,7 @@ it("cumulative allowance survives restart, new keys and configuration removal", 
 });
 
 it("concurrent different keys share one cumulative allowance", async () => {
-  const config = tempConfig({ totalSpendingCapZec: "0.001" }), chain = new MockChainAdapter();
+  const config = tempConfig({ totalSpendingCapZec: "0.0011" }), chain = new MockChainAdapter();
   const results = await Promise.all(["a", "b"].map(idempotency_key => executePay({ recipient: ALLOWED, amount_zec: "0.001", idempotency_key }, { config, chain })));
   assert.equal(results.filter(r => r.ok).length, 1);
   assert.equal(results.filter(r => r.code === "SPENDING_BUDGET_REFUSED").length, 1);
@@ -67,7 +67,7 @@ it("a crashed reservation completes without charging twice", async () => {
   const { reserveSpending } = await import("../src/payments/budget.ts");
   const { acquireWalletLock } = await import("../src/payments/lock.ts");
   const { mock } = await import("node:test");
-  const config = tempConfig({ totalSpendingCapZec: "0.001" }), store = storeFor(config, new MockChainAdapter());
+  const config = tempConfig({ totalSpendingCapZec: "0.0011" }), store = storeFor(config, new MockChainAdapter());
   const lock = await acquireWalletLock(store, 1000, "budget-test");
   const realLink = fs.linkSync;
   const hook = mock.method(fs, "linkSync", (from: fs.PathLike, to: fs.PathLike) => {
@@ -81,12 +81,12 @@ it("a crashed reservation completes without charging twice", async () => {
     const ledger = JSON.parse(fs.readFileSync(join(store.dir, "spending-budget/ledger.json"), "utf8"));
     assert.equal(ledger.total, "100000");
     assert.equal(ledger.pending, undefined);
-    assert.throws(() => reserveSpending(config, store, lock, "different", 1n, "b".repeat(64), "key2"));
+    assert.throws(() => reserveSpending(config, store, lock, "different", 10001n, "b".repeat(64), "key2"));
   } finally { hook.mock.restore(); await lock.release(); }
 });
 
 it("missing or corrupted spending state never resets allowance", async () => {
-  const config = tempConfig({ totalSpendingCapZec: "0.001" }), chain = new MockChainAdapter(), store = storeFor(config, chain);
+  const config = tempConfig({ totalSpendingCapZec: "0.0011" }), chain = new MockChainAdapter(), store = storeFor(config, chain);
   const input = { recipient: ALLOWED, amount_zec: "0.001", idempotency_key: "first" };
   await executePay(input, { config, chain });
   const ledger = join(store.dir, "spending-budget/ledger.json");
@@ -99,7 +99,7 @@ it("missing or corrupted spending state never resets allowance", async () => {
 it("separate processes cannot exceed the shared allowance", async () => {
   const { world, proc, sends } = await import("./invariants/helpers.ts");
   const w = world();
-  const env = { TOTAL_SPENDING_CAP_ZEC: "0.001" };
+  const env = { TOTAL_SPENDING_CAP_ZEC: "0.0011" };
   const results = await Promise.all([proc(w, "budget-a", ["pay", "key-a"], env).done, proc(w, "budget-b", ["pay", "key-b"], env).done]);
   assert.equal(results.filter(r => r.ok).length, 1);
   assert.equal(results.filter(r => r.code === "SPENDING_BUDGET_REFUSED").length, 1);
@@ -108,7 +108,7 @@ it("separate processes cannot exceed the shared allowance", async () => {
 
 it("operator monitoring reports actionable conditions without payment secrets", async () => {
   const { operationalHealth }=await import('../src/operations/health.ts');
-  const config=tempConfig({totalSpendingCapZec:"0.001"}),chain=new MockChainAdapter(),store=storeFor(config,chain);
+  const config=tempConfig({totalSpendingCapZec:"0.0011"}),chain=new MockChainAdapter(),store=storeFor(config,chain);
   await executePay({recipient:ALLOWED,amount_zec:"0.001",idempotency_key:"sensitive-key",memo:"sensitive-memo"},{config,chain});
   fs.writeFileSync(join(store.dir,'payments.pause'),'incident');
   const report=operationalHealth(config,store);
@@ -117,4 +117,41 @@ it("operator monitoring reports actionable conditions without payment secrets", 
   assert.ok(report.alerts.includes('SPENDING_ALLOWANCE_LOW'));
   assert.ok(report.alerts.includes('FINANCIAL_CONTROLS_MISSING'));
   assert.doesNotMatch(JSON.stringify(report),/sensitive-key|sensitive-memo|u1mockrecipient|test-salt/);
+});
+
+it("fees consume allowance before mock funds move", async () => {
+  const config = tempConfig({ totalSpendingCapZec: "0.001" }), chain = new MockChainAdapter();
+  const before = await chain.getBalance();
+  const result = await executePay({ recipient: ALLOWED, amount_zec: "0.001", idempotency_key: "fee-over-cap" }, { config, chain });
+  assert.equal(result.ok, false);
+  assert.deepEqual(await chain.getBalance(), before);
+});
+
+it("legacy principal-only ledgers cannot silently undercount fees", async () => {
+  const config = tempConfig({ totalSpendingCapZec: "1" }), chain = new MockChainAdapter(), store = storeFor(config, chain);
+  fs.mkdirSync(join(store.dir, "spending-budget"), { mode: 0o700 });
+  fs.writeFileSync(join(store.dir, "spending-budget/ledger.json"), JSON.stringify({ version: 1, total: "0" }), { mode: 0o600 });
+  assert.equal((await executePay({ recipient: ALLOWED, amount_zec: "0.001", idempotency_key: "legacy" }, { config, chain })).code, "SPENDING_BUDGET_REFUSED");
+});
+
+it("fee receipts survive crashes without duplicate charges", async () => {
+  const { reserveSpending, reserveFee } = await import("../src/payments/budget.ts");
+  const { acquireWalletLock } = await import("../src/payments/lock.ts");
+  const { mock } = await import("node:test");
+  const config = tempConfig({ totalSpendingCapZec: "0.0011" }), store = storeFor(config, new MockChainAdapter());
+  const lock = await acquireWalletLock(store, 1000, "fee-crash");
+  try {
+    reserveSpending(config, store, lock, "call", 100000n, "a".repeat(64), "key");
+    const realLink = fs.linkSync;
+    const hook = mock.method(fs, "linkSync", (from: fs.PathLike, to: fs.PathLike) => {
+      if (String(to).includes("/receipts/")) throw new Error("crash");
+      return realLink(from, to);
+    });
+    try { assert.throws(() => reserveFee(config, store, lock, "call", 10000n, "a".repeat(64), "key")); }
+    finally { hook.mock.restore(); }
+    reserveFee(config, store, lock, "call", 10000n, "a".repeat(64), "key");
+    reserveFee(config, store, lock, "call", 10000n, "a".repeat(64), "key");
+    assert.equal(JSON.parse(fs.readFileSync(join(store.dir, "spending-budget/ledger.json"), "utf8")).total, "110000");
+    assert.throws(() => reserveFee(config, store, lock, "call", 20000n, "a".repeat(64), "key"));
+  } finally { await lock.release(); }
 });
