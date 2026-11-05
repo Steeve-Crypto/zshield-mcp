@@ -22,6 +22,8 @@ export interface Config {
   auditDir: string;
   viewKeyFingerprintSalt: string;
   chainNetwork?: string;
+  mainnetEnabled?: boolean;
+  expectedConsensusBranch?: string;
   zingoBin?: string;
   zingoBinarySha256?: string;
   requireFinancialControls?: boolean;

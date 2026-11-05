@@ -10,7 +10,7 @@ Open-source **MCP server** that exposes `zcash_pay` for agent-initiated **shield
 - **Recipient allow-list**
 - **Append-only viewing-key fingerprinted audit log**
 
-Spend keys never belong in the model. Mock chain by default. A live adapter sends real shielded payments on Zcash **testnet only** through zingo-cli.
+Spend keys never belong in the model. Mock chain by default. A live adapter sends real shielded payments on Zcash testnet through zingo-cli, with explicitly enabled mainnet support under mandatory financial controls. See [mainnet configuration](docs/OPERATOR_CONTROLS.md#mainnet-configuration).
 
 Financial-use release status and outstanding validation: [production readiness](docs/PRODUCTION_READINESS.md).
 
@@ -124,7 +124,7 @@ Read this before paying to see the rules the server will apply. It is JSON, buil
 }
 ```
 
-`mode` is `mock` or `testnet`. `size` counts unique addresses in the allow-list file right now. If the file cannot be read, `size` is `null`, `error` says why, and every `zcash_pay` call is rejected until it is fixed. The per-call cap can be combined with a durable cumulative principal and fee allowance and signed approvals; see [operator controls](docs/OPERATOR_CONTROLS.md). There is no automatic daily or rolling reset. The fingerprint salt is never shown.
+`mode` is `mock`, `testnet`, or explicitly configured `mainnet`. `size` counts unique addresses in the allow-list file right now. If the file cannot be read, `size` is `null`, `error` says why, and every `zcash_pay` call is rejected until it is fixed. The per-call cap can be combined with a durable cumulative principal and fee allowance and signed approvals; see [operator controls](docs/OPERATOR_CONTROLS.md). There is no automatic daily or rolling reset. The fingerprint salt is never shown.
 
 ### Rejection codes
 
@@ -364,7 +364,7 @@ tests/        happy path + rejections
 
 ## Testnet mode
 
-What it does: with `CHAIN_MODE=testnet` the server checks cap, allow-list, and address network first, writes the audit row, and only then calls `zingo-cli quicksend` against a public testnet lightwalletd (default `https://testnet.zec.rocks:443`). Mainnet addresses (`u1`, `zs1`, `t1`) are rejected; testnet ones (`utest`, `ztestsapling`, `tm`) are accepted. `CHAIN_MODE=live` alone is refused.
+What it does: with `CHAIN_MODE=testnet` the server checks cap, allow-list, and address network first, writes the audit row, and only then uses `zingo-cli send` and `calculate`, durably stages the transaction, then calls exact-txid `transmit` against a public testnet lightwalletd (default `https://testnet.zec.rocks:443`). Mainnet addresses (`u1`, `zs1`, `t1`) are rejected; testnet ones (`utest`, `ztestsapling`, `tm`) are accepted. `CHAIN_MODE=live` alone is refused.
 
 Setup:
 
@@ -433,7 +433,7 @@ One real shielded 0.001 TAZ payment through `zcash_pay`, plus a blocked over-cap
 - ✅ Idempotency keys (required for live payments), an OS-level wallet lock, a two-stage send with the txid recorded before broadcast, one send at a time per wallet, pre-send health check, startup recovery, and `zcash_payment_status`
 - ❌ Daily or rolling resets (a durable lifetime principal and fee allowance is available)
 - ✅ Audit fingerprint from the wallet's real viewing key (UFVK)
-- ❌ Mainnet (refused by design)
+- ✅ Mainnet configuration with mandatory controls and network-bound wallets/approvals
 - ❌ Custody of user spend keys
 
 ## License

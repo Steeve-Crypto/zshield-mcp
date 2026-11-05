@@ -323,7 +323,7 @@ export async function executePaymentStatus(input: PaymentStatusInput, deps: Read
       ref = s.call_id;
       return s;
     },
-    (s) => ({ ...s, explorer_url: live && s.txid ? `${TESTNET_EXPLORER}${s.txid}` : undefined }),
+    (s) => ({ ...s, explorer_url: live && s.txid ? `${deps.config.chainNetwork === "mainnet" ? "https://blockexplorer.one/zcash/mainnet/tx/" : TESTNET_EXPLORER}${s.txid}` : undefined }),
     () => (ref ? { ref_call_id: ref } : {})
   );
 }

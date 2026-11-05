@@ -43,9 +43,9 @@ async function main() {
     if(!input.idempotency_key || input.resume) throw new Error("Approval requires an exact payment key, not a resume request");
     const fingerprint=fingerprintViewKey(await chain.getViewingKey(),config.viewKeyFingerprintSalt);
     lock.assertHeld();
-    console.log(JSON.stringify({domain:"zshield-payment-approval-v1",network:"testnet",wallet_fingerprint:fingerprint,idempotency_key:input.idempotency_key,params_sha256:paymentParamsHash(input),expires_at:Date.now()+3600000},null,2));
+    console.log(JSON.stringify({domain:"zshield-payment-approval-v1",network:config.chainNetwork ?? "testnet",wallet_fingerprint:fingerprint,idempotency_key:input.idempotency_key,params_sha256:paymentParamsHash(input),expires_at:Date.now()+3600000},null,2));
   } else if(command==="backup") {
-    if(!arg || config.chainMode!=="live" || !config.zingoDataDir) throw new Error("Backup requires a configured testnet wallet and a new destination");
+    if(!arg || config.chainMode!=="live" || !config.zingoDataDir) throw new Error("Backup requires a configured live wallet and a new destination");
     const destination=resolve(arg), wallet=fs.realpathSync(config.zingoDataDir);
     const settings=fs.mkdtempSync(join(dirname(destination),".snapshot-settings-"));
     try {

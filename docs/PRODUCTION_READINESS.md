@@ -1,7 +1,7 @@
 # Financial-use release assessment
 
-Assessment date: 2026-11-04. This branch is not approved for real-money production.
-Mainnet remains refused by configuration, startup and recipient validation.
+Assessment date: 2026-11-05. Mainnet implementation is opt-in and requires financial controls.
+Native wallet and final-review evidence are still pending.
 
 ## Review changes
 
@@ -27,7 +27,7 @@ not proof that dependencies are vulnerability-free.
 | Deployment filesystem | Validate OS ownership, lock lifetime and durability on the intended filesystem and OS. Simulated UID metadata is not a multi-user deployment test; process SIGKILL is not a host power-loss test. |
 | Operational recovery | Coordinated snapshots, digest-checked quarantine restore and operator alerts are implemented. Rehearse them on the actual deployment, use encrypted backup storage, and retain post-snapshot payment evidence. Never reset keys to get past uncertainty. |
 | Spending authority | Implemented: durable cumulative principal and fee allowance, Ed25519 approval thresholds and emergency pause. Enable FINANCIAL_CONTROLS_REQUIRED=1; review fee policy and deploy separate signing authorities. |
-| Mainnet scope | Unsupported. Enabling it requires a separate design and review; removing the network guard is not a production-readiness fix. |
+| Mainnet scope | Implemented: explicit opt-in, mandatory controls, network-bound wallet state, approvals and intents, and affirmative wallet/server checks. No mainnet payment was run here. |
 
 ## Commands
 
@@ -60,7 +60,7 @@ payment pause; cumulative principal and fee allowance; signed approvals; coordin
 snapshots; operational alerts; and financial deployment prerequisites. Commit
 subjects are limited to five words, recorded in the repository's AGENTS.md.
 
-These additions remain testnet-only. They do not provide external certification,
+The native harness remains testnet-only. These additions do not provide external certification,
 automatic rolling resets, off-host backup encryption,
 or an externally configured pager. Native-wallet and independent-review evidence
 remain outstanding. Do not equate the required-control profile with mainnet approval.
@@ -79,3 +79,18 @@ Individual regression suites cover cross-process cumulative limits, incomplete
 reservations, control removal, signature thresholds and expiry, mid-signing
 revocation, snapshot tampering and traversal, surviving backend processes, monitoring
 privacy, executable replacement and deployment prerequisites.
+
+## Fee and mainnet validation
+
+On 2026-11-05, build and typecheck passed and the complete local suite passed all
+565 tests with zero failures. Coverage includes fee-cap exhaustion before funds
+move, malformed fee reports, crash-safe fee receipts, legacy ledger refusal,
+original-fee verification on resume, cross-network approvals and recovery,
+mainnet CLI arguments, server and wallet mismatches, and wallet network binding.
+The final HTTPS prerequisite checks also passed all eight mainnet/deployment tests.
+The native-wallet suite remained disabled; no real network payment was performed.
+
+The first full run caught three error-message/check-order regressions. The checks
+were corrected, targeted tests passed, and the complete suite was rerun successfully.
+The distributable patch was applied to the reviewed base in a disposable checkout
+and its resulting tree was compared with the committed source tree.

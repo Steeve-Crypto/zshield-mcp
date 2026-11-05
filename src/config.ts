@@ -25,7 +25,7 @@ function parseMaxLag(value: unknown): number {
   return n;
 }
 
-const KNOWN_MODES = ["mock", "live", "testnet"];
+const KNOWN_MODES = ["mock", "live", "testnet", "mainnet"];
 
 /** Shortest secret part allowed in a credentialed server URL, so redaction can find it safely. */
 export const MIN_URL_SECRET_LENGTH = 8;
@@ -92,9 +92,11 @@ export function loadConfig(cwd = process.cwd()): Config {
   const rawMode = envOr("CHAIN_MODE", fromFile.chain_mode ?? "mock", (v) => v).trim().toLowerCase();
   if (!KNOWN_MODES.includes(rawMode)) {
     throw new Error(
-      `Unknown CHAIN_MODE "${rawMode}". Expected one of: ${KNOWN_MODES.join(", ")}. Mainnet is not supported.`
+      `Unknown CHAIN_MODE "${rawMode}". Expected one of: ${KNOWN_MODES.join(", ")}.`
     );
   }
+  if (rawMode === "mainnet" && process.env.MAINNET_ENABLED !== "1") throw new Error("Mainnet requires explicit MAINNET_ENABLED=1; testnet remains available.");
+  if (rawMode === "mainnet" && !process.env.ZINGO_DATA_DIR) throw new Error("Mainnet requires explicit ZINGO_DATA_DIR.");
   const chainMode: ChainMode = rawMode === "mock" ? "mock" : "live";
   // Kept as given (env values stay strings) and validated as whole zatoshis, never rounded.
   const spendingCapZec = envOr<number | string>("SPENDING_CAP_ZEC", fromFile.spending_cap_zec ?? 0.1, (v) => v);
@@ -128,10 +130,12 @@ export function loadConfig(cwd = process.cwd()): Config {
       fromFile.view_key_fingerprint_salt ?? "dev-only-change-me",
       (v) => v
     ),
-    chainNetwork: rawMode === "testnet" ? "testnet" : undefined,
+    chainNetwork: rawMode === "testnet" || rawMode === "mainnet" ? rawMode : undefined,
+    mainnetEnabled: process.env.MAINNET_ENABLED === "1",
+    expectedConsensusBranch: process.env.EXPECTED_CONSENSUS_BRANCH,
     zingoBin: process.env.ZINGO_BIN,
     zingoBinarySha256: process.env.ZINGO_BINARY_SHA256,
-    requireFinancialControls: process.env.FINANCIAL_CONTROLS_REQUIRED === "1",
+    requireFinancialControls: rawMode === "mainnet" || process.env.FINANCIAL_CONTROLS_REQUIRED === "1",
     // Live mode needs an absolute wallet path; loading fails here rather than fall back to a relative one.
     zingoDataDir: chainMode === "live" ? resolveWalletDir(process.env.ZINGO_DATA_DIR) : process.env.ZINGO_DATA_DIR,
     lightwalletd: checkServerUrl(process.env.LIGHTWALLETD_URL),

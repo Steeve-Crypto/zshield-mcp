@@ -3,7 +3,7 @@ import { reserveSpending, reserveFee } from "./budget.js";
 import { assertPaymentsEnabled } from "./pause.js";
 import { fingerprintViewKey, writeAuditRow } from "../audit/log.js";
 import { assertFingerprintSalt } from "../config.js";
-import { assertTestnetAddress } from "../chain/network.js";
+import { assertNetworkAddress } from "../chain/network.js";
 import { findTransaction, type ChainAdapter } from "../chain/types.js";
 import { assertWithinCap } from "../policy/caps.js";
 import { assertRecipientAllowed, loadAllowlist } from "../policy/allowlist.js";
@@ -39,8 +39,8 @@ export async function resumeOriginal(
   try {
     lock.assertHeld();
     if (isSettled(record.state)) return unknown("The original call is already settled; no transmission attempted.");
-    if (config.chainMode !== "live" || config.chainNetwork !== "testnet" || chain.mode !== "live" || !chain.resumeSigned) {
-      return unknown("This adapter cannot resume an exact signed testnet transaction.");
+    if (config.chainMode !== "live" || !["testnet", "mainnet"].includes(config.chainNetwork ?? "") || chain.mode !== "live" || !chain.resumeSigned) {
+      return unknown("This adapter cannot resume an exact signed transaction.");
     }
     if (!intent?.two_step || !txid || (record.txid !== undefined && record.txid !== txid) || !/^[0-9a-f]{64}$/.test(txid) || store.txidOwner(txid) !== record.callId) {
       return unknown("There is no exclusively owned, staged transaction to resume. No replacement was built.");
@@ -54,7 +54,8 @@ export async function resumeOriginal(
     }
     assertFingerprintSalt(config);
     assertPayInputBounded(intent.recipient, intent.memo);
-    assertTestnetAddress(intent.recipient);
+    if ((intent.network ?? "testnet") !== config.chainNetwork) return unknown("Original payment belongs to a different network.");
+    assertNetworkAddress(intent.recipient, config.chainNetwork!);
     const amount = assertWithinCap(intent.amount_zec, config.spendingCapZec);
     if (amount.toString() !== intent.amount_zats) return unknown("The original amount fields disagree.");
     assertRecipientAllowed(intent.recipient, loadAllowlist(config.allowlistPath));

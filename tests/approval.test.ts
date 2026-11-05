@@ -73,3 +73,12 @@ it("revoking approval during signing blocks transmission", async () => {
   assert.equal((await executePay(w.input, w)).ok, false);
   assert.equal(sent, false);
 });
+
+it("a correctly signed approval cannot cross networks", async () => {
+  const w=world();
+  const other={...w.payload,network:"mainnet" as const};
+  w.write(other,w.signPayload(other));
+  assert.equal((await executePay(w.input,w)).code,"APPROVAL_REQUIRED");
+  w.write();
+  assert.equal((await executePay(w.input,w)).ok,true);
+});
