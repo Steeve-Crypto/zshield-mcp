@@ -57,3 +57,43 @@ parameter hash, sign with `node --import tsx scripts/sign-approval.ts --approve
 payload.json private-key.pem` on the signing host. The command outputs one envelope.
 For multiple approvers, combine their signature strings only when every payload
 field is identical. Copy the envelope, never the private key, to `APPROVAL_DIR`.
+
+## Local operator commands
+
+Use `npm run operator -- COMMAND` with the service deployment environment.
+`pause` creates the durable stop marker immediately; in-flight transmission may
+already have happened. `unpause --reviewed` removes it under the wallet lock.
+`budget-init` conservatively accounts for existing intents and refuses to reset an
+existing ledger. `approval-payload request.json` produces a one-hour approval
+payload from the exact request and wallet fingerprint, under the wallet lock.
+
+## Coordinated snapshot and quarantine restore
+
+`npm run operator -- backup /private/backup/new-snapshot` pauses payments, holds
+both the application lock and the backend CLI lock, then copies the complete wallet
+(including payment/key/txid/approval/budget state), allow-list, approval envelopes,
+audit sinks and capacity ledgers, and deployment settings. The destination parent
+must already be private. Standalone wallet processes must also use the backend lock;
+stop any independently launched CLI before maintenance. Shared audit directories
+across unrelated wallets are not a supported deployment layout.
+
+Every file is hashed; changed sources, links, special files and lock loss abort
+publication. Keep the returned manifest digest separately from the backup. The
+snapshot contains wallet secrets and is NOT encrypted by this command: retain it
+only on an access-controlled encrypted volume and use authenticated encryption
+before off-host transfer. The private signing keys are never part of this snapshot.
+
+`npm run operator -- restore SNAPSHOT --to NEW_DIRECTORY MANIFEST_SHA256` checks
+all copied entries against the separately retained digest and restores only to a
+new quarantine location. Payments remain paused. Never restore just the seed or
+wallet file while omitting payment state. Repoint deployment paths to restored
+`wallet`, `audit`, `fallback`, `allowlist` and `approvals`; retain the fingerprint
+salt and trust configuration in `settings/config.json`. The adjacent `audit.budget`
+and `fallback.budget` must accompany their sinks. The restored manifest describes
+the original snapshot; the added pause marker is intentional.
+
+Before activation, stop and disable the old instance and wallet, confirm only one
+installation can spend, reconcile unresolved original transactions, verify budget
+and approval controls, then use `unpause --reviewed`. Never run old and restored
+wallet copies concurrently. A snapshot can be older than already accepted payments;
+restoring it cannot by itself prove no payment occurred since it was captured.
