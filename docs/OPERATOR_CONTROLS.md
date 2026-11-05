@@ -121,3 +121,23 @@ certification or a statement about network finality.
 - Suspected credential, wallet or signer compromise: pause immediately, isolate the
   service, revoke signing authority in trust configuration, and obtain an independent
   incident review. An already transmitted transaction cannot be recalled by pause.
+
+## Required-control deployment profile
+
+Set `FINANCIAL_CONTROLS_REQUIRED=1` for the strict profile. Startup refuses missing
+cumulative allowance, fewer than two distinct approval authorities, an unspecified
+wallet directory, an unpinned executable, unsupported OS or an unqualified wallet
+filesystem. This profile currently supports Linux testnet on local ext4, XFS or
+Btrfs; storage durability still needs testing on the deployment's actual hardware.
+
+Set `ZINGO_BIN` to an absolute executable path and `ZINGO_BINARY_SHA256` to the
+independently approved build digest. The adapter hashes that file before use and
+checks its inode, ownership, permissions and metadata before each command/sync.
+A replaced or modified executable is refused. The digest must come from the reviewed
+build process, not blindly from whichever binary happens to be installed. Protect
+service configuration and executable paths from agent-controlled filesystem tools.
+
+This profile enforces controls; it does not enable mainnet or certify a release.
+The current code still refuses mainnet. Native testnet evidence, external review of
+the exact commit, fee-policy review, storage/restore drills and deployment ownership
+remain release decisions with evidence that local fixtures cannot manufacture.

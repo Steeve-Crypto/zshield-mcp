@@ -43,6 +43,7 @@ export function createChain(config: Config): ChainAdapter {
       ? new LiveChainAdapter({
           network: config.chainNetwork,
           zingoBin: config.zingoBin,
+          binarySha256: config.zingoBinarySha256,
           dataDir: config.zingoDataDir,
           server: config.lightwalletd,
         })
