@@ -25,8 +25,8 @@ not proof that dependencies are vulnerability-free.
 | Exact-transaction continuation | Demonstrate persistence after stage, interrupted transmission, same-txid retry and confirmation with the actual backend. Fake subprocess tests cannot establish backend behavior. |
 | Independent audit | A fresh V12 review of the final commit has not been run. Prior findings and local tests are not approval of this revision. |
 | Deployment filesystem | Validate OS ownership, lock lifetime and durability on the intended filesystem and OS. Simulated UID metadata is not a multi-user deployment test; process SIGKILL is not a host power-loss test. |
-| Operational recovery | Rehearse backup and restore of wallet AND payment/key/txid state together, audit capacity exhaustion, disk failure, backend outage and unresolved-payment escalation. Do not reset keys to get past uncertainty. |
-| Spending authority | Current cap is per payment. There is no cumulative spending budget or dual approval. Define and implement the required authority model before financial deployment. |
+| Operational recovery | Coordinated snapshots, digest-checked quarantine restore and operator alerts are implemented. Rehearse them on the actual deployment, use encrypted backup storage, and retain post-snapshot payment evidence. Never reset keys to get past uncertainty. |
+| Spending authority | Implemented: durable cumulative principal allowance, Ed25519 approval thresholds and emergency pause. Enable FINANCIAL_CONTROLS_REQUIRED=1; review fee policy and deploy separate signing authorities. |
 | Mainnet scope | Unsupported. Enabling it requires a separate design and review; removing the network guard is not a production-readiness fix. |
 
 ## Commands
@@ -43,10 +43,39 @@ disposable TESTNET scratch copy; this command sends testnet self-payments and
 interrupts wallet processes. The suite contains observations as well as assertions;
 passing it alone does not close every release gate above.
 
-## Local evidence for this revision
+## Previous review evidence
 
 Clean install, build and typecheck passed. Full suite: 524 passing tests, zero
 failures; native suite disabled. Crash sweeps: 62 payment and 26 resume durable
 operation points. `npm audit` reported zero known vulnerabilities. The explicit
 native command was exercised without prerequisites and correctly exited with a
 failure, rather than implying that testnet verification succeeded.
+
+
+## Implemented operational controls
+
+See [operator controls](OPERATOR_CONTROLS.md) for configuration, trust boundaries,
+commands and incident procedures. Each distinct change is committed separately:
+payment pause; cumulative principal allowance; signed approvals; coordinated
+snapshots; operational alerts; and financial deployment prerequisites. Commit
+subjects are limited to five words, recorded in the repository's AGENTS.md.
+
+These additions remain testnet-only. They do not provide external certification,
+a fee-inclusive spending cap, automatic rolling resets, off-host backup encryption,
+or an externally configured pager. Native-wallet and independent-review evidence
+remain outstanding. Do not equate the required-control profile with mainnet approval.
+
+## Operational-control validation
+
+Build and typecheck passed. The full 552-test run passed 551 tests and found one
+README coverage failure for the three new refusal codes. After documenting those
+codes, all 30 documentation, refusal-code and policy-resource checks passed. No
+financial behavior assertion was relaxed. The run passed all 62 original-payment
+crash points and all 26 resume crash points. Native testnet remained disabled.
+
+The operator CLI also passed pause, dual-lock snapshot, digest-checked restore and
+reviewed-unpause smoke checks using a synthetic wallet, without a network payment.
+Individual regression suites cover cross-process cumulative limits, incomplete
+reservations, control removal, signature thresholds and expiry, mid-signing
+revocation, snapshot tampering and traversal, surviving backend processes, monitoring
+privacy, executable replacement and deployment prerequisites.

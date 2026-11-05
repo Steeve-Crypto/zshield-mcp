@@ -124,7 +124,7 @@ Read this before paying to see the rules the server will apply. It is JSON, buil
 }
 ```
 
-`mode` is `mock` or `testnet`. `size` counts unique addresses in the allow-list file right now. If the file cannot be read, `size` is `null`, `error` says why, and every `zcash_pay` call is rejected until it is fixed. The cap is per call only; there is no daily or rolling limit yet. The fingerprint salt is never shown.
+`mode` is `mock` or `testnet`. `size` counts unique addresses in the allow-list file right now. If the file cannot be read, `size` is `null`, `error` says why, and every `zcash_pay` call is rejected until it is fixed. The per-call cap can be combined with a durable cumulative principal allowance and signed approvals; see [operator controls](docs/OPERATOR_CONTROLS.md). There is no automatic daily or rolling reset. The fingerprint salt is never shown.
 
 ### Rejection codes
 
@@ -151,6 +151,9 @@ Branch on `code`. It is stable. `message` is for people and may change. `error` 
 | `INVALID_AMOUNT` | Amount is not a positive decimal with at most 8 decimals, or is above the 21,000,000 ZEC supply |
 | `CAP_EXCEEDED` | Amount is above `SPENDING_CAP_ZEC` |
 | `INVALID_CAP` | The configured cap itself is not valid, so every payment is refused |
+| `PAYMENTS_PAUSED` | Operator pause prevents new payments; historical status remains available |
+| `SPENDING_BUDGET_REFUSED` | The durable cumulative principal allowance is exhausted, unavailable or inconsistent; no reset or refund is inferred |
+| `APPROVAL_REQUIRED` | An exact wallet/key/payment approval is missing, expired, invalid or lacks the required distinct signers |
 | `MAINNET_REFUSED` | Testnet mode got a mainnet address (`u1`, `zs1`, `t1`, `t3`, `zc`). Refused even if it is on the allow-list |
 | `INVALID_ADDRESS` | Testnet mode got an address from no known Zcash network |
 | `NOT_ALLOWLISTED` | Recipient is not an exact match for an allow-list entry |
@@ -344,7 +347,7 @@ The viewing key itself is **never** written or returned, only a short fingerprin
 
 ## Security model
 
-[docs/RELIABILITY_DESIGN.md](docs/RELIABILITY_DESIGN.md) explains how one request leads to at most one send, and [docs/V12_CHECKLIST.md](docs/V12_CHECKLIST.md) lists every review note with its status and test. [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md) covers where keys live, what the server can and cannot do, the trust boundaries, threats and mitigations, and what is out of scope. Read it before pointing this at a funded wallet. The short version: the cap is per call only, so many small payments can still drain the wallet, and the audit log is not tamper-evident.
+[docs/RELIABILITY_DESIGN.md](docs/RELIABILITY_DESIGN.md) explains how one request leads to at most one send, and [docs/V12_CHECKLIST.md](docs/V12_CHECKLIST.md) lists every review note with its status and test. [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md) covers where keys live, what the server can and cannot do, the trust boundaries, threats and mitigations, and what is out of scope. Read it before pointing this at a funded wallet. The short version: enable the required-control profile for cumulative principal limits and two-person approval. Audit logs are not independently tamper-evident; preserve verified snapshots and externally retained digests.
 
 ## Layout
 
@@ -428,7 +431,7 @@ One real shielded 0.001 TAZ payment through `zcash_pay`, plus a blocked over-cap
 - ✅ Read-only balance, receive address, and history tools
 - ✅ Stable rejection codes
 - ✅ Idempotency keys (required for live payments), an OS-level wallet lock, a two-stage send with the txid recorded before broadcast, one send at a time per wallet, pre-send health check, startup recovery, and `zcash_payment_status`
-- ❌ Daily or rolling spend limits (per call only for now)
+- ❌ Daily or rolling resets (a durable lifetime principal allowance is available)
 - ✅ Audit fingerprint from the wallet's real viewing key (UFVK)
 - ❌ Mainnet (refused by design)
 - ❌ Custody of user spend keys
