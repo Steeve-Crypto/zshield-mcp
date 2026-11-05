@@ -1,3 +1,4 @@
+import { reserveSpending } from "./budget.js";
 import { assertPaymentsEnabled } from "./pause.js";
 import { fingerprintViewKey, writeAuditRow } from "../audit/log.js";
 import { assertFingerprintSalt } from "../config.js";
@@ -79,10 +80,11 @@ export async function resumeOriginal(
     // capacity refusal must not be bypassed by calling this a diagnostic replay.
     const audit = writeAuditRow(config, { ...base, status: "unknown", note: "Resuming only the originally signed transaction by exact txid; no replacement transaction authorized." });
     if (!audit.durable) return unknown("Audit evidence could not be persisted; no resume attempted.");
+    reserveSpending(config, store, lock, record.callId, amount, paymentParamsHash(intent), intent.idempotency_key!);
     if (!hasTransmitAuthorization(record)) store.authorizeTransmit(record.callId, new Date().toISOString());
     lock.assertHeld();
     attempted = true;
-    await chain.resumeSigned(txid, { fence: () => { lock.assertHeld(); assertPaymentsEnabled(store); }, timeoutMs: RESUME_TIMEOUT_MS });
+    await chain.resumeSigned(txid, { fence: () => { lock.assertHeld(); assertPaymentsEnabled(store); reserveSpending(config, store, lock, record.callId, amount, paymentParamsHash(intent), intent.idempotency_key!); }, timeoutMs: RESUME_TIMEOUT_MS });
     return { attempted, row: { ...base, status: "broadcast", confidence: "high", note: "Resumed the original signed transaction by exact txid. No replacement was built." } };
   } catch {
     // Even a proven refusal of THIS retry says nothing about the FIRST attempt.

@@ -108,6 +108,7 @@ export function loadConfig(cwd = process.cwd()): Config {
 
   const config: Config = {
     spendingCapZec,
+    totalSpendingCapZec: process.env.TOTAL_SPENDING_CAP_ZEC,
     allowlistPath: resolve(
       cwd,
       envOr("ALLOWLIST_PATH", fromFile.allowlist_path ?? "./allowlists/recipients.example.json", (v) => v)
@@ -137,6 +138,7 @@ export function loadConfig(cwd = process.cwd()): Config {
       envOr<number | string>("RATE_LIMIT_PER_MIN", fromFile.rate_limit_per_min ?? RATE_LIMIT_DEFAULT_PER_MIN, (v) => v)
     ),
   };
+  if (config.totalSpendingCapZec !== undefined) parseZecToZats(config.totalSpendingCapZec, "TOTAL_SPENDING_CAP_ZEC");
   assertFingerprintSalt(config);
   return config;
 }

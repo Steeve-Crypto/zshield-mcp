@@ -1,3 +1,4 @@
+import { reserveSpending } from "../payments/budget.js";
 import { assertPaymentsEnabled } from "../payments/pause.js";
 import { resumeOriginal, RESUME_TIMEOUT_MS } from "../payments/resume.js";
 import { eventFor, recordReconcile } from "../payments/recovery.js";
@@ -824,11 +825,12 @@ async function runPay(
       }
       if (ready) {
         try {
+          reserveSpending(config, store, lock, callId, amountZats, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
           store.writeIntent(intent);
           wroteIntent = true;
         } catch (e) {
           ready = false;
-          fail("error", "STATE_WRITE_FAILED", `The payment store could not be written before the send: ${e instanceof Error ? e.message : String(e)}. Nothing was sent.`);
+          fail(e instanceof PolicyError ? "rejected" : "error", e instanceof PolicyError ? e.code : "STATE_WRITE_FAILED", `The payment store could not be written before the send: ${e instanceof Error ? e.message : String(e)}. Nothing was sent.`);
         }
       }
 
@@ -902,6 +904,7 @@ async function runPay(
             beforeTransmit: () => {
               lock!.assertHeld();
               assertPaymentsEnabled(store);
+              reserveSpending(config, store, lock!, callId, amountZats!, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
               store.authorizeTransmit(callId, now());
             },
             stage: (txid) => {

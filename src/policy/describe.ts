@@ -41,6 +41,8 @@ export function describePolicy(config: Config) {
       per_call_cap_zats: cap?.zats ?? null,
       cap_error: capError,
       daily_or_rolling_cap: "none",
+      cumulative_principal_cap_zec: config.totalSpendingCapZec ?? null,
+      cumulative_refunds: "none; failed and uncertain reservations remain charged",
       amount_unit: "integer zatoshis, 1 ZEC = 100000000",
       max_decimals: MAX_DECIMALS,
       tool_calls_per_min: config.rateLimitPerMin ?? RATE_LIMIT_DEFAULT_PER_MIN,

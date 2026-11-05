@@ -62,6 +62,14 @@ describe("exact transaction recovery", () => {
     assert.equal((await executePay({ ...input, resume: true }, w)).ok, true);
     assert.equal(w.attempts(), 1);
   });
+  it("recovery cannot bypass cumulative spending policy", async () => {
+    const w = setup();
+    w.config.totalSpendingCapZec = "0.0001";
+    await recoverPendingPayments(w.config, w.chain);
+    await executePay({ ...input, resume: true }, w);
+    assert.equal(w.attempts(), 0);
+    assert.ok(w.store.unresolvedSend());
+  });
   it("startup closes the authorization-before-transmit crash window with the original txid", async () => {
     const w = setup();
     assert.ok(w.store.unresolvedSend());
