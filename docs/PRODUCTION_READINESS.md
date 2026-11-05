@@ -26,7 +26,7 @@ not proof that dependencies are vulnerability-free.
 | Independent audit | A fresh V12 review of the final commit has not been run. Prior findings and local tests are not approval of this revision. |
 | Deployment filesystem | Validate OS ownership, lock lifetime and durability on the intended filesystem and OS. Simulated UID metadata is not a multi-user deployment test; process SIGKILL is not a host power-loss test. |
 | Operational recovery | Coordinated snapshots, digest-checked quarantine restore and operator alerts are implemented. Rehearse them on the actual deployment, use encrypted backup storage, and retain post-snapshot payment evidence. Never reset keys to get past uncertainty. |
-| Spending authority | Implemented: durable cumulative principal allowance, Ed25519 approval thresholds and emergency pause. Enable FINANCIAL_CONTROLS_REQUIRED=1; review fee policy and deploy separate signing authorities. |
+| Spending authority | Implemented: durable cumulative principal and fee allowance, Ed25519 approval thresholds and emergency pause. Enable FINANCIAL_CONTROLS_REQUIRED=1; review fee policy and deploy separate signing authorities. |
 | Mainnet scope | Unsupported. Enabling it requires a separate design and review; removing the network guard is not a production-readiness fix. |
 
 ## Commands
@@ -56,12 +56,12 @@ failure, rather than implying that testnet verification succeeded.
 
 See [operator controls](OPERATOR_CONTROLS.md) for configuration, trust boundaries,
 commands and incident procedures. Each distinct change is committed separately:
-payment pause; cumulative principal allowance; signed approvals; coordinated
+payment pause; cumulative principal and fee allowance; signed approvals; coordinated
 snapshots; operational alerts; and financial deployment prerequisites. Commit
 subjects are limited to five words, recorded in the repository's AGENTS.md.
 
 These additions remain testnet-only. They do not provide external certification,
-a fee-inclusive spending cap, automatic rolling resets, off-host backup encryption,
+automatic rolling resets, off-host backup encryption,
 or an externally configured pager. Native-wallet and independent-review evidence
 remain outstanding. Do not equate the required-control profile with mainnet approval.
 

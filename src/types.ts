@@ -12,7 +12,7 @@ export interface AllowlistFile {
 export interface Config {
   /** Hard per-call cap in ZEC, at most 8 decimals; compared as integer zatoshis */
   spendingCapZec: number | string;
-  /** Lifetime principal allowance; reservations never automatically reset or refund. */
+  /** Lifetime principal and fee allowance; reservations never automatically reset or refund. */
   totalSpendingCapZec?: number | string;
   approvalPublicKeys?: string[];
   approvalThreshold?: number;
@@ -201,6 +201,8 @@ export interface PaymentRequest {
   stage?: (txid: string) => void;
   /** Durably authorize transmit after staging and the final fence. Throws before broadcast. */
   beforeTransmit?: () => void;
+  /** Reserve the exact calculated fee before any transmission. */
+  authorizeFee?: (feeZats: bigint) => void;
 }
 
 export interface PaymentReceipt {

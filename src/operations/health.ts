@@ -20,7 +20,7 @@ export function operationalHealth(config: Config, store: PaymentStore) {
   const raw=readPrivate(join(store.dir,"spending-budget/ledger.json"),4096);
   if(raw) {
    const ledger=JSON.parse(raw);
-   if(ledger.version!==1 || typeof ledger.total!=="string" || !/^(0|[1-9][0-9]{0,30})$/.test(ledger.total))throw new Error("bad ledger");
+   if(ledger.version!==2 || typeof ledger.total!=="string" || !/^(0|[1-9][0-9]{0,30})$/.test(ledger.total))throw new Error("bad ledger");
    total=ledger.total;
    if(!config.totalSpendingCapZec)alerts.push("SPENDING_CONFIGURATION_MISSING");
    else if(BigInt(total!)*100n>=parseZecToZats(config.totalSpendingCapZec)*80n)alerts.push("SPENDING_ALLOWANCE_LOW");
@@ -53,5 +53,5 @@ export function operationalHealth(config: Config, store: PaymentStore) {
   for(const [pool,state] of Object.entries(pools))if(state.remaining_bytes<=state.limit_bytes/5)alerts.push(`AUDIT_${sink.toUpperCase()}_${pool.toUpperCase()}_LOW`);
  }
  try {const st=fs.statfsSync(store.dir);if(st.bavail*st.bsize<64*1024*1024)alerts.push("WALLET_DISK_LOW");}catch{alerts.push("DISK_CAPACITY_UNAVAILABLE");}
- return {ok:alerts.length===0,alerts,payments_paused:paused,unresolved_calls:unresolved,financial_controls_configured:controls,reserved_principal_zats:total,audit};
+ return {ok:alerts.length===0,alerts,payments_paused:paused,unresolved_calls:unresolved,financial_controls_configured:controls,reserved_spending_zats:total,audit};
 }

@@ -15,9 +15,9 @@ replays continue. Only the operator should remove the marker after investigation
 
 ## Cumulative allowance
 
-Set `TOTAL_SPENDING_CAP_ZEC` to an absolute lifetime principal allowance. It is
+Set `TOTAL_SPENDING_CAP_ZEC` to an absolute lifetime principal and fee allowance. It is
 additional to the per-payment cap and uses integer zatoshis. It is NOT a rolling
-window and excludes backend transaction fees. An operator can raise the absolute
+window and includes backend transaction fees. An operator can raise the absolute
 ceiling after review; no timer, restart, key change or configuration omission resets
 reserved spending. Failed, interrupted and uncertain attempts are not refunded.
 
@@ -30,7 +30,7 @@ from missing or malformed state. Financial audit capacity is reserved first.
 An existing wallet with historical intents requires explicit initialization, which
 conservatively charges every historical intent. Historical resumptions lacking a
 receipt incur another conservative reservation. This can consume more allowance
-than was actually paid; it cannot silently authorize more principal than the cap.
+than was actually paid; it cannot silently authorize more principal plus fees than the cap.
 Retain the ledger and all receipts with the wallet and payment records. Do not delete
 or edit accounting files to replenish allowance.
 
@@ -141,3 +141,9 @@ This profile enforces controls; it does not enable mainnet or certify a release.
 The current code still refuses mainnet. Native testnet evidence, external review of
 the exact commit, fee-policy review, storage/restore drills and deployment ownership
 remain release decisions with evidence that local fixtures cannot manufacture.
+
+### Fee-inclusive allowance upgrade
+
+New spending ledgers use version 2. Every payment reserves principal before signing and the exact positive calculated fee before transmission. Fee receipts survive interrupted writes, are idempotent, and are never refunded. Resume requires the original durable fee to agree with the wallet transaction; a missing or changed fee blocks retransmission. The per-call cap still limits recipient principal; the cumulative cap limits principal plus fees.
+
+Version 1 ledgers are refused: their historical fees were not accounted for. Never delete or reset a ledger to upgrade. Existing historical records without durable fee evidence require operator reconciliation before enabling this allowance. `budget-init` refuses incomplete historical fee evidence. Monitoring exposes `reserved_spending_zats` and policy exposes `cumulative_spending_cap_zec`.
