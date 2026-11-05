@@ -192,6 +192,8 @@ export interface PaymentRequest {
    * must record it durably. If it throws, nothing is transmitted.
    */
   stage?: (txid: string) => void;
+  /** Durably authorize transmit after staging and the final fence. Throws before broadcast. */
+  beforeTransmit?: () => void;
 }
 
 export interface PaymentReceipt {

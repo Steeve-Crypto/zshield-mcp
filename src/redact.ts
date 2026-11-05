@@ -55,23 +55,23 @@ export function redactDeep<T>(value: T): T {
   return value;
 }
 
-/** Whether a server URL carries credentials: a user, a password, a query string, or a fragment. */
+/** Whether a server URL carries credentials: a user, a password, a non-root path, a query string, or a fragment. */
 export function urlHasCredentials(url: string): boolean {
   try {
     const u = new URL(url);
-    return u.username !== "" || u.password !== "" || u.search !== "" || u.hash !== "";
+    return u.username !== "" || u.password !== "" || u.search !== "" || u.hash !== "" || u.pathname !== "/";
   } catch {
     return false;
   }
 }
 
-/** A server URL safe to show: credentials, query, and fragment replaced. */
+/** A server URL safe to show: credentials and non-root paths hidden; fragment omitted. */
 export function displayUrl(url: string): string {
   try {
     const u = new URL(url);
     const cred = u.username || u.password ? "[credentials]@" : "";
     const query = u.search ? "?[redacted]" : "";
-    return `${u.protocol}//${cred}${u.host}${u.pathname === "/" ? "" : u.pathname}${query}`;
+    return `${u.protocol}//${cred}${u.host}${u.pathname === "/" ? "" : "/[redacted]"}${query}`;
   } catch {
     return "[server url]";
   }
@@ -79,7 +79,7 @@ export function displayUrl(url: string): string {
 
 /**
  * Register a lightwalletd URL: the full URL and each secret part of it (user, password,
- * query values, fragment), in raw and percent-decoded forms, so none of them leaks
+ * path segments, query values, fragment), in raw and percent-decoded forms, so none of them leaks
  * through an error or a zingo-cli message.
  */
 export function registerServerUrl(url: string | undefined): void {
@@ -89,7 +89,7 @@ export function registerServerUrl(url: string | undefined): void {
   try {
     const u = new URL(url);
     registerRedaction(u.href, shown);
-    const parts = [u.username, u.password, u.search.slice(1), u.hash.slice(1)];
+    const parts = [u.username, u.password, u.search.slice(1), u.hash.slice(1), ...(u.pathname === "/" ? [] : [u.pathname, ...u.pathname.split("/").filter(Boolean)])];
     for (const [, v] of u.searchParams) parts.push(v);
     for (const p of parts) {
       registerRedaction(p, "[redacted]");

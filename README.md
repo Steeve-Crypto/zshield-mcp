@@ -84,7 +84,7 @@ The payment store is a folder, `.zshield-state`, inside the wallet directory (be
 Other protections on every send:
 
 - **No two wallet holders, ever.** Every `zingo-cli` process the server starts (sync, reads, send, transmit) goes through a small `perl` wrapper that takes an exclusive `flock` on `.zshield-state/zingo.flock` and then runs `zingo-cli`, which inherits the lock. A `zingo-cli` left running by a killed server is waited for, never run beside. This needs `perl` and a POSIX platform; without them live mode refuses to run. Testnet mode refuses to start on Windows with a clear error. Mock mode runs on Windows, but its state files there have no ACL protection, so use it only for tests and demos.
-- **One send at a time per wallet, across processes.** A second call waits up to `SEND_QUEUE_WAIT_MS` for the first to finish, then gets `BUSY`. The paying process holds one OS lock (`flock` on `.zshield-state/send.flock`, held by a tiny `perl` child tied to the server process) for the whole send, from before the build to after the transmit. The kernel drops it the moment the process dies, so there is no lease, no timer and no stale-lock breaking. A frozen payer that is still alive keeps the lock until it finishes or dies, and nobody else sends meanwhile. Reads (`zcash_balance`, `zcash_receive_address`, `zcash_history`, and `zcash_payment_status` when it must read the wallet) return `BUSY` while a send holds the lock, so none runs between the build and the transmit. Under the lock the server also re-reads the key, so a key used by another process is replayed instead of paid again.
+- **One send at a time per wallet, across processes.** A second call waits up to `SEND_QUEUE_WAIT_MS` (at least 20 seconds in live mode) for the first to finish, then gets `BUSY`. The paying process holds one OS lock (`flock` on `.zshield-state/send.flock`, held by a tiny `perl` child tied to the server process) for the whole send, from before the build to after the transmit. The kernel drops it the moment the process dies, so there is no lease, no timer and no stale-lock breaking. A frozen payer that is still alive keeps the lock until it finishes or dies, and nobody else sends meanwhile. Reads (`zcash_balance`, `zcash_receive_address`, `zcash_history`, and `zcash_payment_status` when it must read the wallet) return `BUSY` while a send holds the lock, so none runs between the build and the transmit. Under the lock the server also re-reads the key, so a key used by another process is replayed instead of paid again.
 - **Two-stage send, exact memo.** A live send first builds and signs the transaction (`send` and `calculate`, nothing is broadcast), records its txid on the call, and only then runs `transmit <txid>`. A timeout or crash during the broadcast therefore leaves the call's own txid on record, and recovery asks the wallet about that txid. The memo is checked once and is exact: no trimming, no control characters, no leading or trailing whitespace, at most 512 UTF-8 bytes, and an empty memo means no memo. The same string is what policy checks, the audit row and intent hold, and what is sent.
 - **Health check first (testnet mode).** Before the `pending` row, the server syncs the wallet for at most `HEALTH_SYNC_TIMEOUT_MS`, then checks that the lightwalletd server answers, the wallet is within `HEALTH_MAX_LAG_BLOCKS` of the chain tip, and spendable funds cover the amount plus a 0.0001 ZEC fee estimate. A failure returns `CHAIN_UNREACHABLE`, `WALLET_NOT_SYNCED`, or `INSUFFICIENT_FUNDS` and sends nothing. A wallet whose sync has not finished can report a spendable balance of 0, so low funds after an unfinished sync are `WALLET_NOT_SYNCED`, not `INSUFFICIENT_FUNDS`.
 - **Recovery on startup.** If the server stopped between the `pending` row and the result row, the next start looks for the send in wallet history. A transaction counts only if the recipient (or its unified address), the amount, and the memo are all equal, and it is placed after the call started by its time or its block height. A call with no memo never matches someone else's memo payment, and a call that had no memo is never confirmed from history by a lone match: it stays `unknown` with the candidate listed. A call with a recorded txid is settled by that txid alone. History entries are also checked against `zingo-cli`'s JSON (`notes all`, `coins all`, `messages`), and an entry the JSON does not vouch for never confirms a call. Identical calls started close together stay `unknown`. It reads the whole history, never a recent slice, and writes one `zcash_pay_recovery` row: `confirmed` with the txid, `not_found` only with proof, or `unknown`. Proof means the wallet is synced, the whole history was read, the server's tip agrees with the wallet and has not gone backwards, the wallet has scanned more than 181 blocks past the height recorded before the send (the 120 block expiry of the pinned zingolib, plus a 60 block margin), and at least two hours have passed. A send is refused up front when the server's tip is below the wallet's own height or below a tip it reported before. Each run handles at most 100 calls within a time budget and leaves the rest for the next start. States only move forward: a call once seen as sent or mined never goes back. It never sends again. It holds the wallet lock while it runs and syncs first, for at most `STATUS_SYNC_TIMEOUT_MS`, so a payment made right after startup waits for it and may get `BUSY`. `unknown` ones are checked again on the next start.
@@ -313,7 +313,7 @@ Precedence: **environment variables** override `config/default.yaml`.
 | `VIEW_KEY_FINGERPRINT_SALT` | from yaml | Salt for view-key fingerprints |
 | `RATE_LIMIT_PER_MIN` | `60` | Tool calls allowed per minute across all tools in one server process, 1 to 10000. Calls over it get `RATE_LIMITED` |
 | `AUDIT_FALLBACK_PATH` | `audit-fallback.jsonl` next to `AUDIT_DIR` | Where an audit row goes when the main log cannot be written |
-| `SEND_QUEUE_WAIT_MS` | `10000` | How long a send waits for another send from the same wallet, up to `600000`, before `BUSY` |
+| `SEND_QUEUE_WAIT_MS` | `10000` | How long a send waits for this wallet, up to `600000`, before `BUSY`; live mode applies a `20000` ms minimum to outwait a bounded read |
 | `HEALTH_MAX_LAG_BLOCKS` | `10` | Testnet mode: how far the wallet may trail the chain tip and still send, 0 to 10000 |
 | `HEALTH_SYNC_TIMEOUT_MS` | `90000` | Testnet mode: the longest the pre-send wallet sync may run, 0 to 600000. `0` skips it |
 | `STATUS_SYNC_TIMEOUT_MS` | `90000` | Testnet mode: the longest the wallet sync before `zcash_payment_status` and startup recovery may run, 0 to 600000. `0` skips it |
@@ -395,8 +395,8 @@ Optional variables:
 
 - `ZINGO_BIN`: path to `zingo-cli`.
 - `ZINGO_DATA_DIR`: the wallet directory. It must be an absolute path. The default is `.zshield-testnet/wallet` in the home directory the OS reports, not `$HOME`, and the server will not start if that cannot be found.
-- `LIGHTWALLETD_URL`: the testnet server. A URL with a user, password, query string, or fragment is refused at startup, because `zingo-cli` takes the server only on its command line, where other local users can read it. Set `ZSHIELD_ALLOW_URL_CREDENTIALS=1` to accept that risk. The server then hides those parts in every response, error, and audit row, but not from the process list.
-- `ZINGO_READ_TIMEOUT_MS` (default `120000`, 1 to 600000): stops a read-only call that takes too long.
+- `LIGHTWALLETD_URL`: the testnet server. A URL with a user, password, non-root path, query string, or fragment is refused at startup, because `zingo-cli` takes the server only on its command line, where other local users can read it. Set `ZSHIELD_ALLOW_URL_CREDENTIALS=1` to accept that risk. The server then hides those parts in every response, error, and audit row, but not from the process list.
+- `ZINGO_READ_TIMEOUT_MS` (default `120000`, 1 to 600000): per-command timeout outside MCP read calls. MCP reads additionally share a 10-second total work deadline, plus process termination grace; ordinary history keeps its stricter 2-second limit.
 - `ZINGO_HEALTH_TIMEOUT_MS` (default `30000`, 1 to 300000): stops each pre-send health check step after the sync.
 
 The read-only tools never wait for the wallet. When a send or sync holds it, `zcash_balance` and `zcash_receive_address` read the wallet file offline, as last synced, instead of starting a sync that would race the send. `zcash_history` always reads offline and takes no payment lock.
@@ -452,7 +452,8 @@ and fallback have independent capacity. Each append reserves a durable maximum-r
 slot before writing, so retries and failed writes conservatively consume capacity.
 Reservations are exclusive across processes and survive restarts. Existing logs are
 charged conservatively to both pools on first use. The configured bounds cover JSONL
-bytes; bounded reservation files also consume filesystem metadata/inodes. Payment
+bytes; reservations use one fixed counter inode per pool, serialized with OS flock.
+Legacy slot files remain charged and are not deleted during upgrade. Payment
 state is never pruned. Replays and rejected calls use diagnostic capacity; a send must
 obtain protected capacity before it creates its intent. At exhaustion new sends fail
 closed, while recorded outcomes and idempotency bindings remain available. Capacity
@@ -506,3 +507,33 @@ for opens. A different uid cannot control any accepted component. Retargeting an
 or replacing a pinned ancestor fails closed. This includes the independent fallback,
 allow-list, state, and audit-quota namespaces. Trusted root/owner aliases remain supported;
 root or service-uid compromise is outside this local-user boundary.
+
+
+### Phase 1 follow-up review
+
+Signed transaction IDs and transmit authorization are recorded separately. New live
+calls cannot transmit before the authorization event is durable. Recovery can therefore
+settle a crash before authorization as `not_sent`, even if a signed txid exists. A final
+fence failure or authenticated wallet-wrapper `BUSY` refusal also proves no transmit
+started and releases the interlock. A crash after authorization remains ambiguous;
+legacy records, chain absence, and a wallet's `calculated` label alone do not prove
+non-payment. Recovery never authorizes a replacement payment from those observations.
+
+All MCP wallet reads and status work share one 10-second deadline across their CLI
+commands and sync, with a 500 ms sync-save grace and at most 5 seconds of CLI kill
+grace. Live payment admission waits at least 20 seconds to cover this work and lock
+handoff. The lock is released only after the read completes or its child exits; a
+Promise timeout never unlocks a still-running wallet process. Queued payments retain
+priority over later readers. Startup maintenance recovery retains its separate budget.
+
+Non-root lightwalletd URL paths are treated as potentially secret, require HTTPS and
+explicit credential opt-in, and are hidden from diagnostics. Each non-empty decoded
+path segment must satisfy the same 8-character minimum as other credentials; use a
+credential-free root endpoint when this restriction does not fit the provider route.
+Opting in still exposes the URL in zingo-cli process arguments.
+
+Audit reservations use two counter files per destination. Their file lengths count
+charged rows, with `flock`, truncation and fsync performed before an append is allowed.
+Failed or interrupted reservations can overcharge but cannot silently reclaim capacity.
+Concurrent processes share the counters. Existing slot reservations continue to count;
+no automatic cleanup, counter reset, or financial-state deletion is performed.
