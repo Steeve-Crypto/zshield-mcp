@@ -1,3 +1,4 @@
+import { assertPaymentsEnabled } from "../payments/pause.js";
 import { resumeOriginal, RESUME_TIMEOUT_MS } from "../payments/resume.js";
 import { eventFor, recordReconcile } from "../payments/recovery.js";
 import { withOperationBudget } from "../chain/read-budget.js";
@@ -714,6 +715,11 @@ async function runPay(
       }
     }
 
+    if (policyPassed && lock) {
+      try { assertPaymentsEnabled(store); }
+      catch (e) { policyPassed = false; fail("rejected", "PAYMENTS_PAUSED", (e as Error).message); }
+    }
+
     // The viewing key can run zingo-cli, so it is read here, under the lock, last of the
     // cheap checks: a read can never slip into a send's stage-to-transmit gap.
     if (policyPassed && amountZats !== undefined && lock) {
@@ -895,6 +901,7 @@ async function runPay(
             },
             beforeTransmit: () => {
               lock!.assertHeld();
+              assertPaymentsEnabled(store);
               store.authorizeTransmit(callId, now());
             },
             stage: (txid) => {

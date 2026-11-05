@@ -51,6 +51,17 @@ function setup(authorized = true) {
 }
 
 describe("exact transaction recovery", () => {
+  it("operator pause blocks automatic and explicit resume", async () => {
+    const w = setup();
+    fs.writeFileSync(join(w.store.dir, "payments.pause"), "incident");
+    await recoverPendingPayments(w.config, w.chain);
+    await executePay({ ...input, resume: true }, w);
+    assert.equal(w.attempts(), 0);
+    assert.ok(w.store.unresolvedSend());
+    fs.unlinkSync(join(w.store.dir, "payments.pause"));
+    assert.equal((await executePay({ ...input, resume: true }, w)).ok, true);
+    assert.equal(w.attempts(), 1);
+  });
   it("startup closes the authorization-before-transmit crash window with the original txid", async () => {
     const w = setup();
     assert.ok(w.store.unresolvedSend());

@@ -5,6 +5,7 @@
 
 /** zcash_pay was refused by policy. Nothing was sent. Audited with status `rejected`. */
 export const PAY_REJECTION_CODES = [
+  "PAYMENTS_PAUSED",
   "INVALID_RECIPIENT",
   "INVALID_MEMO",
   "INVALID_AMOUNT",
