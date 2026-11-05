@@ -1,3 +1,4 @@
+import { approvalKeys } from "./payments/approval.js";
 import { DEFAULT_AUDIT_MAX_BYTES, parseAuditBudget } from "./audit/budget.js";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
@@ -109,6 +110,9 @@ export function loadConfig(cwd = process.cwd()): Config {
   const config: Config = {
     spendingCapZec,
     totalSpendingCapZec: process.env.TOTAL_SPENDING_CAP_ZEC,
+    approvalPublicKeys: process.env.APPROVAL_PUBLIC_KEYS_JSON ? JSON.parse(process.env.APPROVAL_PUBLIC_KEYS_JSON) : undefined,
+    approvalThreshold: process.env.APPROVAL_THRESHOLD ? Number(process.env.APPROVAL_THRESHOLD) : undefined,
+    approvalDir: process.env.APPROVAL_DIR ? resolve(cwd, process.env.APPROVAL_DIR) : undefined,
     allowlistPath: resolve(
       cwd,
       envOr("ALLOWLIST_PATH", fromFile.allowlist_path ?? "./allowlists/recipients.example.json", (v) => v)
@@ -139,6 +143,7 @@ export function loadConfig(cwd = process.cwd()): Config {
     ),
   };
   if (config.totalSpendingCapZec !== undefined) parseZecToZats(config.totalSpendingCapZec, "TOTAL_SPENDING_CAP_ZEC");
+  if (config.approvalPublicKeys || config.approvalDir || config.approvalThreshold !== undefined) approvalKeys(config);
   assertFingerprintSalt(config);
   return config;
 }

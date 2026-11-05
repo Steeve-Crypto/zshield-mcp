@@ -60,6 +60,7 @@ export function describePolicy(config: Config) {
       pending_row_before_send: true,
       rate_limited_calls: "not audited one by one; counted in one summary row per minute",
     },
+    approvals: { configured: !!config.approvalPublicKeys, required_signers: config.approvalPublicKeys ? config.approvalThreshold ?? 1 : 0 },
     tools: {
       payment: [...PAYMENT_TOOLS],
       read_only: [...READ_ONLY_TOOLS],
