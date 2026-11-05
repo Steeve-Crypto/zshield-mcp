@@ -269,7 +269,7 @@ describe("F-34: history scans are shared and capped", () => {
 
 describe("F-30: a reorged payment no longer reads as mined", () => {
   const sent = (status: string, extra: Partial<TxSummary> = {}) =>
-    ({ txid: GOOD, time: new Date(T0 + 2000).toISOString(), status, blockHeight: status === "confirmed" ? 500 : undefined, kind: "sent", valueZats: 10000n, outgoing: [{ recipient: R, valueZats: 10000n, memo: "inv-7" }], ...extra }) as TxSummary;
+    ({ verified: true, txid: GOOD, time: new Date(T0 + 2000).toISOString(), status, blockHeight: status === "confirmed" ? 500 : undefined, kind: "sent", valueZats: 10000n, outgoing: [{ recipient: R, valueZats: 10000n, memo: "inv-7" }], ...extra }) as TxSummary;
   const chainWith = (history: TxSummary[]) =>
     ({ mode: "live", getHistory: async () => history, walletHeight: async () => 505, checkHealth: async () => ({ walletHeight: 505, chainTip: 505, spendableZats: 0n }) }) as unknown as ChainAdapter;
   function minedCall() {

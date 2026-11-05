@@ -283,7 +283,7 @@ async function reconcileStaged(
     return { ...base, status: "unknown", txid, possible_sends: candidate("listed twice"), note: "The wallet listing shows this call's transaction id more than once, which a real wallet never does. Check by hand. Do not pay again." };
   }
   const e = entries[0];
-  if (e && e.verified === false) {
+  if (e && (e.verified === false || (opts.live && e.verified !== true))) {
     return { ...base, status: "unknown", txid, possible_sends: candidate(e.status), note: "This call's transaction id is listed, but the wallet's machine-readable output does not agree with the listing. Check by hand. Do not pay again." };
   }
   if (e && e.status === "failed") {
@@ -291,13 +291,16 @@ async function reconcileStaged(
   }
   if (e && e.status === "confirmed") {
     const note = (e.outgoing ?? []).find((n) => (n.recipient === intent.recipient || n.unifiedAddress === intent.recipient) && n.valueZats === BigInt(intent.amount_zats ?? "-1") && n.memo === (intent.memo ?? ""));
-    if (e.outgoing && e.outgoing.length > 0 && !note) {
+    if (e.outgoing && (e.outgoing.length !== 1 || !note)) {
       return { ...base, status: "unknown", txid, possible_sends: candidate(e.status), note: "This call's transaction id is mined, but its listed outputs differ from the call. Check by hand. Do not pay again." };
     }
     return { ...base, status: "confirmed", txid, block_height: e.blockHeight, confidence: "high", note: "Mined. This is the transaction signed for this call before it was transmitted." };
   }
-  if (e && e.status !== "calculated") {
+  if (e && (e.status === "transmitted" || e.status === "mempool")) {
     return { ...base, status: "broadcast", txid, confidence: "high", note: `Transmitted; the wallet reports it as ${e.status}. Do not pay again.` };
+  }
+  if (e && e.status !== "calculated") {
+    return { ...base, status: "unknown", txid, note: "The wallet reports an unrecognized transaction state. No transmission or settlement can be inferred. Do not pay again." };
   }
   // Absent, or built and never transmitted as far as this wallet knows: the same proof as
   // for any call that has no sent transaction.
