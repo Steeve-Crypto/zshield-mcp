@@ -105,3 +105,16 @@ it("separate processes cannot exceed the shared allowance", async () => {
   assert.equal(results.filter(r => r.code === "SPENDING_BUDGET_REFUSED").length, 1);
   assert.equal(sends(w).length, 1);
 });
+
+it("operator monitoring reports actionable conditions without payment secrets", async () => {
+  const { operationalHealth }=await import('../src/operations/health.ts');
+  const config=tempConfig({totalSpendingCapZec:"0.001"}),chain=new MockChainAdapter(),store=storeFor(config,chain);
+  await executePay({recipient:ALLOWED,amount_zec:"0.001",idempotency_key:"sensitive-key",memo:"sensitive-memo"},{config,chain});
+  fs.writeFileSync(join(store.dir,'payments.pause'),'incident');
+  const report=operationalHealth(config,store);
+  assert.equal(report.ok,false);
+  assert.ok(report.alerts.includes('PAYMENTS_PAUSED'));
+  assert.ok(report.alerts.includes('SPENDING_ALLOWANCE_LOW'));
+  assert.ok(report.alerts.includes('FINANCIAL_CONTROLS_MISSING'));
+  assert.doesNotMatch(JSON.stringify(report),/sensitive-key|sensitive-memo|u1mockrecipient|test-salt/);
+});

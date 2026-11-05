@@ -1,3 +1,4 @@
+import { operationalHealth } from "../src/operations/health.js";
 import fs from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { loadConfig } from "../src/config.js";
@@ -19,7 +20,7 @@ async function main() {
    await restoreSnapshot(resolve(arg),resolve(destination),expectedDigest);
    console.log(JSON.stringify({restored:true,payments_paused:true})); return;
  }
- if (!["pause","unpause","budget-init","backup","approval-payload"].includes(command)) throw new Error("Commands: pause, unpause --reviewed, budget-init, backup DESTINATION, restore, approval-payload REQUEST_JSON");
+ if (!["inspect","pause","unpause","budget-init","backup","approval-payload"].includes(command)) throw new Error("Commands: inspect, pause, unpause --reviewed, budget-init, backup DESTINATION, restore, approval-payload REQUEST_JSON");
  const config=loadConfig(); runStartup(config);
  const chain=createChain(config), store=storeFor(config,chain);
  const pause=join(store.dir,"payments.pause");
@@ -28,7 +29,9 @@ async function main() {
  const lock=command==="backup" ? await acquireMaintenanceLock(store) : await acquireWalletLock(store,30000,"operator");
  try {
   lock.assertHeld();
-  if (command==="unpause") {
+  if (command==="inspect") {
+    const report=operationalHealth(config,store);console.log(JSON.stringify(report,null,2));if(!report.ok)process.exitCode=2;
+  } else if (command==="unpause") {
     if(arg!=="--reviewed") throw new Error("Unpause requires --reviewed after checking incidents and unresolved payments");
     fs.unlinkSync(pause);fsyncDir(store.dir);
     console.log(JSON.stringify({payments_paused:false,unresolved_calls:store.pendingCalls().length}));
