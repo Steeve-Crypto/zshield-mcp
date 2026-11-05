@@ -69,6 +69,7 @@ export function checkServerUrl(url: string | undefined, env: NodeJS.ProcessEnv =
 }
 
 export function loadConfig(cwd = process.cwd()): Config {
+  if (process.env.FINANCIAL_CONTROLS_REQUIRED !== undefined && !["0", "1"].includes(process.env.FINANCIAL_CONTROLS_REQUIRED)) throw new Error("FINANCIAL_CONTROLS_REQUIRED must be 0 or 1");
   // Every timeout has a range; an out-of-range value stops the server here.
   validateTimeouts(process.env);
   const yamlPath = resolve(cwd, "config/default.yaml");
@@ -129,6 +130,8 @@ export function loadConfig(cwd = process.cwd()): Config {
     ),
     chainNetwork: rawMode === "testnet" ? "testnet" : undefined,
     zingoBin: process.env.ZINGO_BIN,
+    zingoBinarySha256: process.env.ZINGO_BINARY_SHA256,
+    requireFinancialControls: process.env.FINANCIAL_CONTROLS_REQUIRED === "1",
     // Live mode needs an absolute wallet path; loading fails here rather than fall back to a relative one.
     zingoDataDir: chainMode === "live" ? resolveWalletDir(process.env.ZINGO_DATA_DIR) : process.env.ZINGO_DATA_DIR,
     lightwalletd: checkServerUrl(process.env.LIGHTWALLETD_URL),

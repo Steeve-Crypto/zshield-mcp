@@ -23,6 +23,8 @@ export interface Config {
   viewKeyFingerprintSalt: string;
   chainNetwork?: string;
   zingoBin?: string;
+  zingoBinarySha256?: string;
+  requireFinancialControls?: boolean;
   zingoDataDir?: string;
   /** Live mode: how many blocks behind the tip the wallet may be and still send. Default 10 */
   healthMaxLagBlocks?: number;

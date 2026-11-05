@@ -1,3 +1,4 @@
+import { pinExecutable } from "./executable.js";
 import { readCommandBudget, readQuitGrace } from "./read-budget.js";
 import { projectHistory, streamingHistoryRunner, type HistorySelection } from "./history-stream.js";
 import { checkServerUrl } from "../config.js";
@@ -221,6 +222,7 @@ export function resolveWalletDir(dataDir: string | undefined, home: () => string
 export interface LiveOptions {
   network: string | undefined;
   zingoBin?: string;
+  binarySha256?: string;
   dataDir?: string;
   server?: string;
   runner?: CliRunner;
@@ -273,6 +275,7 @@ export class LiveChainAdapter implements ChainAdapter {
       throw new NetworkError("Live mode requires CHAIN_MODE=testnet. Mainnet is not supported.", "mode");
     }
     this.bin = opts.zingoBin ?? "zingo-cli";
+    this.checkExecutable = opts.binarySha256 ? pinExecutable(this.bin, opts.binarySha256) : undefined;
     this.dataDir = resolveWalletDir(opts.dataDir);
     // Pinned at startup (or here, for an adapter built without it). A missing wallet is
     // refused rather than created later; a test adapter with a fake runner may have none.
@@ -307,6 +310,7 @@ export class LiveChainAdapter implements ChainAdapter {
 
   /** Throws, before anything starts, unless the wallet path still leads to the pinned directory. */
   private assertPinned(): void {
+    this.checkExecutable?.();
     if (!this.pin) return;
     try {
       checkPin(this.dataDir, this.pin);
@@ -317,9 +321,11 @@ export class LiveChainAdapter implements ChainAdapter {
 
   /** The OS lock file every zingo-cli process on this wallet runs under. None for a test adapter without a store. */
   private readonly lockFile?: string;
+  private readonly checkExecutable?: () => void;
 
   /** Runs zingo-cli with the OS wallet lock options added. */
   private exec(args: string[], opts: RunOptions = {}): Promise<string> {
+    this.checkExecutable?.();
     opts = { ...opts, timeoutMs: readCommandBudget(opts.timeoutMs ?? SEND_TIMEOUT_MS) };
     return this.runner(this.bin, args, this.lockFile ? { lockFile: this.lockFile, ...opts } : opts);
   }
@@ -358,6 +364,7 @@ export class LiveChainAdapter implements ChainAdapter {
     const args = ["--chain", "testnet", "--server", this.server, "--data-dir", this.walletPath];
     try {
       timeoutMs = readCommandBudget(timeoutMs);
+      this.checkExecutable?.();
       const r = await this.syncer(this.bin, args, { timeoutMs, quitGraceMs: readQuitGrace(), ...(this.lockFile ? { lockFile: this.lockFile } : {}) });
       return r.detail ? { ...r, detail: redact(r.detail) } : r;
     } catch (e) {
