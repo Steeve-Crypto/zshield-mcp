@@ -97,3 +97,27 @@ installation can spend, reconcile unresolved original transactions, verify budge
 and approval controls, then use `unpause --reviewed`. Never run old and restored
 wallet copies concurrently. A snapshot can be older than already accepted payments;
 restoring it cannot by itself prove no payment occurred since it was captured.
+
+## Monitoring and incident response
+
+`npm run operator -- inspect` emits local JSON with stable alert codes, unresolved
+call count, pause state, cumulative reservation total, disk availability warning and
+separate financial/diagnostic audit capacity for primary and fallback sinks. It
+returns exit 2 when attention is needed, 1 on command failure, and 0 only without
+reported alerts. It does not expose payment recipients, memos or keys. Integrate
+this command with the deployment's existing monitoring supervisor; no external
+notification service is configured automatically. A healthy report is not release
+certification or a statement about network finality.
+
+- `UNRESOLVED_PAYMENTS`: inspect each original call with payment_status; preserve
+  its key and txid. Use exact same-key resume only after checking its signed grant.
+- `SPENDING_ALLOWANCE_LOW`: review reservations against approved activity before
+  raising the absolute allowance. Never reset the counter or delete receipts.
+- `AUDIT_*_LOW`: snapshot evidence and provision additional reviewed capacity before
+  exhaustion. Increase the configured absolute byte ceiling; never delete budget
+  ledgers to obtain a fresh allowance. Diagnostics cannot consume financial capacity.
+- Unreadable state or disk warnings: pause new payments, preserve evidence, repair
+  storage, reconcile original identities, and unpause only after operator review.
+- Suspected credential, wallet or signer compromise: pause immediately, isolate the
+  service, revoke signing authority in trust configuration, and obtain an independent
+  incident review. An already transmitted transaction cannot be recalled by pause.
