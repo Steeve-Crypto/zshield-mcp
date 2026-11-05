@@ -91,7 +91,10 @@ export async function runReadTool<T>(
     error,
     ...(typeof extra === "function" ? extra() : extra),
   };
-  const auditWarning = writeAuditRow(config, audit).warning;
+  // BUSY refusals must not mutate live audit files during maintenance snapshots.
+  const auditWarning = status === "rejected" && code === "BUSY"
+    ? undefined
+    : writeAuditRow(config, audit).warning;
 
   if (status !== "ok" || data === undefined) {
     return {
