@@ -117,8 +117,15 @@ export interface AuditWriteResult {
 }
 
 type AuditRow = AuditEntry | ReadAuditEntry | RateLimitAuditEntry | RecoveryAuditEntry;
+/** When set, live audit files must not change (maintenance snapshot in progress). */
+let auditFreezeDepth = 0;
+export function freezeAuditWrites(): void { auditFreezeDepth++; }
+export function unfreezeAuditWrites(): void { auditFreezeDepth = Math.max(0, auditFreezeDepth - 1); }
+export function auditWritesFrozen(): boolean { return auditFreezeDepth > 0; }
 function financialRow(row: AuditRow): boolean {
-  return row.tool === "zcash_pay" ? row.status !== "replayed" && Boolean(row.operation_id) : row.tool === "zcash_pay_recovery";
+  // Payment refusals are financial evidence too: they must not fall into the finite
+  // diagnostic pool where exhaustion silently drops per-call proof (F-75).
+  return row.tool === "zcash_pay" ? row.status !== "replayed" : row.tool === "zcash_pay_recovery";
 }
 // Capacity refusals must not turn stderr into an unbounded replacement audit sink.
 const capacityWarnings = new Set<string>();
@@ -143,6 +150,10 @@ export function writeAuditRow(
   const { auditDir } = target;
   // No row carries a server credential or a local path, even inside an error message.
   entry = redactDeep(entry);
+  // Maintenance snapshots copy live audit files; mutating them mid-copy aborts backup (F-68).
+  if (auditFreezeDepth > 0) {
+    return { durable: false, warning: "Audit writes are frozen during maintenance snapshot; row was not written." };
+  }
   let mainError = "";
   for (let attempt = 0; attempt < 2; attempt++) {
     try {

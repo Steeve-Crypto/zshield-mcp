@@ -89,10 +89,18 @@ export async function resumeOriginal(
     // Record financial evidence BEFORE a possible network mutation.
     const audit = writeAuditRow(config, { ...base, status: "unknown", note: "Resuming only the originally signed transaction by exact txid; no replacement transaction authorized." });
     if (!audit.durable) return unknown("Audit evidence could not be persisted; no resume attempted.");
-    if (!hasTransmitAuthorization(record)) store.authorizeTransmit(record.callId, new Date().toISOString());
     lock.assertHeld();
     attempted = true;
-    await chain.resumeSigned(txid, { fence: () => { lock.assertHeld(); reserveFee(config, store, lock, record.callId, originalFee, paymentParamsHash(intent), intent.idempotency_key!); assertPaymentsEnabled(store); assertApproval(config, store, intent.idempotency_key!, paymentParamsHash(intent), fingerprint); reserveSpending(config, store, lock, record.callId, amount, paymentParamsHash(intent), intent.idempotency_key!); }, timeoutMs: RESUME_TIMEOUT_MS });
+    await chain.resumeSigned(txid, { fence: () => {
+      lock.assertHeld();
+      assertPaymentsEnabled(store);
+      assertApproval(config, store, intent.idempotency_key!, paymentParamsHash(intent), fingerprint);
+      assertRecipientAllowed(intent.recipient, loadAllowlist(config.allowlistPath));
+      reserveFee(config, store, lock, record.callId, originalFee, paymentParamsHash(intent), intent.idempotency_key!);
+      reserveSpending(config, store, lock, record.callId, amount, paymentParamsHash(intent), intent.idempotency_key!);
+      // Authorize only once the backend lock is held and the fence checks pass (F-53/F-73).
+      if (!hasTransmitAuthorization(record)) store.authorizeTransmit(record.callId, new Date().toISOString());
+    }, timeoutMs: RESUME_TIMEOUT_MS });
     return { attempted, row: { ...base, status: "broadcast", confidence: "high", note: "Resumed the original signed transaction by exact txid. No replacement was built." } };
   } catch (e) {
     // Policy refusals of THIS attempt are exact and must not look like a benign replay.

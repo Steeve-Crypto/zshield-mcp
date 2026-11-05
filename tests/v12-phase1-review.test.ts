@@ -36,9 +36,17 @@ describe("Phase 1 follow-up regressions", () => {
     assert.equal(row.status, "not_sent");
   });
   it("327841 authorization crash and legacy calculated/absent entries remain ambiguous", async () => {
+    // Authorized+absent and legacy untracked+absent stay unknown (no local non-broadcast proof).
     for (const store of [staged(true, true), staged(false)]) {
       assert.equal((await reconcile(store.readCall("call")!, absent, opts)).status, "unknown");
     }
+    // Tracked without authorize is local not_sent (F-53). Authorized calculated stays unknown/resumable.
+    const calculated = {
+      getTransaction: async () => [{ txid: TX, kind: "sent", status: "calculated", valueZats: 10000n, verified: true, outgoing: [{ recipient: R, valueZats: 10000n, memo: "" }] }],
+      getHistory: async () => [],
+    } as unknown as ChainAdapter;
+    assert.equal((await reconcile(staged(true, false).readCall("call")!, calculated, opts)).status, "not_sent");
+    assert.equal((await reconcile(staged(true, true).readCall("call")!, calculated, opts)).status, "unknown");
   });
   it("327841 adapter fences before authorization and WalletBusyError remains proven pre-start", async () => {
     for (const busy of [false, true]) {
