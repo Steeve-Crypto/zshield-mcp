@@ -14,6 +14,9 @@ export interface Config {
   spendingCapZec: number | string;
   /** Lifetime principal allowance; reservations never automatically reset or refund. */
   totalSpendingCapZec?: number | string;
+  approvalPublicKeys?: string[];
+  approvalThreshold?: number;
+  approvalDir?: string;
   allowlistPath: string;
   chainMode: ChainMode;
   auditDir: string;

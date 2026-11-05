@@ -1,3 +1,4 @@
+import { assertApproval } from "../payments/approval.js";
 import { reserveSpending } from "../payments/budget.js";
 import { assertPaymentsEnabled } from "../payments/pause.js";
 import { resumeOriginal, RESUME_TIMEOUT_MS } from "../payments/resume.js";
@@ -825,6 +826,7 @@ async function runPay(
       }
       if (ready) {
         try {
+          assertApproval(config, store, keyFields.idempotency_key ?? callId, keyFields.params_sha256 ?? paymentParamsHash(input), viewKeyFingerprint);
           reserveSpending(config, store, lock, callId, amountZats, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
           store.writeIntent(intent);
           wroteIntent = true;
@@ -904,6 +906,7 @@ async function runPay(
             beforeTransmit: () => {
               lock!.assertHeld();
               assertPaymentsEnabled(store);
+              assertApproval(config, store, keyFields.idempotency_key ?? callId, keyFields.params_sha256 ?? paymentParamsHash(input), viewKeyFingerprint);
               reserveSpending(config, store, lock!, callId, amountZats!, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
               store.authorizeTransmit(callId, now());
             },

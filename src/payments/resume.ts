@@ -1,3 +1,4 @@
+import { assertApproval } from "./approval.js";
 import { reserveSpending } from "./budget.js";
 import { assertPaymentsEnabled } from "./pause.js";
 import { fingerprintViewKey, writeAuditRow } from "../audit/log.js";
@@ -76,6 +77,7 @@ export async function resumeOriginal(
     if (entry.status === "transmitted" || entry.status === "mempool") return { attempted, row: { ...base, status: "broadcast", confidence: "high", note: "The original transaction is already transmitted; nothing retransmitted." } };
     if (entry.status !== "calculated") return unknown("The original transaction is not in a resumable calculated state. No replacement was built.");
     assertPaymentsEnabled(store);
+    assertApproval(config, store, intent.idempotency_key!, paymentParamsHash(intent), fingerprint);
     // Record financial evidence BEFORE a possible network mutation. A failed write or
     // capacity refusal must not be bypassed by calling this a diagnostic replay.
     const audit = writeAuditRow(config, { ...base, status: "unknown", note: "Resuming only the originally signed transaction by exact txid; no replacement transaction authorized." });
@@ -84,7 +86,7 @@ export async function resumeOriginal(
     if (!hasTransmitAuthorization(record)) store.authorizeTransmit(record.callId, new Date().toISOString());
     lock.assertHeld();
     attempted = true;
-    await chain.resumeSigned(txid, { fence: () => { lock.assertHeld(); assertPaymentsEnabled(store); reserveSpending(config, store, lock, record.callId, amount, paymentParamsHash(intent), intent.idempotency_key!); }, timeoutMs: RESUME_TIMEOUT_MS });
+    await chain.resumeSigned(txid, { fence: () => { lock.assertHeld(); assertPaymentsEnabled(store); assertApproval(config, store, intent.idempotency_key!, paymentParamsHash(intent), fingerprint); reserveSpending(config, store, lock, record.callId, amount, paymentParamsHash(intent), intent.idempotency_key!); }, timeoutMs: RESUME_TIMEOUT_MS });
     return { attempted, row: { ...base, status: "broadcast", confidence: "high", note: "Resumed the original signed transaction by exact txid. No replacement was built." } };
   } catch {
     // Even a proven refusal of THIS retry says nothing about the FIRST attempt.
