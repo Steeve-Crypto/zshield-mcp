@@ -12,6 +12,8 @@ export interface AllowlistFile {
 export interface Config {
   /** Hard per-call cap in ZEC, at most 8 decimals; compared as integer zatoshis */
   spendingCapZec: number | string;
+  /** Lifetime principal allowance; reservations never automatically reset or refund. */
+  totalSpendingCapZec?: number | string;
   allowlistPath: string;
   chainMode: ChainMode;
   auditDir: string;
