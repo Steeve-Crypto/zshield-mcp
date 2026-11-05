@@ -1,10 +1,10 @@
 # Reliability design
 
-How zshield-mcp makes sure one payment request leads to at most one send, even with several server processes on one wallet, crashes, slow servers, and stalled processes. This is the model the code follows. Each rule below has a test.
+How zshield-mcp makes sure one payment request leads to at most one distinct signed transaction, even with several server processes on one wallet, crashes, slow servers, and stalled processes. This is the model the code follows. Each rule below has a test.
 
 ## Invariants
 
-1. **No idempotency key ever causes two sends.** A send for a key happens only after that key is durably bound to exactly one call in the payment store, and binding is an exclusive create that only one process can win.
+1. **No idempotency key ever causes two distinct payments.** A send for a key happens only after that key is durably bound to exactly one call in the payment store, and binding is an exclusive create that only one process can win.
 2. **All processes sharing a wallet share one canonical payment store.** The store lives inside the wallet directory, at an absolute path resolved from the wallet path itself. Audit directories, fallback files, and working directories play no part in finding it.
 3. **Recovery and status never downgrade a payment.** States only move forward. A payment seen as sent or mined stays sent or mined, whatever a later, slower, or stale reader concludes. A sent call that the wallet later marks failed moves forward to failed, and only a sighting in a block moves it past that. The stored record is append-only, so a call seen mined stays `mined` there. `zcash_payment_status` still answers from the wallet's latest view: if a later read no longer shows the call mined (a reorg), it says `broadcast` or `unknown` with `reorged: true` and `last_mined_height`, and never sends again.
 4. **"Not sent" needs proof.** A missing transaction in a short or partial history proves nothing. Without proof the state stays `unknown`, and no answer tells the caller to pay again.
@@ -36,9 +36,9 @@ A call's state is the join of its events, not the last one written. The order is
 
 One OS lock per wallet, held by the paying process for the whole send, from before the build to after the transmit. It is released by the kernel when the process finishes or dies, however it dies. There is no lease, no heartbeat and no stale-lock breaking. A frozen holder keeps the lock until it wakes and finishes or is killed, and nobody else sends meanwhile.
 
-How it is held: node has no `flock`, so the process starts a tiny `perl` holder (perl is needed anyway, see below). The holder opens `send.flock`, takes `flock(2)` on it, prints `LOCKED`, then reads its stdin until end of file. The write end of that pipe belongs to the server process, so when the server releases the lock or dies, the pipe closes, the holder exits, and the kernel drops the lock. A stopped (SIGSTOP) server stops its holder's pipe from closing, so the lock stays. A killed holder shows up as a lost lock: the server checks it before the viewing key read, before the build, between build and transmit, and right before each `zingo-cli` start, and stops without sending if it is gone. Releasing waits for the holder to exit. A per-process queue sits in front, so two calls in one process wait their turn.
+How it is held: node has no `flock`, so the process starts a tiny `perl` holder (perl is needed anyway, see below). The holder opens `send.flock`, takes `flock(2)` on it, prints `LOCKED`, then reads its stdin until end of file. The write end of that pipe belongs to the server process, so when the server releases the lock or dies, the pipe closes, the holder exits, and the kernel drops the lock. A stopped (SIGSTOP) server stops its holder's pipe from closing, so the lock stays. A killed holder shows up as a lost lock: the server checks it before the viewing key read, before the build, between build and transmit, and right before each `zingo-cli` start, and stops without sending if it is gone. Releasing waits for the holder to exit. The OS admission turnstile precedes the local queue, so a local writer waiting behind a read also prevents new readers in other processes from overtaking it.
 
-Reads (`zcash_balance`, `zcash_receive_address`, `zcash_history`, and `zcash_payment_status` when it must read the wallet) take the same lock without waiting. While a send holds it they return `BUSY`, so no read runs between the build and the transmit. The reverse also holds: a payment waits up to `SEND_QUEUE_WAIT_MS` for a running read, then gets `BUSY`.
+Reads (`zcash_balance`, `zcash_receive_address`, `zcash_history`, and `zcash_payment_status` when it must read the wallet) take the same lock without waiting. While a send holds it they return `BUSY`, so no read runs between the build and the transmit. The reverse also holds: a payment waits up to `SEND_QUEUE_WAIT_MS` (at least 20 seconds in live mode) for a running read, then gets `BUSY`.
 
 The lock is required in live mode. The mock chain falls back to the in-process queue where perl or `flock` is missing (Windows).
 
@@ -57,8 +57,8 @@ This needs `perl` and a POSIX platform. Without perl, or on Windows, live mode r
 ## A send, step by step
 
 1. Policy checks and a live send's required `idempotency_key`. No lock yet. The memo is checked once here, and this same string is what the policy sees, what the audit row and intent hold, and what is sent.
-2. If the key is already bound, replay its call. Nothing is sent.
-3. Take the in-process queue, then the OS wallet lock, which stays held to the end of the send. Re-read the key, since another process may have bound it while this one waited. Then read the viewing key fingerprint, under the lock, so no read runs between build and transmit.
+2. If the key is already bound, replay its call without sending. An explicit `resume: true` instead enters the exact-transaction recovery path below.
+3. Take the OS admission turnstile, the local queue, then the OS wallet lock, which stays held to the end of the send. Re-read the key, since another process may have bound it while this one waited. Then read the viewing key fingerprint, under the lock, so no read runs between build and transmit.
 4. Health check: bounded sync, chain tip, funds. The tip must not be below the wallet's own height, nor below the highest tip recorded for this wallet, by more than 10 blocks, or the send is refused. It records the expiry anchor: the highest of the server tip, the wallet height, and the recorded mark. A failure here binds nothing, so the caller may retry with the same key.
 5. Check the lock is still held, then read the key once more (the health check can take minutes, and another process may have bound it), then write the intent event and the pending marker.
 6. Write the audit `pending` row. If it cannot reach disk, record `not sent` and stop.
@@ -74,7 +74,7 @@ Staging the txid before `transmit` means a timeout or crash during the broadcast
 
 ## Recovery and status
 
-Recovery handles pending records under the wallet lock, never resends, and keeps
+Recovery handles pending records under the wallet lock, never builds replacements, and keeps
 transaction identity separate from content similarity. Known staged/returned txids use
 bounded-memory streaming projection over the CLI output; the complete output is read,
 including duplicate occurrences after a match. JSON corroboration (`notes all`, `coins
@@ -113,8 +113,8 @@ Every timeout comes from a bounded setting. Values outside the range stop the se
 
 - The locks need `perl` and a POSIX platform, work on a local filesystem (not on every network share), and do not cover a `zingo-cli` the operator starts by hand on the same wallet.
 - A stalled payer that is still alive keeps the lock, and every other payer gets `BUSY` until it finishes or dies. That is the choice: a live holder is never replaced by a timer, so a frozen process cannot wake up and send beside a new one.
-- A long read (history, status) makes a payment wait up to `SEND_QUEUE_WAIT_MS`, then `BUSY`.
-- A transaction that was built (`calculate`) but never transmitted can stay in the wallet's pending list and hold its notes until the wallet drops it. It is never broadcast by this server, so it cannot pay anyone.
+- An admitted MCP read has a shared 10-second work deadline plus process termination grace; live payment admission waits at least 20 seconds. Startup maintenance retains its separate bounded budget.
+- A transaction that was built (`calculate`) but never transmitted can stay in the wallet's pending list and hold its notes until the wallet drops it. Only an authorized, verified original txid may be resumed; a calculated label alone is not evidence of non-payment.
 - Live payments require an idempotency key. Only mock payments may go without one, and they move no money.
 - No finite live expiry margin proves non-payment. Unresolved signed transactions remain interlocked and may require operator investigation when reliable evidence is unavailable.
 - The tip mark (`tip.json` in the store) only rises. After a deliberate testnet reset, or a wallet moved to a different chain, sends are refused with `CHAIN_ERROR` until the file is removed by hand.
@@ -129,9 +129,42 @@ Every timeout comes from a bounded setting. Values outside the range stop the se
 
 ## Hardening pass (run 7)
 
-- **Expiry.** The pinned zingolib expires a transaction 120 blocks after its target height. Not sent is proven only after the wallet passes anchor + 1 + 120 + 60.
+- **Expiry.** The pinned zingolib expires a transaction 120 blocks after its target height. That height is diagnostic only; it never proves irreversible live non-payment.
 - **Unresolved sends block the wallet.** In live mode, a call with a signed txid that is not settled (mined or locally proven not sent) refuses every new send with `UNRESOLVED_PAYMENT`. A transmit error or a wallet Failed status is `unknown`, never `not_sent`.
 - **No bare transmit.** `transmit` always carries a validated 64 hex txid. A bare one would send every calculated transaction in the wallet.
 - **Chain check.** When `info` names the chain and consensus branch, a testnet server must say `test` and `77190ad9`, or the send is refused.
 - **Lock file.** The holder refuses a lock file that is not a regular file owned by this user, and never blocks on a FIFO.
 - **Operation index.** A lookup by operation_id answers only when the call carries that very id.
+
+
+## Exact-transaction outbox recovery
+
+`stageTxid` durably binds the transaction before any broadcast. A separate
+`transmit_authorized` event precedes transmit. A crash before that event is locally
+proven not sent; a crash after it is resolved by positive evidence or by continuing the
+original signed transaction. Startup may resume only authorized outbox items. Older
+staged two-step calls require an explicit `zcash_pay` request with `resume: true`, the
+original key, and unchanged payment parameters. Ordinary replays and status never
+transmit. No new call, key binding, transaction calculation or output selection occurs.
+
+A resumer owns the exclusive payment lock and requires: matching key/intent hash,
+exclusive txid ownership, the original wallet fingerprint, current cap and allow-list,
+and exactly one verified wallet transaction with the original amount, recipient and
+memo. Already transmitted/mined transactions are reconciled without retransmission.
+Only a still-calculated transaction is passed to `transmit <txid>`, with no sync in
+that process. A durable financial audit row precedes transmission; another audit row
+records the outcome. A failed result-event write cannot hide an acknowledged txid
+from the response. A retry refusal never proves that the first attempt was not sent.
+
+The pinned Zingo source at 181a91103b93e7155017d4a05af0722b013b774e implements
+`transmit` in `zingo-cli/src/commands.rs` and sends the stored transaction bytes in
+`zingolib/src/lightclient/send.rs`. It refuses statuses other than Calculated and can
+mark a failed transmission Failed. This server does not rewrite wallet internals or
+rebuild an expired/failed transaction. Such backend failures remain unresolved until
+reliable evidence is available; arbitrary reorg finality cannot be invented locally.
+
+Tests cover SIGKILL after durable authorization, every instrumented durable resume
+operation, simultaneous resumers in separate processes, lost acknowledgements,
+result-write failure, policy revocation, incorrect wallet identity, bad/duplicate
+outputs and exhausted audit capacity. These are local fixtures, not a claim of a
+funded testnet run or a new V12 approval.

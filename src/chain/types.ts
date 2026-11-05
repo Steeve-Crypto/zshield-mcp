@@ -12,6 +12,8 @@ export interface ChainAdapter {
    */
   readonly stateDir?: string;
   pay(req: PaymentRequest): Promise<PaymentReceipt>;
+  /** Transmit ONLY this stored signed txid; must never build, calculate, or select another tx. */
+  resumeSigned?(txid: string, opts: { fence: () => void; timeoutMs: number }): Promise<void>;
   /** Read-only. Never moves funds. */
   getBalance(opts?: { offline?: boolean }): Promise<WalletBalance>;
   /** Read-only. The wallet's current unified address. */

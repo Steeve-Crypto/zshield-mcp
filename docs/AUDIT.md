@@ -15,7 +15,7 @@ The audit log is the human trail. Payment state lives in the payment store in th
 - The `pending` row of a call with a key carries `idempotency_key` and `params_sha256`, the hash of the amount in zatoshis, recipient, and memo.
 - A repeat call with the same key writes its own row with status `replayed`, its own `call_id`, and `replay_of` set to the first call's `call_id`. It sends nothing. It copies `allowlist_hit` and `view_key_fingerprint` from the first call, so the row says which wallet and which allow-list decision it repeats.
 - Before sending, a call with a key re-reads the store under the wallet lock and binds the key with an exclusive create. If another server process bound the key first, the call is a replay (or `IDEMPOTENCY_CONFLICT`) and sends nothing.
-- At startup, pending calls are reconciled by identity when available. Live chain absence stays `unknown`; only a local non-transmission proof produces `not_sent`. `not_found` is mock expiry only. Legacy live expired/failed records are re-indexed for review, never treated as irreversible finality. Recovery never broadcasts.
+- At startup, pending calls are reconciled by identity when available. Live chain absence stays `unknown`; only a local non-transmission proof produces `not_sent`. `not_found` is mock expiry only. Legacy live expired/failed records are re-indexed for review, never treated as irreversible finality. Recovery may transmit only an authorized, verified original signed transaction by its exact txid. It never builds a replacement; a financial row must be durable before a resume. Status remains read-only.
 
 ## File safety
 
@@ -45,7 +45,7 @@ At startup the audit dir and the fallback file are checked, and so is every dire
 | `idempotency_key` | string? | The key the caller passed |
 | `params_sha256` | string? | `pending` rows with a key: the hash the key is bound to |
 | `replay_of` | string? | `replayed` rows: the `call_id` of the first call |
-| `chain_tip` | number? | Testnet `pending` rows: the height an expiry is proven from, the highest of the server tip, the wallet height, and the recorded tip mark |
+| `chain_tip` | number? | Testnet `pending` rows: the historical expiry anchor (diagnostic, never proof of live non-payment), the highest of the server tip, the wallet height, and the recorded tip mark |
 | `wallet_height` | number? | Testnet `pending` rows: the wallet's own scanned height at the pre-send check |
 | `truncated` | boolean? | Present when the row was shortened to fit the size limit |
 

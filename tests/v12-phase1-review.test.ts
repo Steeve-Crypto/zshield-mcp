@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn, spawnSync } from "node:child_process";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import { checkServerUrl } from "../src/config.ts";
 import { createRedactor, displayUrl, redact, registerServerUrl } from "../src/redact.ts";
 import { reserveAudit, AUDIT_SLOT_BYTES } from "../src/audit/budget.ts";
@@ -13,7 +13,7 @@ import { withWalletRead } from "../src/tools/read.ts";
 import { acquireWalletLock } from "../src/payments/lock.ts";
 import { PaymentStore } from "../src/payments/store.ts";
 import { reconcile } from "../src/payments/recovery.ts";
-import { withReadBudget, WALLET_READ_BUDGET_MS, LIVE_PAYMENT_READ_WAIT_MS } from "../src/chain/read-budget.ts";
+import { withReadBudget, withOperationBudget, WALLET_READ_BUDGET_MS, LIVE_PAYMENT_READ_WAIT_MS } from "../src/chain/read-budget.ts";
 import type { ChainAdapter } from "../src/chain/types.ts";
 
 const TX = "ab".repeat(32), R = "utest1" + "r".repeat(100);
@@ -105,6 +105,22 @@ describe("Phase 1 follow-up regressions", () => {
     await withReadBudget(() => chain.syncWallet(600000));
     assert.ok(timeout > 0 && timeout <= WALLET_READ_BUDGET_MS);
     assert.equal(grace, 500);
+  });
+  it("327847 sequential commands consume a shared deadline rather than restarting it", async () => {
+    let clock = 1000;
+    const timers: number[] = [];
+    const adapter = new LiveChainAdapter({ network: "testnet", runner: async (_b, args, options) => {
+      timers.push(options!.timeoutMs!);
+      if (args.at(-1) === "balance") {
+        clock += 35;
+        return fs.readFileSync(new URL("./fixtures/zingo/balance.txt", import.meta.url), "utf8");
+      }
+      return '{"spendable_balance":10000}';
+    } });
+    const hook = mock.method(Date, "now", () => clock);
+    try { await withOperationBudget(40, () => adapter.getBalance()); }
+    finally { hook.mock.restore(); }
+    assert.deepEqual(timers, [40, 5]);
   });
   it("327847 a locally queued writer closes the cross-process read gate before handoff", async () => {
     const store = new PaymentStore(fs.mkdtempSync(join(tmpdir(), "review-gate-")));

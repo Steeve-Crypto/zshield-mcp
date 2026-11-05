@@ -87,7 +87,7 @@ Other protections on every send:
 - **One send at a time per wallet, across processes.** A second call waits up to `SEND_QUEUE_WAIT_MS` (at least 20 seconds in live mode) for the first to finish, then gets `BUSY`. The paying process holds one OS lock (`flock` on `.zshield-state/send.flock`, held by a tiny `perl` child tied to the server process) for the whole send, from before the build to after the transmit. The kernel drops it the moment the process dies, so there is no lease, no timer and no stale-lock breaking. A frozen payer that is still alive keeps the lock until it finishes or dies, and nobody else sends meanwhile. Reads (`zcash_balance`, `zcash_receive_address`, `zcash_history`, and `zcash_payment_status` when it must read the wallet) return `BUSY` while a send holds the lock, so none runs between the build and the transmit. Under the lock the server also re-reads the key, so a key used by another process is replayed instead of paid again.
 - **Two-stage send, exact memo.** A live send first builds and signs the transaction (`send` and `calculate`, nothing is broadcast), records its txid on the call, and only then runs `transmit <txid>`. A timeout or crash during the broadcast therefore leaves the call's own txid on record, and recovery asks the wallet about that txid. The memo is checked once and is exact: no trimming, no control characters, no leading or trailing whitespace, at most 512 UTF-8 bytes, and an empty memo means no memo. The same string is what policy checks, the audit row and intent hold, and what is sent.
 - **Health check first (testnet mode).** Before the `pending` row, the server syncs the wallet for at most `HEALTH_SYNC_TIMEOUT_MS`, then checks that the lightwalletd server answers, the wallet is within `HEALTH_MAX_LAG_BLOCKS` of the chain tip, and spendable funds cover the amount plus a 0.0001 ZEC fee estimate. A failure returns `CHAIN_UNREACHABLE`, `WALLET_NOT_SYNCED`, or `INSUFFICIENT_FUNDS` and sends nothing. A wallet whose sync has not finished can report a spendable balance of 0, so low funds after an unfinished sync are `WALLET_NOT_SYNCED`, not `INSUFFICIENT_FUNDS`.
-- **Recovery on startup.** If the server stopped between the `pending` row and the result row, the next start looks for the send in wallet history. A transaction counts only if the recipient (or its unified address), the amount, and the memo are all equal, and it is placed after the call started by its time or its block height. A call with no memo never matches someone else's memo payment, and a call that had no memo is never confirmed from history by a lone match: it stays `unknown` with the candidate listed. A call with a recorded txid is settled by that txid alone. History entries are also checked against `zingo-cli`'s JSON (`notes all`, `coins all`, `messages`), and an entry the JSON does not vouch for never confirms a call. Identical calls started close together stay `unknown`. It reads the whole history, never a recent slice, and writes one `zcash_pay_recovery` row: `confirmed` with the txid, `not_found` only with proof, or `unknown`. Proof means the wallet is synced, the whole history was read, the server's tip agrees with the wallet and has not gone backwards, the wallet has scanned more than 181 blocks past the height recorded before the send (the 120 block expiry of the pinned zingolib, plus a 60 block margin), and at least two hours have passed. A send is refused up front when the server's tip is below the wallet's own height or below a tip it reported before. Each run handles at most 100 calls within a time budget and leaves the rest for the next start. States only move forward: a call once seen as sent or mined never goes back. It never sends again. It holds the wallet lock while it runs and syncs first, for at most `STATUS_SYNC_TIMEOUT_MS`, so a payment made right after startup waits for it and may get `BUSY`. `unknown` ones are checked again on the next start.
+- **Recovery on startup.** Pending calls are reconciled by their durable transaction identity under the wallet lock. Live chain absence, elapsed time, and expiry heights never prove irreversible non-payment. Calls that never reached durable transmit authorization have a local non-transmission proof. An authorized call still listed as a verified, matching calculated transaction can resume that exact txid after audit, wallet-identity, binding, and current-policy checks. Recovery never creates a replacement transaction. Ordinary replays and status remain read-only; older staged calls can be resumed explicitly with the original parameters, original key, and `resume: true`. Missing, contradictory, expired, or failed evidence remains unresolved.
 
 ## Resource: `zshield://policy`
 
@@ -178,7 +178,7 @@ Branch on `code`. It is stable. `message` is for people and may change. `error` 
 
 | Code | Meaning |
 |------|---------|
-| `SEND_UNCONFIRMED` | `zingo-cli` timed out, was killed, or finished without a txid or an error. The payment may have been broadcast. Do not pay again: call `zcash_payment_status` with the `call_id`, which reports `expired` only once the payment is proven never sent. The response and the audit row list `possible_sends`, sent transactions in the whole wallet history to the same recipient with the same amount (and memo, when one was given) found right after the failure, each with a `confidence`. `possible_txids` holds just their txids. Amount alone never counts as a match. An empty list does not prove nothing went out, because the wallet may not have synced the send yet |
+| `SEND_UNCONFIRMED` | `zingo-cli` timed out, was killed, or finished without a txid or an error. The payment may have been broadcast. Do not pay again: call `zcash_payment_status` with the `call_id`, which keeps uncertain live outcomes unresolved; expiry alone is not proof of non-payment. The response and the audit row list `possible_sends`, sent transactions in the whole wallet history to the same recipient with the same amount (and memo, when one was given) found right after the failure, each with a `confidence`. `possible_txids` holds just their txids. Amount alone never counts as a match. An empty list does not prove nothing went out, because the wallet may not have synced the send yet |
 | `PAYMENT_PENDING` | A repeat call with an `idempotency_key` whose first call has a `pending` row and no result yet. Nothing was sent again. Call `zcash_payment_status` with the key |
 
 Checks run in this order, and the first failure decides the code: recipient and memo size, allow-list file, amount, cap, address network (testnet mode only), allow-list match.
@@ -515,9 +515,9 @@ Signed transaction IDs and transmit authorization are recorded separately. New l
 calls cannot transmit before the authorization event is durable. Recovery can therefore
 settle a crash before authorization as `not_sent`, even if a signed txid exists. A final
 fence failure or authenticated wallet-wrapper `BUSY` refusal also proves no transmit
-started and releases the interlock. A crash after authorization remains ambiguous;
-legacy records, chain absence, and a wallet's `calculated` label alone do not prove
-non-payment. Recovery never authorizes a replacement payment from those observations.
+started and releases the interlock. A crash after authorization is recovered by resuming the same verified signed txid,
+not by declaring it unsent. Legacy records, chain absence, and a wallet's `calculated`
+label alone do not prove non-payment. Recovery never builds a replacement payment.
 
 All MCP wallet reads and status work share one 10-second deadline across their CLI
 commands and sync, with a 500 ms sync-save grace and at most 5 seconds of CLI kill
@@ -537,3 +537,27 @@ charged rows, with `flock`, truncation and fsync performed before an append is a
 Failed or interrupted reservations can overcharge but cannot silently reclaim capacity.
 Concurrent processes share the counters. Existing slot reservations continue to count;
 no automatic cleanup, counter reset, or financial-state deletion is performed.
+
+
+### Resuming the original signed payment
+
+An ordinary repeated `zcash_pay` call still returns its stored outcome without sending.
+For an older unresolved two-step call, use the same amount, recipient, memo and
+idempotency key with `resume: true`. An unknown key cannot start a payment in resume
+mode. The binding and txid owner, original wallet fingerprint, exact outputs, current
+allow-list and spending cap must agree. Financial audit evidence must be durable
+before the adapter runs only `transmit <original-txid>`; it never runs `send` or
+`calculate` during recovery. Concurrent resumers share the payment lock. A failure of
+this retry is not proof that the first attempt was never sent.
+
+Startup recovery resumes only calls with a durable transmit-authorization event. This
+closes the server crash between that event and starting transmit. Its sync, identity
+reads and possible resume share the recovery deadline. Status queries never resume.
+A missing signed transaction, failed/expired wallet transaction, revoked policy,
+unavailable wallet or network, and unverified evidence still fail closed. In
+particular, the pinned Zingo refuses to transmit a transaction already marked failed;
+recovery cannot manufacture a safe replacement from that observation.
+
+Audit reservation counters require Perl with `flock` and `IO::Handle::sync`, including
+for mock-mode audit writes. Without it, durable audit writes fail closed. Live mode
+continues to require a POSIX platform; mock mode on Windows needs a compatible Perl.

@@ -6,7 +6,11 @@ export const WALLET_READ_BUDGET_MS = 10_000;
 export const LIVE_PAYMENT_READ_WAIT_MS = 20_000;
 const deadlines = new AsyncLocalStorage<number>();
 export function withReadBudget<T>(fn: () => T): T {
-  return deadlines.run(Math.min(deadlines.getStore() ?? Infinity, Date.now() + WALLET_READ_BUDGET_MS), fn);
+  return withOperationBudget(WALLET_READ_BUDGET_MS, fn);
+}
+/** Bound maintenance/recovery as a whole, rather than restarting a timeout per command. */
+export function withOperationBudget<T>(budgetMs: number, fn: () => T): T {
+  return deadlines.run(Math.min(deadlines.getStore() ?? Infinity, Date.now() + Math.max(0, budgetMs)), fn);
 }
 export function readCommandBudget(requested: number): number {
   const deadline = deadlines.getStore();
