@@ -30,7 +30,7 @@ const KNOWN_MODES = ["mock", "live", "testnet"];
 export const MIN_URL_SECRET_LENGTH = 8;
 
 /**
- * LIGHTWALLETD_URL must be an http or https URL. Credentials in it (a user, a password, a
+ * LIGHTWALLETD_URL must be an http or https URL. Credentials in it (a user, a password, a path, a
  * query string, or a fragment) are refused, because zingo-cli only takes the server on
  * its command line, where other local users can read it. ZSHIELD_ALLOW_URL_CREDENTIALS=1
  * accepts them anyway; each secret part must then be at least 8 characters. Messages
@@ -38,6 +38,11 @@ export const MIN_URL_SECRET_LENGTH = 8;
  */
 export function checkServerUrl(url: string | undefined, env: NodeJS.ProcessEnv = process.env): string | undefined {
   if (url === undefined || url.trim() === "") return undefined;
+  // WHATWG URL parsing erases dot segments and treats backslashes as slashes.
+  // Refuse ambiguous spellings before they can conceal a path token in argv.
+  if (!/^https?:\/\//i.test(url) || /[\\\s]/.test(url)) throw new Error("LIGHTWALLETD_URL must use an unambiguous http:// or https:// URL.");
+  const rawPath = url.match(/^https?:\/\/[^/?#]*([^?#]*)/i)?.[1] ?? "";
+  if (rawPath.split("/").some((part) => /^(?:\.|%2e){1,2}$/i.test(part))) throw new Error("LIGHTWALLETD_URL path must not contain dot segments.");
   let u: URL;
   try {
     u = new URL(url);
@@ -49,10 +54,13 @@ export function checkServerUrl(url: string | undefined, env: NodeJS.ProcessEnv =
   if (u.protocol !== "https:") throw new Error("Credential-bearing LIGHTWALLETD_URL requires https://.");
   if (env.ZSHIELD_ALLOW_URL_CREDENTIALS !== "1") {
     throw new Error(
-      "LIGHTWALLETD_URL carries credentials (a user, password, query string, or fragment). zingo-cli takes the server only on its command line, where other local users can read it. Use a URL without credentials, or set ZSHIELD_ALLOW_URL_CREDENTIALS=1 to accept that risk."
+      "LIGHTWALLETD_URL carries credentials (a user, password, path, query string, or fragment). zingo-cli takes the server only on its command line, where other local users can read it. Use a URL without credentials, or set ZSHIELD_ALLOW_URL_CREDENTIALS=1 to accept that risk."
     );
   }
-  const parts = [u.username, u.password, u.hash.slice(1), ...[...u.searchParams.values()]].filter((p) => p !== "");
+  const pathParts = u.pathname.split("/").filter(Boolean);
+  // Every non-root path is potentially a bearer credential. Short routing segments
+  // cannot be registered safely, so path-bearing endpoints must use long segments.
+  const parts = [u.username, u.password, ...pathParts.map((p) => decodeURIComponent(p)), u.hash.slice(1), ...[...u.searchParams.values()]].filter((p) => p !== "");
   if (parts.some((p) => p.length < MIN_URL_SECRET_LENGTH)) {
     throw new Error(`Each credential in LIGHTWALLETD_URL must be at least ${MIN_URL_SECRET_LENGTH} characters so it can be redacted.`);
   }

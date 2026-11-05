@@ -140,6 +140,9 @@ export async function reconcile(record: CallRecord, chain: ChainAdapter, opts: R
   if (opts.live && intent.two_step && !record.stagedTxid && !record.txid) {
     return { ...base, status: "not_sent", note: "No transaction was durably staged for this two-step call, so its send path could not transmit. Nothing was sent." };
   }
+  if (opts.live && intent.transmit_tracked && !record.txid && !record.events.some((e) => e.transmit_authorized)) {
+    return { ...base, status: "not_sent", note: "Transmit was never durably authorized for this call. Nothing was sent." };
+  }
   if (record.stagedTxid ?? record.txid) return reconcileStaged(base, record, (record.stagedTxid ?? record.txid)!, intent, chain, opts, now, startedAt);
   const target = { amountZats: BigInt(intent.amount_zats), recipient: intent.recipient, memo: intent.memo, notBeforeHeight: intent.wallet_height ?? intent.chain_tip };
   let matches: PossibleSend[];

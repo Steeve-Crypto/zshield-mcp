@@ -1,3 +1,4 @@
+import { readCommandBudget, readQuitGrace } from "./read-budget.js";
 import { projectHistory, streamingHistoryRunner, type HistorySelection } from "./history-stream.js";
 import { checkServerUrl } from "../config.js";
 import { execFile } from "node:child_process";
@@ -248,6 +249,7 @@ export const VIEWKEY_BACKOFF_MAX_MS = 60_000;
  */
 export class LiveChainAdapter implements ChainAdapter {
   readonly stagesBeforeBroadcast = true as const;
+  readonly tracksTransmitAuthorization = true as const;
   readonly mode = "live" as const;
   readonly bin: string;
   readonly dataDir: string;
@@ -318,6 +320,7 @@ export class LiveChainAdapter implements ChainAdapter {
 
   /** Runs zingo-cli with the OS wallet lock options added. */
   private exec(args: string[], opts: RunOptions = {}): Promise<string> {
+    opts = { ...opts, timeoutMs: readCommandBudget(opts.timeoutMs ?? SEND_TIMEOUT_MS) };
     return this.runner(this.bin, args, this.lockFile ? { lockFile: this.lockFile, ...opts } : opts);
   }
 
@@ -354,7 +357,8 @@ export class LiveChainAdapter implements ChainAdapter {
     if (timeoutMs <= 0) return { complete: false, elapsedMs: 0, detail: "sync skipped (timeout is 0)" };
     const args = ["--chain", "testnet", "--server", this.server, "--data-dir", this.walletPath];
     try {
-      const r = await this.syncer(this.bin, args, { timeoutMs, ...(this.lockFile ? { lockFile: this.lockFile } : {}) });
+      timeoutMs = readCommandBudget(timeoutMs);
+      const r = await this.syncer(this.bin, args, { timeoutMs, quitGraceMs: readQuitGrace(), ...(this.lockFile ? { lockFile: this.lockFile } : {}) });
       return r.detail ? { ...r, detail: redact(r.detail) } : r;
     } catch (e) {
       return { complete: false, elapsedMs: 0, detail: redact(e instanceof Error ? e.message : String(e)) };
@@ -584,9 +588,10 @@ export class LiveChainAdapter implements ChainAdapter {
     req.stage?.(txid);
     // A lost lock stops here, before the wallet process starts.
     req.fence?.();
+    this.assertPinned();
+    req.beforeTransmit?.();
     let sent: string;
     try {
-      this.assertPinned();
       sent = await this.exec(this.baseArgs(), {
         timeoutMs: SEND_TIMEOUT_MS,
         input: transmitInput,

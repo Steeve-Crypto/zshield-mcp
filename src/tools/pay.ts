@@ -1,3 +1,4 @@
+import { LIVE_PAYMENT_READ_WAIT_MS } from "../chain/read-budget.js";
 import { assertFingerprintSalt } from "../config.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -615,7 +616,10 @@ async function runPay(
   let lock: WalletLock | undefined;
   if (policyPassed && amountZats !== undefined) {
     try {
-      lock = await acquireWalletLock(store, config.sendQueueWaitMs ?? SEND_QUEUE_WAIT_DEFAULT_MS, "zcash_pay");
+      const configuredWait = config.sendQueueWaitMs ?? SEND_QUEUE_WAIT_DEFAULT_MS;
+      // A live payment must outwait one admitted read, including process termination.
+      const waitMs = config.chainMode === "live" ? Math.max(configuredWait, LIVE_PAYMENT_READ_WAIT_MS) : configuredWait;
+      lock = await acquireWalletLock(store, waitMs, "zcash_pay");
     } catch (e) {
       policyPassed = false;
       if (e instanceof BusyError) fail("error", "BUSY", e.message);
@@ -747,6 +751,7 @@ async function runPay(
         chain_tip: chainTip,
         wallet_height: walletHeight,
         ...(chain.stagesBeforeBroadcast ? { two_step: true } : {}),
+        ...(chain.tracksTransmitAuthorization ? { transmit_tracked: true } : {}),
       };
       // Charge audit capacity before creating durable payment state. A flood after
       // exhaustion must not grow calls/ or ops/ with intents that cannot be sent.
@@ -822,8 +827,6 @@ async function runPay(
         }
       }
 
-      let staged = false;
-      let stagedTxid: string | undefined;
       if (ready) {
         try {
           const receipt = await chain.pay({
@@ -836,6 +839,10 @@ async function runPay(
               } catch (e) {
                 throw new FenceError(lostLockMessage(e));
               }
+            },
+            beforeTransmit: () => {
+              lock!.assertHeld();
+              store.authorizeTransmit(callId, now());
             },
             stage: (txid) => {
               // Between signing and transmitting: the lock must still be this call's, and
@@ -850,8 +857,6 @@ async function runPay(
               } catch (e) {
                 throw new Error(`The signed transaction could not be recorded, so it was not transmitted: ${e instanceof Error ? e.message : String(e)}`);
               }
-              staged = true;
-              stagedTxid = txid;
             },
           });
           mockTxid = receipt.txid;
@@ -878,12 +883,6 @@ async function runPay(
                   (txid) => safeOwner(store, txid),
                   callId
                 );
-            recordSafely(store, { ts: now(), call_id: callId, state: "unknown", code, error, possible_sends: possibleSends, by: "send" }, warnings);
-          } else if ((e instanceof FenceError || e instanceof WalletBusyError) && staged && stagedTxid) {
-            // A signed transaction is on record, so "not sent" is not a safe claim: it stays
-            // pending/unknown with the staged txid as the candidate, and recovery reconciles it.
-            fail("unknown", "SEND_UNCONFIRMED", `${SEND_UNCONFIRMED_GUIDANCE} Detail: ${redactInput(e.message, input)}`);
-            possibleSends = [{ txid: stagedTxid, confidence: "high", matched: ["txid"], status: "signed" }];
             recordSafely(store, { ts: now(), call_id: callId, state: "unknown", code, error, possible_sends: possibleSends, by: "send" }, warnings);
           } else if (e instanceof FenceError || e instanceof WalletBusyError) {
             // Neither started zingo-cli: the lock was lost at the fence, or a zingo-cli left

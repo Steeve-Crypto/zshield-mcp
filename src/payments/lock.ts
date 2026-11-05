@@ -194,21 +194,24 @@ export async function acquireWalletLock(
   purpose?: string
 ): Promise<WalletLock> {
   const start = Date.now();
-  const releaseLocal = await sendLockFor(store.dir).acquire(waitMs, purpose === "zcash_pay");
+  const remaining = () => Math.max(0, waitMs - (Date.now() - start));
+  let releaseLocal: (() => void) | undefined;
   let priority: WalletLock | undefined;
+  let os: WalletLock | undefined;
   try {
-    let os: WalletLock | undefined;
     try {
       if (process.platform === "win32") throw new Error("The OS wallet lock is not supported on this platform.");
-      // A writer owns the turnstile while waiting for the wallet. Readers hold it
-      // only during admission, so later readers cannot overtake an admitted writer.
-      priority = await takeOsLock(join(store.dir, "send-priority.flock"), Math.max(0, waitMs - (Date.now() - start)), purpose !== "zcash_pay");
-      os = await takeOsLock(join(store.dir, WALLET_LOCK_FILE), Math.max(0, waitMs - (Date.now() - start)));
-      if (purpose !== "zcash_pay") { await priority.release(); priority = undefined; }
+      // Take the turnstile BEFORE waiting on the local queue. Otherwise a writer
+      // waiting behind its own read cannot stop another process admitting a new read
+      // at handoff, and can consume two read budgets before it reaches the wallet.
+      priority = await takeOsLock(join(store.dir, "send-priority.flock"), remaining(), purpose !== "zcash_pay");
     } catch (e) {
-      await priority?.release();
-      priority = undefined;
       if (e instanceof BusyError || store.requireOsLock) throw e;
+    }
+    releaseLocal = await sendLockFor(store.dir).acquire(remaining(), purpose === "zcash_pay");
+    if (priority) {
+      os = await takeOsLock(join(store.dir, WALLET_LOCK_FILE), remaining());
+      if (purpose !== "zcash_pay") { await priority.release(); priority = undefined; }
     }
     let released = false;
     return {
@@ -223,14 +226,14 @@ export async function acquireWalletLock(
         try {
           await os?.release();
         } finally {
-          await priority?.release();
-          releaseLocal();
+          try { await priority?.release(); } finally { releaseLocal?.(); }
         }
       },
     };
   } catch (e) {
-    await priority?.release();
-    releaseLocal();
+    try { await os?.release(); } finally {
+      try { await priority?.release(); } finally { releaseLocal?.(); }
+    }
     throw e;
   }
 }

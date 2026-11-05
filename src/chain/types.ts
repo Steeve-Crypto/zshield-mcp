@@ -5,6 +5,7 @@ export interface ChainAdapter {
   readonly mode: "mock" | "live";
   /** This adapter cannot transmit until req.stage has durably recorded the txid. */
   readonly stagesBeforeBroadcast?: true;
+  readonly tracksTransmitAuthorization?: true;
   /**
    * The payment store folder for this wallet, absolute, shared by every process on it.
    * Undefined for a chain with no wallet directory; the store then sits beside the audit dir.

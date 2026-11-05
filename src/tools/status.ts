@@ -1,3 +1,4 @@
+import { withReadBudget } from "../chain/read-budget.js";
 import { findTransaction } from "../chain/types.js";
 import { z } from "zod";
 import { TESTNET_EXPLORER } from "../chain/live.js";
@@ -175,25 +176,27 @@ export async function paymentStatus(
     throw e;
   }
   try {
-    const sync = await boundedSync(chain);
-    // Re-read: another process may have settled the call while this one synced.
-    const record = found.store.readCall(found.callId) ?? found.record;
-    const s = settledStatus(record, base, config.chainMode === "live") ?? (await fromChain(config, chain, found.store, record, base, now, sync ?? { complete: false, elapsedMs: 0, detail: "not synced" }));
-    if (!chain.syncWallet || sync?.complete) return s;
-    let walletHeight = s.wallet_height;
-    if (walletHeight === undefined) {
-      try {
-        walletHeight = await chain.walletHeight?.();
-      } catch {
-        walletHeight = undefined;
+    return await withReadBudget(async () => {
+      const sync = await boundedSync(chain);
+      // Re-read: another process may have settled the call while this one synced.
+      const record = found.store.readCall(found.callId) ?? found.record;
+      const s = settledStatus(record, base, config.chainMode === "live") ?? (await fromChain(config, chain, found.store, record, base, now, sync ?? { complete: false, elapsedMs: 0, detail: "not synced" }));
+      if (!chain.syncWallet || sync?.complete) return s;
+      let walletHeight = s.wallet_height;
+      if (walletHeight === undefined) {
+        try {
+          walletHeight = await chain.walletHeight?.();
+        } catch {
+          walletHeight = undefined;
+        }
       }
-    }
-    return {
-      ...s,
-      stale: true,
-      wallet_height: walletHeight,
-      sync_note: `Wallet sync did not finish: ${sync?.detail ?? "no detail"}. This is the last state the wallet knew.`,
-    };
+      return {
+        ...s,
+        stale: true,
+        wallet_height: walletHeight,
+        sync_note: `Wallet sync did not finish: ${sync?.detail ?? "no detail"}. This is the last state the wallet knew.`,
+      };
+    });
   } finally {
     await lock.release();
   }
