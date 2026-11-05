@@ -1,6 +1,6 @@
 # Operator controls
 
-These controls add spending restrictions. They do not enable mainnet or constitute
+These controls add spending restrictions. Mainnet configuration below requires them; they do not constitute
 independent release approval. Operators must isolate the service account from the
 model's general filesystem/command tools: a process with the service's UID can
 change its policy and state. MCP payment tools cannot modify these controls.
@@ -127,7 +127,7 @@ certification or a statement about network finality.
 Set `FINANCIAL_CONTROLS_REQUIRED=1` for the strict profile. Startup refuses missing
 cumulative allowance, fewer than two distinct approval authorities, an unspecified
 wallet directory, an unpinned executable, unsupported OS or an unqualified wallet
-filesystem. This profile currently supports Linux testnet on local ext4, XFS or
+filesystem. This profile currently supports Linux live deployment on local ext4, XFS or
 Btrfs; storage durability still needs testing on the deployment's actual hardware.
 
 Set `ZINGO_BIN` to an absolute executable path and `ZINGO_BINARY_SHA256` to the
@@ -137,8 +137,7 @@ A replaced or modified executable is refused. The digest must come from the revi
 build process, not blindly from whichever binary happens to be installed. Protect
 service configuration and executable paths from agent-controlled filesystem tools.
 
-This profile enforces controls; it does not enable mainnet or certify a release.
-The current code still refuses mainnet. Native testnet evidence, external review of
+Mainnet automatically requires this profile. Native testnet evidence, external review of
 the exact commit, fee-policy review, storage/restore drills and deployment ownership
 remain release decisions with evidence that local fixtures cannot manufacture.
 
@@ -147,3 +146,19 @@ remain release decisions with evidence that local fixtures cannot manufacture.
 New spending ledgers use version 2. Every payment reserves principal before signing and the exact positive calculated fee before transmission. Fee receipts survive interrupted writes, are idempotent, and are never refunded. Resume requires the original durable fee to agree with the wallet transaction; a missing or changed fee blocks retransmission. The per-call cap still limits recipient principal; the cumulative cap limits principal plus fees.
 
 Version 1 ledgers are refused: their historical fees were not accounted for. Never delete or reset a ledger to upgrade. Existing historical records without durable fee evidence require operator reconciliation before enabling this allowance. `budget-init` refuses incomplete historical fee evidence. Monitoring exposes `reserved_spending_zats` and policy exposes `cumulative_spending_cap_zec`.
+
+### Mainnet configuration
+
+Mainnet is opt-in. All settings below are required, in addition to the normal allow-list, fingerprint salt and audit settings:
+
+- `CHAIN_MODE=mainnet` and `MAINNET_ENABLED=1`.
+- Explicit absolute `ZINGO_DATA_DIR`, absolute `ZINGO_BIN`, and approved `ZINGO_BINARY_SHA256`.
+- Explicit HTTPS `LIGHTWALLETD_URL` and lowercase eight-hex-digit `EXPECTED_CONSENSUS_BRANCH` from the reviewed deployment's active mainnet consensus configuration. There is deliberately no mainnet branch default; a network upgrade requires operator review and configuration update.
+- Positive `TOTAL_SPENDING_CAP_ZEC`, `APPROVAL_DIR`, `APPROVAL_PUBLIC_KEYS_JSON`, and `APPROVAL_THRESHOLD` of at least two distinct Ed25519 authorities.
+- Linux with a local ext4, XFS or Btrfs wallet volume. `FINANCIAL_CONTROLS_REQUIRED=0` cannot disable this profile on mainnet.
+
+The service passes `--chain mainnet` to every CLI command. It verifies a mainnet UFVK and affirmative `chain_name=main` plus the expected branch before signing, again before transmitting, and when resuming. Testnet recipients and approvals cannot cross into mainnet. A private `.zshield-network` marker binds the wallet directory to its chain; a mismatched or deleted marker fails closed. Never reuse a testnet wallet directory for mainnet. Unbound historical payment state cannot be adopted as mainnet; legacy intents cannot resume there.
+
+Approval payloads include the network in their signed bytes. Generate a new mainnet payload with `operator approval-payload`; a testnet approval is invalid on mainnet even if every other field matches. The recipient amount is authorized by the signed payload; fees are constrained by the operator's cumulative spending policy. Protect that policy configuration as part of the payment authority.
+
+The command format was checked against zingolib commit `181a91103b93e7155017d4a05af0722b013b774e`, `zingo-cli/src/lib.rs`. The included native integration harness remains testnet-only; no mainnet broadcast was performed during this implementation.

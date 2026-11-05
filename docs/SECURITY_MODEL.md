@@ -4,7 +4,7 @@ This document describes what zshield-mcp protects, what it trusts, and where it 
 
 ## Summary
 
-zshield-mcp lets an AI agent ask for shielded ZEC payments without ever holding a key. The agent can only call MCP tools. The server checks every payment against a per-call cap, an allow-list, and the network, writes an audit row, and only then asks `zingo-cli` to send. Mainnet is refused at several layers. The live adapter runs on Zcash testnet only, and the default is a mock chain that moves nothing.
+zshield-mcp lets an AI agent ask for shielded ZEC payments without ever holding a key. The agent can only call MCP tools. The server checks every payment against a per-call cap, an allow-list, and the network, writes an audit row, and only then asks `zingo-cli` to send. The default is a mock chain that moves nothing. Mainnet requires explicit opt-in and mandatory financial controls; live operations bind the wallet, recipient and approval to the configured network.
 
 It is a policy gate for a single local operator. It is not a custody system, it does not authenticate anyone, and it does not limit total spending over time.
 
@@ -24,7 +24,7 @@ Limits today:
 
 ## What the server can do
 
-- Send ZEC from the configured wallet to an address on the allow-list, up to `SPENDING_CAP_ZEC` per call, on testnet only. In mock mode it only updates the mock ledger.
+- Send ZEC from the configured wallet to an address on the allow-list, up to `SPENDING_CAP_ZEC` per call, on the explicitly configured network. In mock mode it only updates the mock ledger.
 - Read the wallet's balance, current unified address, and recent transactions through `zcash_balance`, `zcash_receive_address`, and `zcash_history`, and the state of an earlier payment through `zcash_payment_status`.
 - Read the allow-list file on every `zcash_pay` call and every read of `zshield://policy`.
 - Append rows to JSONL files in `AUDIT_DIR`.
@@ -34,25 +34,19 @@ Limits today:
 
 - Pay an address that is not an exact match for an allow-list entry.
 - Pay more than the cap in one call. Amounts and the cap are compared as integer zatoshis, so there is no float rounding to slip past the cap.
-- Pay on mainnet. See "Mainnet refusal" below.
+- Switch networks through MCP input or bypass the mandatory mainnet controls.
 - Change its own policy. No tool writes the allow-list, the cap, the mode, or the audit settings.
 - Export the seed or a viewing key to the agent. No code path calls `zingo-cli recovery_info`. `export_ufvk` runs only to compute the audit fingerprint, and the key stays in memory.
 - Run arbitrary `zingo-cli` commands on behalf of the agent. The server uses a fixed set of commands: `quicksend`, `balance`, `spendable_balance`, `addresses`, `transactions`, `export_ufvk`, and for the pre-send check `info` and `height`.
 - Send twice for one `idempotency_key`, or send anything during startup recovery or `zcash_payment_status`.
 
-## Mainnet refusal
+## Network isolation
 
-Mainnet is blocked at each of these layers:
+Mainnet requires `CHAIN_MODE=mainnet`, `MAINNET_ENABLED=1`, an explicit wallet and server, an approved binary digest, an expected consensus branch, a cumulative allowance and at least two approval authorities. Linux and qualified local storage are required. Testnet remains available without mainnet opt-in; `CHAIN_MODE=live` alone is refused.
 
-1. `CHAIN_MODE` must be `mock`, `live`, or `testnet`. Anything else, including `mainnet`, stops the server at startup.
-2. `CHAIN_MODE=live` alone also stops the server at startup. Only `testnet` turns on the live adapter.
-3. The live adapter refuses to construct unless its network is exactly `testnet`.
-4. Every `zingo-cli` call passes `--chain testnet`.
-5. In testnet mode `zcash_pay` refuses mainnet addresses (`u1`, `zs1`, `t1`, `t3`, `zc`) with `MAINNET_REFUSED` before writing any `pending` row or calling the CLI, even when the address is on the allow-list. Unknown address formats get `INVALID_ADDRESS`.
-6. The live adapter checks the recipient again before it builds a transaction. Recovery only transmits the bound original txid after checking its original recipient and outputs.
-7. `zcash_receive_address` refuses to return a mainnet address if the wallet ever reports one.
+Every CLI command names the configured chain. The wallet directory has a private persistent network binding, UFVKs and receive addresses must match, and payment recipients are checked before signing. Mainnet sends and resumes require affirmative server chain and branch evidence. Approvals sign the network; new intents record it, and legacy intents cannot resume on mainnet. Testnet mode still rejects mainnet recipients with `MAINNET_REFUSED`.
 
-The address checks are prefix checks. They do not decode or verify checksums. A malformed address with a testnet prefix passes these checks and is then rejected by `zingo-cli`, which surfaces as `CHAIN_ERROR`.
+Address admission checks prefixes, not checksums. The pinned backend performs full address validation. Fee-inclusive cumulative reservations must succeed before transmission and are retained after uncertain outcomes. See [operator controls](OPERATOR_CONTROLS.md) for configuration and ledger upgrade restrictions.
 
 ## Trust boundaries
 
@@ -107,7 +101,7 @@ What it does not give: it is not a signature. Anyone who knows the UFVK and the 
 | Concurrent calls race each other | One send at a time per wallet. A second send waits up to `SEND_QUEUE_WAIT_MS`, then gets `BUSY`. The lock is one OS `flock` on `.zshield-state/send.flock`, held by the paying process for the whole send by a small `perl` holder child that dies with its parent, so the kernel releases it on any death and nothing else ever takes it, not even from a frozen holder. Sends, syncs, reads, and recovery all take it. The holder is checked before the build, between build and transmit, and when `zingo-cli` starts, and the send stops if it is gone. Two wallet holders never overlap, whatever the payment keys: every `zingo-cli` process also goes through a `perl` wrapper that takes an exclusive `flock` on `.zshield-state/zingo.flock`, inherited by `zingo-cli` itself, so a `zingo-cli` left by a killed server is waited for. Each `idempotency_key` is bound by an exclusive hard link before the send, so two calls with one key cannot both send | Concurrent calls can each pass the per-call cap. There is no shared budget. The OS lock needs `perl` and a POSIX platform (live mode refuses to run without them, including on Windows), a local filesystem where `flock` works, and does not stop an operator starting `zingo-cli` by hand on the same wallet. A frozen payer that is still alive keeps the lock and other payers get `BUSY` until it finishes or dies. Over a network file system the store relies on `O_EXCL` and `link` being atomic `zcash_history` runs offline, one call per wallet at a time (`BUSY`), holds the wallet lock only while it reads (`BUSY` while a send holds it), and its commands share one deadline. Overlapping history reads share a scan, with at most two at once. |
 | A partial sync reports funds as gone | Before the funds check and before `zcash_payment_status`, a bounded sync runs through `zingo-cli`'s prompt and quits cleanly, so the wallet file is saved. Reads after it are offline, so they cannot start a second partial sync. Low funds after an unfinished sync are `WALLET_NOT_SYNCED`. Read tools never wait for the lock; while a send holds it they return `BUSY` | A slow server can make each sync use its full timeout. `zcash_payment_status` then answers with `stale: true` |
 | Float rounding slips past the cap | Amounts parsed as decimal strings into integer zatoshis; more than 8 decimals is rejected, not rounded | None known |
-| Payment lands on mainnet | Seven layers listed under "Mainnet refusal" | Prefix checks only, no checksum decode |
+| Payment crosses networks | Explicit opt-in, wallet binding, address and UFVK checks, signed network and server evidence | Prefix checks rely on backend checksum validation |
 | Payment with no audit trail | `pending` row is written before the send; the send is refused if that write fails | Rows can be edited afterwards by anyone with file access |
 | Retry after a timeout pays twice | `idempotency_key`: a repeat with the same key and parameters returns the first outcome and never sends, even after a restart. Post-send audit failures return the txid instead of throwing. A send that times out, is killed, or ends with no txid returns `SEND_UNCONFIRMED` with status `unknown` and lists `possible_sends`, matched on recipient, amount, and memo, never on amount alone. `zcash_payment_status` reports where it stands | A live payment needs a key (`IDEMPOTENCY_KEY_REQUIRED`). A client that retries with a new key can still pay twice. A send the wallet has not synced yet does not show up as a match. The txid is staged on the call before `transmit` runs, so recovery asks about that txid, not about a lookalike |
 | Server dies mid-send | Durable intent, staging, idempotency bindings and OS locks prevent replacement payments. Authorized outbox items can resume only the verified original signed txid after current policy and wallet identity checks. Known txids are streamed and corroborated against machine-readable wallet evidence. Legacy expired/failed records are re-indexed for review. Chain absence remains unknown regardless of finite expiry margins. | Unresolvable signed sends remain interlocked. Older records without identity may require manual investigation. |
@@ -137,7 +131,7 @@ All six are addressed on this branch, each with a regression test that fails on 
 
 ## Out of scope
 
-- Mainnet and real funds.
+- Claims of native-network validation without actual deployment evidence.
 - Custody of anyone else's keys, or more than one wallet.
 - Multiple users, authentication, or remote access to the MCP server.
 - A compromised host, OS user, Node.js runtime, npm dependency, or `zingo-cli` binary.
@@ -261,5 +255,5 @@ Limits: the checks run at startup and before sends, not continuously. A swap in 
 - Testnet adapter and viewing-key read: `src/chain/live.ts`
 - Fingerprint hash, durable writes, and the fallback file: `src/audit/log.ts`
 - Local path hardening: `src/fsafe.ts` (`assertSafeAncestors`), `src/policy/allowlist.ts`, `src/chain/pin.ts`
-- Startup refusal of mainnet and of an exposed wallet: `src/config.ts`, `src/startup.ts`, `src/chain/perms.ts`, `src/index.ts`
+- Startup enforcement of network controls and wallet privacy: `src/config.ts`, `src/startup.ts`, `src/chain/perms.ts`, `src/index.ts`
 - Stable codes: `src/errors.ts`

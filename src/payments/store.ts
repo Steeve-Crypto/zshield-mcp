@@ -39,6 +39,7 @@ export function isSettled(state: CallState): boolean {
 
 /** What a call set out to do, written before anything is sent. */
 export interface CallIntent {
+  network?: string;
   call_id: string;
   ts: string;
   amount_zec: number | string;

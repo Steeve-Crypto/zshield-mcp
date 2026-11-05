@@ -1,3 +1,4 @@
+import { bindWalletNetwork } from "./network-binding.js";
 import { pinExecutable } from "./executable.js";
 import { readCommandBudget, readQuitGrace } from "./read-budget.js";
 import { projectHistory, streamingHistoryRunner, type HistorySelection } from "./history-stream.js";
@@ -7,7 +8,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { ChainAdapter } from "./types.js";
 import type { ChainHealth, OutgoingNote, PaymentReceipt, PaymentRequest, TxSummary, WalletBalance } from "../types.js";
-import { assertTestnetAddress, NetworkError } from "./network.js";
+import { assertNetworkAddress, NetworkError } from "./network.js";
 import { addNoteFacts, corroborate, extractJson, messageFacts, type TxFacts, type WalletFacts } from "./corroborate.js";
 import { ChainUnreachableError, CliTimeoutError, SendOutcomeUnknownError } from "./outcome.js";
 import { defaultSyncer, type SyncResult, type WalletSyncer } from "./sync.js";
@@ -221,6 +222,8 @@ export function resolveWalletDir(dataDir: string | undefined, home: () => string
 
 export interface LiveOptions {
   network: string | undefined;
+  mainnetEnabled?: boolean;
+  expectedConsensusBranch?: string;
   zingoBin?: string;
   binarySha256?: string;
   dataDir?: string;
@@ -246,13 +249,15 @@ export const VIEWKEY_BACKOFF_BASE_MS = 1_000;
 export const VIEWKEY_BACKOFF_MAX_MS = 60_000;
 
 /**
- * Testnet adapter backed by zingo-cli and a public lightwalletd.
- * Refuses to construct unless network is exactly "testnet".
+ * Network-bound adapter backed by zingo-cli and an explicit lightwalletd.
+ * Mainnet requires explicit opt-in and deployment prerequisites.
  */
 export class LiveChainAdapter implements ChainAdapter {
   readonly stagesBeforeBroadcast = true as const;
   readonly tracksTransmitAuthorization = true as const;
   readonly mode = "live" as const;
+  readonly network: "testnet" | "mainnet";
+  readonly expectedConsensusBranch: string;
   readonly bin: string;
   readonly dataDir: string;
   /** The wallet's pinned real path, which is what zingo-cli is given. */
@@ -271,9 +276,14 @@ export class LiveChainAdapter implements ChainAdapter {
   private readonly now: () => number;
 
   constructor(opts: LiveOptions) {
-    if (opts.network !== "testnet") {
+    if (opts.network !== "testnet" && opts.network !== "mainnet") {
       throw new NetworkError("Live mode requires CHAIN_MODE=testnet. Mainnet is not supported.", "mode");
     }
+    if (opts.network === "mainnet" && (!opts.mainnetEnabled || !opts.dataDir || !opts.server || !/^[a-f0-9]{8}$/.test(opts.expectedConsensusBranch ?? "") || (!opts.runner && !opts.binarySha256))) {
+      throw new NetworkError("Mainnet requires explicit opt-in, wallet, server, branch and approved binary; use testnet otherwise.", "mode");
+    }
+    this.network = opts.network;
+    this.expectedConsensusBranch = opts.expectedConsensusBranch ?? EXPECTED_TESTNET_BRANCH;
     this.bin = opts.zingoBin ?? "zingo-cli";
     this.checkExecutable = opts.binarySha256 ? pinExecutable(this.bin, opts.binarySha256) : undefined;
     this.dataDir = resolveWalletDir(opts.dataDir);
@@ -285,7 +295,9 @@ export class LiveChainAdapter implements ChainAdapter {
       if (!opts.runner) throw new WalletDirError("zshield-mcp: the wallet directory does not exist or cannot be resolved. Create it with zingo-cli first.");
     }
     this.walletPath = this.pin?.path ?? this.dataDir;
+    if (this.pin) this.checkNetworkBinding = bindWalletNetwork(this.walletPath, this.network);
     this.server = checkServerUrl(opts.server) ?? "https://testnet.zec.rocks:443";
+    if (this.network === "mainnet" && new URL(this.server).protocol !== "https:") throw new NetworkError("Mainnet requires an HTTPS endpoint.", "mode");
     const privacy = createRedactor();
     this.runner = privacy.run(() => {
       registerServerUrl(this.server);
@@ -317,15 +329,17 @@ export class LiveChainAdapter implements ChainAdapter {
     } catch (e) {
       throw new WalletBusyError(`${(e as Error).message} Nothing was started.`, "unavailable");
     }
+    this.checkNetworkBinding?.();
   }
 
   /** The OS lock file every zingo-cli process on this wallet runs under. None for a test adapter without a store. */
   private readonly lockFile?: string;
   private readonly checkExecutable?: () => void;
+  private readonly checkNetworkBinding?: () => void;
 
   /** Runs zingo-cli with the OS wallet lock options added. */
   private exec(args: string[], opts: RunOptions = {}): Promise<string> {
-    this.checkExecutable?.();
+    this.assertPinned();
     opts = { ...opts, timeoutMs: readCommandBudget(opts.timeoutMs ?? SEND_TIMEOUT_MS) };
     return this.runner(this.bin, args, this.lockFile ? { lockFile: this.lockFile, ...opts } : opts);
   }
@@ -333,7 +347,7 @@ export class LiveChainAdapter implements ChainAdapter {
   baseArgs(): string[] {
     // --waitsync can block past the runner timeout (background sync never reports done),
     // so it is opt-in via ZINGO_WAITSYNC=1. One-shot commands still sync at startup.
-    const args = ["--chain", "testnet", "--server", this.server, "--data-dir", this.walletPath];
+    const args = ["--chain", this.network, "--server", this.server, "--data-dir", this.walletPath];
     if (process.env.ZINGO_WAITSYNC === "1") args.push("--waitsync");
     return args;
   }
@@ -361,10 +375,11 @@ export class LiveChainAdapter implements ChainAdapter {
    */
   async syncWallet(timeoutMs: number): Promise<SyncResult> {
     if (timeoutMs <= 0) return { complete: false, elapsedMs: 0, detail: "sync skipped (timeout is 0)" };
-    const args = ["--chain", "testnet", "--server", this.server, "--data-dir", this.walletPath];
+    const args = ["--chain", this.network, "--server", this.server, "--data-dir", this.walletPath];
     try {
+      if (this.network === "mainnet") await this.checkHealth({ sync: false });
       timeoutMs = readCommandBudget(timeoutMs);
-      this.checkExecutable?.();
+      this.assertPinned();
       const r = await this.syncer(this.bin, args, { timeoutMs, quitGraceMs: readQuitGrace(), ...(this.lockFile ? { lockFile: this.lockFile } : {}) });
       return r.detail ? { ...r, detail: redact(r.detail) } : r;
     } catch (e) {
@@ -394,10 +409,10 @@ export class LiveChainAdapter implements ChainAdapter {
     try {
       // --nosync: a sync cut short by this one-shot run leaves new blocks marked unscanned,
       // and zingo-cli then reports a spendable balance of 0 until the next full sync.
-      const args = ["--chain", "testnet", "--server", this.server, "--data-dir", this.walletPath, "--nosync", "info"];
+      const args = ["--chain", this.network, "--server", this.server, "--data-dir", this.walletPath, "--nosync", "info"];
       const info = await this.exec(args, { timeoutMs });
       chainTip = parseLatestBlockHeight(info);
-      branchProblem = consensusProblem(info);
+      branchProblem = consensusProblem(info, this.network, this.expectedConsensusBranch);
     } catch (e) {
       if (e instanceof WalletBusyError) throw e;
       throw new ChainUnreachableError(
@@ -411,12 +426,12 @@ export class LiveChainAdapter implements ChainAdapter {
   }
 
   private offline(cmd: string): string[] {
-    return ["--chain", "testnet", "--data-dir", this.walletPath, "--offline", cmd];
+    return ["--chain", this.network, "--data-dir", this.walletPath, "--offline", cmd];
   }
 
   /** Read-only, offline: the height the wallet has synced to. */
   async walletHeight(): Promise<number> {
-    const args = ["--chain", "testnet", "--data-dir", this.walletPath, "--offline", "height"];
+    const args = ["--chain", this.network, "--data-dir", this.walletPath, "--offline", "height"];
     return parseWalletHeight(await this.exec(args, { timeoutMs: healthTimeoutMs() }));
   }
 
@@ -506,7 +521,7 @@ export class LiveChainAdapter implements ChainAdapter {
   async getReceiveAddress(opts: { offline?: boolean } = {}): Promise<string> {
     const args = opts.offline ? this.offline("addresses") : [...this.baseArgs(), "addresses"];
     const address = parseReceiveAddress(await this.exec(args, { timeoutMs: readTimeoutMs() }));
-    assertTestnetAddress(address);
+    assertNetworkAddress(address, this.network);
     return address;
   }
 
@@ -525,8 +540,8 @@ export class LiveChainAdapter implements ChainAdapter {
           `export_ufvk failed ${this.viewKeyFailures} time(s) in a row (${this.viewKeyLastError}); next try in ${Math.ceil(wait / 1000)}s`
         );
       }
-      const args = ["--chain", "testnet", "--data-dir", this.walletPath, "--offline", "export_ufvk"];
-      const p = this.exec(args, { timeoutMs: readTimeoutMs() }).then(parseUfvk);
+      const args = ["--chain", this.network, "--data-dir", this.walletPath, "--offline", "export_ufvk"];
+      const p = this.exec(args, { timeoutMs: readTimeoutMs() }).then(out => parseUfvk(out, this.network));
       // Do not cache a failure. Back off instead: 1s, 2s, 4s, and so on, up to 60s.
       p.then(
         () => {
@@ -562,6 +577,7 @@ export class LiveChainAdapter implements ChainAdapter {
     if (!opts || typeof opts.fence !== "function" || !Number.isSafeInteger(opts.timeoutMs) || opts.timeoutMs <= 0) throw new Error("Invalid resume authorization.");
     this.invalidateScans();
     try {
+      if (this.network === "mainnet") { await this.getViewingKey(); await this.checkHealth({ sync: false }); }
       opts.fence();
       this.assertPinned();
       const sent = await this.exec([...this.baseArgs(), "--nosync"], {
@@ -576,10 +592,11 @@ export class LiveChainAdapter implements ChainAdapter {
   }
 
   private async payOnce(req: PaymentRequest): Promise<PaymentReceipt> {
-    assertTestnetAddress(req.recipient);
+    assertNetworkAddress(req.recipient, this.network);
     if (typeof req.amountZats !== "bigint" || req.amountZats <= 0n) {
       throw new Error("Amount must be a positive integer number of zatoshis");
     }
+    if (this.network === "mainnet") { await this.getViewingKey(); await this.checkHealth({ sync: false }); }
     // The memo goes out exactly as given, so one that could not be matched back from the
     // listing is refused here too, whatever called the adapter.
     const memoIssue = memoProblem(req.memo);
@@ -614,6 +631,7 @@ export class LiveChainAdapter implements ChainAdapter {
     // Bind the txid durably. If that fails the transaction is never transmitted.
     req.stage?.(txid);
     req.authorizeFee?.(feeZats);
+    if (this.network === "mainnet") await this.checkHealth({ sync: false });
     // A lost lock stops here, before the wallet process starts.
     req.fence?.();
     this.assertPinned();
@@ -713,13 +731,13 @@ export function transmitted(out: string, txid: string): boolean {
 
 /**
  * Parse `zingo-cli export_ufvk`, which prints `{ "ufvk": "uviewtest1...", "birthday": N }`.
- * Only a testnet key is accepted. Error messages never echo the output, since it holds the key.
+ * Only a key for the configured network is accepted. Error messages never echo the output, since it holds the key.
  */
-export function parseUfvk(out: string): string {
+export function parseUfvk(out: string, network: "testnet" | "mainnet" = "testnet"): string {
   const m = out.match(/"ufvk"\s*:\s*"(uview[a-z0-9]*1[02-9ac-hj-np-z]+)"/);
   if (!m) throw new Error("zingo-cli export_ufvk returned no unified full viewing key");
-  if (!m[1].startsWith("uviewtest1")) {
-    throw new NetworkError("zingo-cli export_ufvk returned a key that is not for testnet", "mainnet");
+  if (!m[1].startsWith(network === "testnet" ? "uviewtest1" : "uview1")) {
+    throw new NetworkError(`zingo-cli export_ufvk returned a key that is not for ${network}`, network === "testnet" ? "mainnet" : "unknown");
   }
   return m[1];
 }
@@ -754,12 +772,12 @@ export function parseBalance(out: string): { confirmedZats: bigint; unconfirmedZ
 export const EXPECTED_TESTNET_BRANCH = "77190ad9";
 
 /** A problem with the chain `info` reports, when it names the chain and branch. Undefined when fine or unreported. */
-export function consensusProblem(info: string): string | undefined {
+export function consensusProblem(info: string, network: "testnet" | "mainnet" = "testnet", expectedBranch = EXPECTED_TESTNET_BRANCH): string | undefined {
   const name = info.match(/"chain_name"\s*:\s*"([^"]*)"/)?.[1];
-  if (name !== undefined && name !== "test") return `reports chain "${name.slice(0, 20)}", not testnet. Nothing was sent.`;
+  if ((network === "mainnet" && name === undefined) || (name !== undefined && name !== (network === "mainnet" ? "main" : "test"))) return `reports chain "${name?.slice(0, 20) ?? "missing"}", not ${network}. Nothing was sent.`;
   const branch = info.match(/"consensus_branch_id"\s*:\s*"([^"]*)"/)?.[1];
-  if (branch !== undefined && branch.toLowerCase() !== EXPECTED_TESTNET_BRANCH) {
-    return `reports consensus branch ${branch.slice(0, 12)}, expected ${EXPECTED_TESTNET_BRANCH}. Nothing was sent.`;
+  if ((network === "mainnet" && branch === undefined) || (branch !== undefined && branch.toLowerCase() !== expectedBranch)) {
+    return `reports consensus branch ${branch?.slice(0, 12) ?? "missing"}, expected ${expectedBranch}. Nothing was sent.`;
   }
   return undefined;
 }

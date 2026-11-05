@@ -7,7 +7,7 @@ import type { Config } from "../types.js";
 import type { PaymentStore } from "./store.js";
 
 const payloadSchema = z.object({
-  domain: z.literal("zshield-payment-approval-v1"), network: z.literal("testnet"),
+  domain: z.literal("zshield-payment-approval-v1"), network: z.enum(["testnet", "mainnet"]),
   wallet_fingerprint: z.string().regex(/^[0-9a-f]{16}$/),
   idempotency_key: z.string().min(1).max(128),
   params_sha256: z.string().regex(/^[0-9a-f]{64}$/),
@@ -46,7 +46,7 @@ export function assertApproval(config: Config, store: PaymentStore, key: string,
     const raw = readPrivate(join(config.approvalDir!, approvalFilename(key)), 16_384);
     if (raw === undefined) throw new Error("Approval missing");
     const grant = envelopeSchema.parse(JSON.parse(raw));
-    if (grant.payload.wallet_fingerprint !== fingerprint || grant.payload.idempotency_key !== key || grant.payload.params_sha256 !== paramsHash || grant.payload.expires_at <= Date.now()) throw new Error("Approval does not authorize this payment");
+    if (grant.payload.network !== (config.chainNetwork ?? "testnet") || grant.payload.wallet_fingerprint !== fingerprint || grant.payload.idempotency_key !== key || grant.payload.params_sha256 !== paramsHash || grant.payload.expires_at <= Date.now()) throw new Error("Approval does not authorize this payment");
     const bytes = approvalBytes(grant.payload);
     const count = trust.keys.filter(publicKey => grant.signatures.some(signature => {
       if (!/^[A-Za-z0-9+/]{86}==$/.test(signature)) return false;

@@ -33,9 +33,9 @@ export function describePolicy(config: Config) {
 
   const live = config.chainMode === "live";
   return {
-    mode: live ? "testnet" : "mock",
+    mode: live ? config.chainNetwork : "mock",
     chain_adapter: live ? "zingo-cli" : "mock",
-    mainnet: "refused",
+    mainnet: config.chainNetwork === "mainnet" && config.mainnetEnabled ? "enabled" : "refused",
     limits: {
       per_call_cap_zec: cap?.zec ?? null,
       per_call_cap_zats: cap?.zats ?? null,

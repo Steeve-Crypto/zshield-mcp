@@ -265,3 +265,30 @@ describe("exact transaction recovery", () => {
     assert.equal(overlap(w), "");
   });
 });
+
+it("legacy testnet intent cannot resume under mainnet configuration", async () => {
+  const w=setup();
+  w.config.chainNetwork="mainnet";
+  await recoverPendingPayments(w.config,w.chain);
+  assert.equal(w.attempts(),0);
+  assert.ok(w.store.unresolvedSend());
+});
+
+it("resume reserves the original fee and refuses changed fee evidence", async () => {
+  for (const fee of [10000n,20000n,undefined]) {
+    const w=setup();
+    w.config.totalSpendingCapZec="0.0004";
+    w.store.appendEvent({ts:new Date().toISOString(),call_id:"original-call",state:"pending",calculated_fee_zats:"10000",by:"send"});
+    w.entry({feeZats:fee});
+    const {initializeHistoricalBudget}=await import("../src/payments/budget.ts");
+    const {acquireWalletLock}=await import("../src/payments/lock.ts");
+    const lock=await acquireWalletLock(w.store,1000,"migration-test");
+    try {initializeHistoricalBudget(w.store,lock);}finally{await lock.release();}
+    await recoverPendingPayments(w.config,w.chain);
+    assert.equal(w.attempts(),fee===10000n?1:0);
+    const total=JSON.parse(fs.readFileSync(join(w.store.dir,"spending-budget/ledger.json"),"utf8")).total;
+    assert.equal(total,fee===10000n?"40000":"20000");
+    await recoverPendingPayments(w.config,w.chain);
+    assert.equal(JSON.parse(fs.readFileSync(join(w.store.dir,"spending-budget/ledger.json"),"utf8")).total,total);
+  }
+});

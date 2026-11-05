@@ -31,9 +31,9 @@ describe("loadConfig", () => {
     assert.equal(c.chainMode, "live");
     assert.equal(c.chainNetwork, "testnet");
   });
-  it("rejects unknown chain modes such as mainnet", () => {
+  it("rejects mainnet without explicit opt-in", () => {
     process.env.CHAIN_MODE = "mainnet";
-    assert.throws(() => loadConfig(emptyDir()), /Unknown CHAIN_MODE/);
+    assert.throws(() => loadConfig(emptyDir()), /MAINNET_ENABLED/);
   });
   it("rejects a non-numeric spending cap", () => {
     delete process.env.CHAIN_MODE;

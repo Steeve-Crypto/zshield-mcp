@@ -32,3 +32,9 @@ export function assertTestnetAddress(addr: string): void {
     throw new NetworkError("Unrecognized address network.");
   }
 }
+
+/** Match the configured chain; prefix admission is followed by backend validation. */
+export function assertNetworkAddress(addr: string, network: string): void {
+  if (network === "testnet") return assertTestnetAddress(addr);
+  if (network !== "mainnet" || addressNetwork(addr) !== "mainnet") throw new NetworkError("Address does not match configured network.");
+}

@@ -42,10 +42,10 @@ import type { AuditEntry, ChainHealth, Config, MatchConfidence, PayStatus, Possi
 function assertNetworkAllowed(recipient: string, config: Config): void {
   if (config.chainMode !== "live") return;
   const net = addressNetwork(recipient);
-  if (net === "mainnet") {
+  if (net === "mainnet" && config.chainNetwork !== "mainnet") {
     throw new PolicyError("MAINNET_REFUSED", "Mainnet address refused; this server only pays on testnet.");
   }
-  if (net !== "testnet") {
+  if (net !== config.chainNetwork || !["mainnet", "testnet"].includes(net)) {
     throw new PolicyError("INVALID_ADDRESS", "Unrecognized address network.");
   }
 }
@@ -800,6 +800,7 @@ async function runPay(
       const intent: CallIntent = {
         call_id: callId,
         operation_id: operationId,
+        network: config.chainNetwork,
         ts: new Date(startedAt).toISOString(),
         amount_zec: input.amount_zec,
         amount_zats: amountZats.toString(),
@@ -996,6 +997,7 @@ async function runPay(
           error,
           call_id: callId,
           operation_id: operationId,
+        network: config.chainNetwork,
           idempotency_key: input.idempotency_key,
           possible_txids: possibleSends?.map((p) => p.txid),
           possible_sends: possibleSends,
@@ -1018,6 +1020,7 @@ async function runPay(
         status: "ok",
         call_id: callId,
         operation_id: operationId,
+        network: config.chainNetwork,
         idempotency_key: input.idempotency_key,
         txid: mockTxid,
         amount_zec: input.amount_zec,

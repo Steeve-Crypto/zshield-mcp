@@ -67,7 +67,7 @@ export function startupChecks(config: Config, platform: string = process.platfor
   if (config.chainMode !== "live") {
     return checkRecordPaths(config, deps.stateDir ?? stateDirFor(config), platform);
   }
-  if (config.chainNetwork !== "testnet") {
+  if (config.chainNetwork !== "testnet" && config.chainNetwork !== "mainnet") {
     throw new Error("zshield-mcp: live mode requires CHAIN_MODE=testnet. Mainnet is refused.");
   }
   if (platform === "win32") {
@@ -112,8 +112,13 @@ export function restrictUmask(config: Config, platform: string = process.platfor
 
 /** This is an enforced control profile, not an assertion of mainnet readiness. */
 export function assertFinancialProfile(config: Config, platform: string = process.platform): void {
-  if (!config.requireFinancialControls) return;
-  if (platform !== "linux" || config.chainMode !== "live" || config.chainNetwork !== "testnet") throw new Error("Financial controls profile currently requires Linux testnet deployment.");
+  if (config.chainNetwork === "mainnet") {
+    if (!config.mainnetEnabled) throw new Error("Mainnet requires explicit MAINNET_ENABLED=1; testnet remains available.");
+    if (!config.lightwalletd || !/^[a-f0-9]{8}$/.test(config.expectedConsensusBranch ?? "")) throw new Error("Mainnet requires explicit LIGHTWALLETD_URL and EXPECTED_CONSENSUS_BRANCH.");
+    if (new URL(config.lightwalletd).protocol !== "https:") throw new Error("Mainnet requires an HTTPS lightwalletd endpoint.");
+  }
+  if (!config.requireFinancialControls && config.chainNetwork !== "mainnet") return;
+  if (platform !== "linux" || config.chainMode !== "live" || !["testnet", "mainnet"].includes(config.chainNetwork ?? "")) throw new Error("Financial controls profile requires Linux live deployment.");
   if (!config.totalSpendingCapZec) throw new Error("Financial controls require TOTAL_SPENDING_CAP_ZEC.");
   parseZecToZats(config.totalSpendingCapZec);
   if (approvalKeys(config).threshold < 2) throw new Error("Financial controls require at least two distinct approval authorities.");
