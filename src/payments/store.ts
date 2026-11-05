@@ -21,7 +21,8 @@ const MAX_EVENTS_PER_CALL = 64;
 
 /**
  * Where a call stands. Ordered: a call's state is the highest of its events, so it only
- * ever moves forward. `not_sent` and `expired` both mean proven not sent.
+ * ever moves forward. `not_sent` is local proof; live `expired` is historical
+ * evidence only and never clears the wallet interlock.
  */
 export type CallState = "pending" | "unknown" | "not_sent" | "expired" | "sent" | "failed" | "mined";
 /**

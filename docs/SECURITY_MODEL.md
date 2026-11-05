@@ -49,7 +49,7 @@ Mainnet is blocked at each of these layers:
 3. The live adapter refuses to construct unless its network is exactly `testnet`.
 4. Every `zingo-cli` call passes `--chain testnet`.
 5. In testnet mode `zcash_pay` refuses mainnet addresses (`u1`, `zs1`, `t1`, `t3`, `zc`) with `MAINNET_REFUSED` before writing any `pending` row or calling the CLI, even when the address is on the allow-list. Unknown address formats get `INVALID_ADDRESS`.
-6. The live adapter checks the recipient again before it calls `quicksend`.
+6. The live adapter checks the recipient again before it builds a transaction. Recovery only transmits the bound original txid after checking its original recipient and outputs.
 7. `zcash_receive_address` refuses to return a mainnet address if the wallet ever reports one.
 
 The address checks are prefix checks. They do not decode or verify checksums. A malformed address with a testnet prefix passes these checks and is then rejected by `zingo-cli`, which surfaces as `CHAIN_ERROR`.
@@ -76,7 +76,7 @@ agent and model  ->  MCP client  ->  zshield-mcp  ->  zingo-cli + wallet file  -
 - Read-only tool rows hold no balances, addresses, or transaction details.
 - The audit log is the human trail, not the source of truth. Idempotency, status, and recovery read the payment store in the wallet directory (`.zshield-state`), so editing or forging an audit row changes no payment state. Audit logs are never imported: they stay on disk as a compliance trail and nothing reads them back.
 - At startup the audit dir, the fallback file, and the store are checked: a symlink or another owner stops the server, and loose modes are set to `700` for folders and `600` for files. Writes open files with `O_NOFOLLOW` and check the owner of the open file.
-- A lightwalletd URL with a user, password, query, or fragment is refused unless `ZSHIELD_ALLOW_URL_CREDENTIALS=1`. With it, those parts are replaced in every response, error, and audit row. They are still on the `zingo-cli` command line, because it takes the server only there.
+- A lightwalletd URL with a user, password, non-root path, query, or fragment is refused unless `ZSHIELD_ALLOW_URL_CREDENTIALS=1`. With it, those parts are replaced in every response, error, and audit row. They are still on the `zingo-cli` command line, because it takes the server only there.
 
 Limits today:
 
@@ -110,7 +110,7 @@ What it does not give: it is not a signature. Anyone who knows the UFVK and the 
 | Payment lands on mainnet | Seven layers listed under "Mainnet refusal" | Prefix checks only, no checksum decode |
 | Payment with no audit trail | `pending` row is written before the send; the send is refused if that write fails | Rows can be edited afterwards by anyone with file access |
 | Retry after a timeout pays twice | `idempotency_key`: a repeat with the same key and parameters returns the first outcome and never sends, even after a restart. Post-send audit failures return the txid instead of throwing. A send that times out, is killed, or ends with no txid returns `SEND_UNCONFIRMED` with status `unknown` and lists `possible_sends`, matched on recipient, amount, and memo, never on amount alone. `zcash_payment_status` reports where it stands | A live payment needs a key (`IDEMPOTENCY_KEY_REQUIRED`). A client that retries with a new key can still pay twice. A send the wallet has not synced yet does not show up as a match. The txid is staged on the call before `transmit` runs, so recovery asks about that txid, not about a lookalike |
-| Server dies mid-send | Durable intent, staging, idempotency bindings and OS locks prevent automatic resend. Known txids are streamed and corroborated against machine-readable wallet evidence. Legacy expired/failed records are re-indexed for review. Chain absence remains unknown regardless of finite expiry margins. | Unresolvable signed sends remain interlocked. Older records without identity may require manual investigation. |
+| Server dies mid-send | Durable intent, staging, idempotency bindings and OS locks prevent replacement payments. Authorized outbox items can resume only the verified original signed txid after current policy and wallet identity checks. Known txids are streamed and corroborated against machine-readable wallet evidence. Legacy expired/failed records are re-indexed for review. Chain absence remains unknown regardless of finite expiry margins. | Unresolvable signed sends remain interlocked. Older records without identity may require manual investigation. |
 | Send from a stale or empty wallet | In testnet mode, before the `pending` row: the server must answer within `ZINGO_HEALTH_TIMEOUT_MS`, the wallet must be within `HEALTH_MAX_LAG_BLOCKS` of the tip, and spendable must cover amount plus a 0.0001 ZEC fee estimate | The fee is an estimate. A send can still fail at `zingo-cli` for a larger fee |
 | Memo leaks data | Memo is capped at 512 UTF-8 bytes. It is exact: no trimming, no control characters, no edge whitespace, and the same string is checked, logged, recorded, and sent | The agent chooses the memo text. Anything in it reaches an allow-listed recipient and the audit log. It is passed over stdin, not argv, so other local users cannot read it from the process list |
 | Oversized arguments fill the disk or memory | Recipient is capped at 256 characters, memo at 512 bytes, amount strings at 32 characters, all in the input schema and again in the handler. Each audit row is capped at 8 KiB. Errors do not repeat the caller's text. All tool calls share a per-process limit, `RATE_LIMIT_PER_MIN` (default 60). Calls over it get `RATE_LIMITED` and are counted in one summary row per minute instead of a row each | Within the limit the log still grows by up to 60 rows a minute, each at most 8 KiB. There is no log rotation. The limit is per process, so restarting the server resets it |
@@ -161,7 +161,7 @@ Eleven findings, all addressed on this branch. Each has a test in `tests/v12.tes
 | F-15 The policy resource showed local paths | Paths removed |
 | F-16 Credentials in the lightwalletd URL could leak in errors and rows | Refused by default; redacted when allowed |
 | F-17 Legacy audit files kept loose modes and could be forged or symlinked | Startup checks of owner, symlinks, and modes; state comes from the store, not the log |
-| F-18 `not_found` and `expired` came from a truncated history | Proof required: synced wallet, whole history, past the expiry height. Otherwise `unknown` |
+| F-18 `not_found` and `expired` came from a truncated history | Live chain absence stays `unknown`; expiry is diagnostic. Mock expiry alone may produce `not_found` |
 | F-19 Every key miss rebuilt the index from the whole log | Lookups read one file. The log was imported once per audit dir; in run 6 the import was removed and the log is never read |
 | F-20 A stale recovery could overwrite a newer result | States only move forward; a mined call stays mined |
 

@@ -63,7 +63,7 @@ function installCrash() {
 }
 
 async function pay(k: string | undefined, amt: string | undefined) {
-  const input: Record<string, unknown> = { amount_zec: amt ?? "0.001", recipient: process.env.RACE_RECIPIENT!, idempotency_key: k };
+  const input: Record<string, unknown> = { resume: op === "resume" ? true : undefined, amount_zec: amt ?? "0.001", recipient: process.env.RACE_RECIPIENT!, idempotency_key: k };
   // An operation id supplied by the caller must be ignored: ZShield makes its own.
   if (process.env.OPERATION_ID) input.operation_id = process.env.OPERATION_ID;
   const r = await executePay(input as never, { config, chain });
@@ -71,7 +71,15 @@ async function pay(k: string | undefined, amt: string | undefined) {
 }
 
 let result: unknown;
-if (op === "pay") {
+if (op === "pay" || op === "resume") {
+  if (process.env.CRASH_AFTER_AUTHORIZE === "1") {
+    const original = chain.pay.bind(chain);
+    chain.pay = (req) => {
+      const authorize = req.beforeTransmit;
+      req.beforeTransmit = () => { authorize?.(); process.kill(process.pid, "SIGKILL"); };
+      return original(req);
+    };
+  }
   installPause();
   if (process.env.CRASH_AT !== undefined) installCrash();
   const r = await pay(key, amount);

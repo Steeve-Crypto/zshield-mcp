@@ -1,3 +1,6 @@
+import { resumeOriginal, RESUME_TIMEOUT_MS } from "../payments/resume.js";
+import { eventFor, recordReconcile } from "../payments/recovery.js";
+import { withOperationBudget } from "../chain/read-budget.js";
 import { LIVE_PAYMENT_READ_WAIT_MS } from "../chain/read-budget.js";
 import { assertFingerprintSalt } from "../config.js";
 import { randomUUID } from "node:crypto";
@@ -15,6 +18,7 @@ import { acquireWalletLock, BusyError, LockLostError, SEND_QUEUE_WAIT_DEFAULT_MS
 import { expiryAnchor, TIP_TOLERANCE_BLOCKS, tipProblem } from "../payments/tip.js";
 import {
   isSettled,
+  foldEvents,
   newOperationId,
   paymentParamsHash,
   rememberRefusal,
@@ -199,6 +203,7 @@ export const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
 export const payInputSchema = z.object({
+  resume: z.boolean().optional().describe("Resume only the transaction already signed for an existing idempotency key. Never builds a replacement. Ordinary replays remain read-only."),
   amount_zec: z
     .union([z.string().max(MAX_AMOUNT_LENGTH), z.number()])
     .describe('Amount of ZEC to pay as a decimal string like "0.05" or a number, at most 8 decimals (must be <= spending cap)'),
@@ -341,6 +346,10 @@ export async function executePay(rawInput: PayInput, deps: PayDeps): Promise<Pay
     const message = `The payment store could not be opened: ${e instanceof Error ? e.message : String(e)}. Nothing was sent.`;
     return refuseKey(input, deps, callId, "STATE_WRITE_FAILED", message, "error");
   }
+  if (input.resume === true) {
+    if (!key) return refuseKey(input, deps, callId, "IDEMPOTENCY_KEY_REQUIRED", "Resuming requires the original idempotency key.");
+    return resumePay(input, deps, store, callId, key);
+  }
   if (key === undefined) return runPay(input, deps, store, callId, {});
   const paramsSha256 = paymentParamsHash(input);
   const early = priorUse(input, deps, store, callId, key, paramsSha256);
@@ -351,6 +360,50 @@ export async function executePay(rawInput: PayInput, deps: PayDeps): Promise<Pay
     return await runPay(input, deps, store, callId, { idempotency_key: key, params_sha256: paramsSha256 });
   } finally {
     if (inFlight.get(slot)?.callId === callId) inFlight.delete(slot);
+  }
+}
+
+/** Explicit recovery is an exact-transaction retry, never a new payment authorization. */
+async function resumePay(input: PayInput, deps: PayDeps, store: PaymentStore, callId: string, key: string): Promise<PayResult> {
+  let lock: WalletLock | undefined;
+  let originalCallId: string | undefined;
+  try {
+    const binding = store.readKey(key);
+    if (!binding) return refuseKey(input, deps, callId, "CHAIN_ERROR", "No original payment is bound to this key. Nothing was built or sent.", "error");
+    originalCallId = binding.call_id;
+    if (binding.params_sha256 !== paymentParamsHash(input)) return refuseKey(input, deps, callId, "IDEMPOTENCY_CONFLICT", "The key belongs to a payment with different parameters. Nothing was sent.");
+    const configured = deps.config.sendQueueWaitMs ?? SEND_QUEUE_WAIT_DEFAULT_MS;
+    lock = await acquireWalletLock(store, Math.max(configured, LIVE_PAYMENT_READ_WAIT_MS), "zcash_pay");
+    // Re-read after admission; another process may have resolved it while we waited.
+    const current = store.readKey(key);
+    if (!current || current.call_id !== binding.call_id || current.params_sha256 !== binding.params_sha256) throw new Error("The original binding changed.");
+    const record = store.readCall(binding.call_id);
+    if (!record) throw new Error("The original payment record is unavailable.");
+    if (isSettled(record.state)) return replay(input, deps, callId, binding.call_id, record);
+    const resumed = await withOperationBudget(2 * RESUME_TIMEOUT_MS, () => resumeOriginal(deps.config, deps.chain, store, lock!, record, true));
+    let after: CallRecord;
+    let stateWarning: string | undefined;
+    try { after = recordReconcile(store, resumed.row, "recovery"); }
+    catch {
+      // Network acceptance must not disappear from the answer because its result
+      // event could not be written. The original durable txid still anchors recovery.
+      after = foldEvents(record.callId, record.intent, [...record.events, eventFor(resumed.row, "recovery")]);
+      stateWarning = "The resume result could not be persisted; the original signed transaction remains recorded for reconciliation.";
+    }
+    // A refused/unverifiable resume is diagnostic traffic, not a financial
+    // mutation. Its replay row below must not consume protected financial capacity.
+    const written = resumed.attempted || resumed.row.status !== "unknown"
+      ? writeAuditRow(deps.config, resumed.row) : { warning: undefined };
+    const result = replay(input, deps, callId, binding.call_id, after);
+    return { ...result, text: JSON.stringify({ ...JSON.parse(result.text), transmission_attempted: resumed.attempted, resume_note: resumed.row.note,
+      audit_warning: [result.auditWarning, written.warning, stateWarning].filter(Boolean).join(" ") || undefined }, null, 2) };
+  } catch (e) {
+    // A failure of recovery must never be represented as proof about the original send.
+    const result = refuseKey(input, deps, callId, e instanceof BusyError ? "BUSY" : "SEND_UNCONFIRMED",
+      "The original payment remains unresolved. Check payment_status or resume the same key; do not substitute a new key.", "unknown");
+    return { ...result, text: JSON.stringify({ ...JSON.parse(result.text), call_id: originalCallId ?? callId, idempotency_key: key }, null, 2) };
+  } finally {
+    await lock?.release();
   }
 }
 
@@ -417,7 +470,7 @@ function refuseKey(
   callId: string,
   code: PayCode,
   message: string,
-  status: "rejected" | "error" = "rejected"
+  status: "rejected" | "error" | "unknown" = "rejected"
 ): PayResult {
   const { audit, auditWarning } = finish(deps.config, {
     ...baseRow(input, deps.config, callId),
@@ -427,7 +480,7 @@ function refuseKey(
     // Only a hash of an invalid key, so an oversized one stays out of the log.
     idempotency_key: code === "INVALID_IDEMPOTENCY_KEY" ? undefined : input.idempotency_key,
   });
-  rememberRefusal(callId, { code, error: message, idempotency_key: code === "INVALID_IDEMPOTENCY_KEY" ? undefined : input.idempotency_key });
+  if (status !== "unknown") rememberRefusal(callId, { code, error: message, idempotency_key: code === "INVALID_IDEMPOTENCY_KEY" ? undefined : input.idempotency_key });
   return {
     ok: false,
     code,

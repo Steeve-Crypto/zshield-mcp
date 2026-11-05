@@ -550,6 +550,24 @@ export class LiveChainAdapter implements ChainAdapter {
     }
   }
 
+  async resumeSigned(txid: string, opts: { fence: () => void; timeoutMs: number }): Promise<void> {
+    const input = transmitCommand(txid);
+    if (!opts || typeof opts.fence !== "function" || !Number.isSafeInteger(opts.timeoutMs) || opts.timeoutMs <= 0) throw new Error("Invalid resume authorization.");
+    this.invalidateScans();
+    try {
+      opts.fence();
+      this.assertPinned();
+      const sent = await this.exec([...this.baseArgs(), "--nosync"], {
+        input, timeoutMs: Math.min(opts.timeoutMs, SEND_TIMEOUT_MS), lockWaitMs: SEND_LOCK_WAIT_MS,
+      });
+      if (!transmitted(sent, txid)) throw new Error("The wallet did not acknowledge the exact original transaction.");
+    } catch (e) {
+      throw new SendOutcomeUnknownError(e instanceof Error ? e.message : String(e), txid);
+    } finally {
+      this.invalidateScans();
+    }
+  }
+
   private async payOnce(req: PaymentRequest): Promise<PaymentReceipt> {
     assertTestnetAddress(req.recipient);
     if (typeof req.amountZats !== "bigint" || req.amountZats <= 0n) {
@@ -664,8 +682,13 @@ export function transmitCommand(txid: string): string {
 /** Whether `transmit <txid>` reported exactly that txid and nothing else. */
 export function transmitted(out: string, txid: string): boolean {
   if (/error/i.test(out)) return false;
-  const m = out.match(/"txids"\s*:\s*\[\s*"([0-9a-f]{64})"\s*\]/i);
-  return m !== null && m[1].toLowerCase() === txid;
+  const reports = [...out.matchAll(/"txids"\s*:\s*(\[[^\]]*\])/g)];
+  if (reports.length !== 1) return false;
+  try {
+    const ids: unknown = JSON.parse(reports[0][1]);
+    return Array.isArray(ids) && ids.length === 1 && typeof ids[0] === "string" &&
+      /^[0-9a-f]{64}$/i.test(ids[0]) && ids[0].toLowerCase() === txid;
+  } catch { return false; }
 }
 
 /**

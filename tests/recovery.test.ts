@@ -192,15 +192,17 @@ describe("recovery and sends", () => {
     pending(config, "c1");
     let finish!: () => void;
     const gate = new Promise<void>((r) => (finish = r));
+    let started!: () => void;
+    const entered = new Promise<void>((r) => (started = r));
     const { c } = chain(async () => {
+      started();
       await gate;
       return [];
     }, synced);
     const run = recoverPendingPayments(config, c, { now: T0 + 60_000 });
-    await new Promise((r) => setTimeout(r, 10));
-    await assert.rejects(sendLockFor(storeFor(config, c).dir).acquire(5), /BUSY|busy|another/i);
-    finish();
-    await run;
+    await entered; // Observe actual lock-held work, not an assumed OS-process startup time.
+    try { await assert.rejects(sendLockFor(storeFor(config, c).dir).acquire(5), /BUSY|busy|another/i); }
+    finally { finish(); await run; }
     const release = await sendLockFor(storeFor(config, c).dir).acquire(5);
     release();
   });

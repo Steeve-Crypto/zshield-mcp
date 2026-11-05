@@ -178,6 +178,6 @@ function prompt() {
 }
 
 // The prompt starts when argv ends with the base options; a one-shot command comes last.
-const base = args.at(-2) === "--data-dir" || cmd === "--waitsync";
+const base = args.at(-2) === "--data-dir" || cmd === "--waitsync" || cmd === "--nosync";
 if (base) prompt();
 else await oneShot();
