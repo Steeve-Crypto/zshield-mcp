@@ -20,8 +20,8 @@ export class BusyError extends Error {
 export function lockRank(purpose?: string): number {
   if (purpose === "recovery") return 3;
   if (purpose === "maintenance" || purpose === "operator") return 2;
-  if (purpose === "zcash_pay") return 1;
-  return 0;
+  if (purpose !== undefined && SHARED_READ_PURPOSES.has(purpose)) return 0;
+  return 1;
 }
 
 /**
@@ -39,7 +39,7 @@ export class SendLock {
   }
 
   acquire(waitMs: number, payment = false, purpose?: string): Promise<() => void> {
-    const rank = purpose !== undefined ? lockRank(purpose) : payment ? 1 : 0;
+    const rank = purpose !== undefined ? lockRank(purpose) : payment ? 1 : lockRank(undefined);
     const release = once(() => this.releaseRank(rank));
     if (this.tryEnter(rank)) return Promise.resolve(release);
     return new Promise((resolve, reject) => {
@@ -229,7 +229,7 @@ function takeFairTicket(dir: string, waitMs: number): Promise<{ release: () => v
 }
 
 const FAIR_TICKET = [
-  "use strict; use Fcntl qw(:flock O_RDWR O_CREAT O_NOFOLLOW O_NONBLOCK O_WRONLY O_EXCL); use Time::HiRes qw(time sleep); use IO::Handle;",
+  "use strict; use Fcntl qw(:flock O_RDWR O_RDONLY O_CREAT O_NOFOLLOW O_NONBLOCK O_WRONLY O_EXCL); use Time::HiRes qw(time sleep); use IO::Handle;",
   "$| = 1; my ($dir, $wait) = @ARGV; umask(077);",
   "my $seq = \"$dir/ticket.seq\";",
   "sysopen(my $sfh, $seq, O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK, 0600) or do { print \"ERR\\n\"; exit 77 };",
@@ -237,14 +237,19 @@ const FAIR_TICKET = [
   "my $end = time() + $wait / 1000;",
   "until (flock($sfh, LOCK_EX | LOCK_NB)) { if (time() >= $end) { print \"BUSY\\n\"; exit 75 } sleep(0.01) }",
   "sysseek($sfh, 0, 0); read($sfh, my $cur, 32); $cur = 0 if !defined $cur || $cur !~ /^[0-9]+$/; my $ticket = 0 + $cur; my $next = $ticket + 1;",
-  "sysseek($sfh, 0, 0); truncate($sfh, 0); print $sfh $next; $sfh->flush; flock($sfh, LOCK_UN); close($sfh);",
+  "sysseek($sfh, 0, 0); truncate($sfh, 0); print $sfh $next; $sfh->flush;",
   "my $base = sprintf(\"ticket.%020d.%d\", $ticket, $$); my $mine = \"$dir/$base\";",
-  "sysopen(my $tfh, $mine, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600) or do { print \"ERR\\n\"; exit 77 }; close($tfh);",
-  "sub earliest { my $best; opendir(my $d, $dir) or return undef; for my $n (readdir($d)) { next unless $n =~ /^ticket\\.\\d+\\./; $best = $n if !defined $best || $n lt $best } closedir($d); $best }",
-  "until (do { my $e = earliest(); defined $e && $e eq $base }) { if (time() >= $end) { unlink($mine); print \"BUSY\\n\"; exit 75 } sleep(0.02) }",
+  // The ticket is created and flocked while the sequence lock is held, so a ticket file whose flock
+  // can be taken (under the sequence lock) belongs to a dead waiter and is removed instead of blocking everyone.
+  "sysopen(my $tfh, $mine, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600) or do { flock($sfh, LOCK_UN); print \"ERR\\n\"; exit 77 };",
+  "flock($tfh, LOCK_EX | LOCK_NB) or do { unlink($mine); flock($sfh, LOCK_UN); print \"ERR\\n\"; exit 77 };",
+  "flock($sfh, LOCK_UN);",
+  "sub earliest { my $best; opendir(my $d, $dir) or return undef; for my $n (readdir($d)) { next unless $n =~ /^ticket\\.\\d+\\.\\d+$/; $best = $n if !defined $best || $n lt $best } closedir($d); $best }",
+  "sub reap { my ($n) = @_; sysopen(my $o, \"$dir/$n\", O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or return; if (flock($o, LOCK_EX | LOCK_NB)) { if (flock($sfh, LOCK_EX | LOCK_NB)) { unlink(\"$dir/$n\"); flock($sfh, LOCK_UN) } } close($o) }",
+  "for (;;) { my $e = earliest(); last if defined $e && $e eq $base; if (time() >= $end) { unlink($mine); print \"BUSY\\n\"; exit 75 } reap($e) if defined $e; sleep(0.02) }",
   "print \"READY\\n\";",
   "1 while sysread(STDIN, my $buf, 4096);",
-  "unlink($mine);",
+  "unlink($mine); close($tfh);",
 ].join(" ");
 
 function takeOsLock(file: string, waitMs: number, shared = false): Promise<WalletLock> {
@@ -307,8 +312,15 @@ function takeOsLock(file: string, waitMs: number, shared = false): Promise<Walle
  * error. Without it (the mock chain) the lock falls back to the in-process queue alone.
  */
 /** Exclusive OS turnstile: payments, recovery and maintenance. Shared would let reads starve writers. */
+/** Wallet reads that may share the lock with each other. Anything else, known or not, is exclusive. */
+const SHARED_READ_PURPOSES = new Set(["zcash_history", "zcash_balance", "zcash_receive_address", "zcash_payment_status"]);
+
+function isSharedRead(purpose?: string): boolean {
+  return purpose !== undefined && SHARED_READ_PURPOSES.has(purpose);
+}
+
 function needsExclusivePriority(purpose?: string): boolean {
-  return purpose === "zcash_pay" || purpose === "recovery" || purpose === "maintenance" || purpose === "operator";
+  return !isSharedRead(purpose);
 }
 
 /** Local queue priority for classes that must not lose to ordinary reads. */
@@ -339,6 +351,10 @@ export async function acquireWalletLock(
       // Exclusive turnstile for pay/recovery/maintenance so shared reads cannot cut in
       // between nonblocking retries. Readers take a shared pass only for admission.
       priority = await takeOsLock(join(store.dir, "send-priority.flock"), remaining(), !exclusive);
+      // The ticket only orders admission to the turnstile. Once the exclusive turnstile is held no
+      // later ticket can pass it, so hand the ticket on now: the send must not depend on it staying alive.
+      ticket?.release();
+      ticket = undefined;
       // Reads share send.flock so a history scan cannot monopolize payments (F-28).
       // Payments still take it exclusive and wait only for the short read deadline.
       os = await takeOsLock(join(store.dir, WALLET_LOCK_FILE), remaining(), !exclusive);

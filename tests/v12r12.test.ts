@@ -264,4 +264,22 @@ describe("V12 run 12 regressions", () => {
     assert.match(src, /PolicyError/);
     assert.match(src, /continued the batch|remains unresolved/);
   });
+
+  it("F-65 a dead waiter's ticket is reaped and never blocks later payments", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "r12-ticket-"));
+    // A waiter that was SIGKILLed while holding ticket 1 left its file behind; the next ticket is 5.
+    writeFileSync(join(dir, "ticket.seq"), "5", { mode: 0o600 });
+    writeFileSync(join(dir, "ticket.00000000000000000001.999999"), "", { mode: 0o600 });
+    const lock = await acquireWalletLock({ dir, requireOsLock: true }, 3000, "zcash_pay");
+    lock.assertHeld();
+    await lock.release();
+    assert.ok(!fs.existsSync(join(dir, "ticket.00000000000000000001.999999")), "stale ticket was not removed");
+  });
+  it("F-28 unknown lock purposes are exclusive; only named wallet reads share", () => {
+    assert.equal(lockRank("zcash_balance"), 0);
+    assert.equal(lockRank("zcash_history"), 0);
+    assert.equal(lockRank("balance"), 1);
+    assert.equal(lockRank(undefined), 1);
+    assert.equal(lockRank("recovery") > lockRank("zcash_pay"), true);
+  });
 });
