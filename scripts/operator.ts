@@ -8,7 +8,7 @@ import { storeFor, paymentParamsHash } from "../src/payments/store.js";
 import { acquireWalletLock, acquireMaintenanceLock } from "../src/payments/lock.js";
 import { createExclusive, fsyncDir, readPrivate } from "../src/fsafe.js";
 import { initializeHistoricalBudget } from "../src/payments/budget.js";
-import { fingerprintViewKey, fallbackAuditPath } from "../src/audit/log.js";
+import { fingerprintViewKey, fallbackAuditPath, freezeAuditWrites, unfreezeAuditWrites } from "../src/audit/log.js";
 import { payInputSchema } from "../src/tools/pay.js";
 import { createSnapshot, restoreSnapshot } from "../src/operations/snapshot.js";
 
@@ -64,7 +64,10 @@ async function main() {
       const fallback=fallbackAuditPath(config.auditDir,config.auditFallbackPath);
       const sources: Record<string,string>={wallet,settings,allowlist:config.allowlistPath,audit:config.auditDir};
       for(const [label,path] of Object.entries({"audit.budget":config.auditDir+".budget",fallback,"fallback.budget":fallback+".budget",approvals:config.approvalDir})) if(path && fs.existsSync(path)) sources[label]=path;
-      const result=await createSnapshot(sources,destination,()=>lock.assertHeld());
+      freezeAuditWrites();
+      let result;
+      try { result=await createSnapshot(sources,destination,()=>lock.assertHeld()); }
+      finally { unfreezeAuditWrites(); }
       console.log(JSON.stringify({...result,payments_paused:true,contains_wallet_secrets:true}));
     } finally {fs.rmSync(settings,{recursive:true,force:true});}
   }
