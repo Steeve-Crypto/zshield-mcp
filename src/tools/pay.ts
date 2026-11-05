@@ -401,12 +401,25 @@ async function resumePay(input: PayInput, deps: PayDeps, store: PaymentStore, ca
       audit_warning: [result.auditWarning, written.warning, stateWarning].filter(Boolean).join(" ") || undefined }, null, 2) };
   } catch (e) {
     if (e instanceof PolicyError) {
-      return refuseKey(input, deps, callId, e.code as PayCode, e.message, "rejected");
+      // Keep the original call identity visible: a refused retry is not a new terminal payment (F-74).
+      const result = refuseKey(input, deps, callId, e.code as PayCode,
+        `${e.message} The original signed transaction (call ${originalCallId ?? "unknown"}) remains unresolved; do not substitute a new key.`,
+        "rejected");
+      return {
+        ...result,
+        text: JSON.stringify({
+          ...JSON.parse(result.text),
+          call_id: originalCallId ?? callId,
+          original_call_id: originalCallId,
+          original_unresolved: true,
+          idempotency_key: key,
+        }, null, 2),
+      };
     }
     // A failure of recovery must never be represented as proof about the original send.
     const result = refuseKey(input, deps, callId, e instanceof BusyError ? "BUSY" : "SEND_UNCONFIRMED",
       "The original payment remains unresolved. Check payment_status or resume the same key; do not substitute a new key.", "unknown");
-    return { ...result, text: JSON.stringify({ ...JSON.parse(result.text), call_id: originalCallId ?? callId, idempotency_key: key }, null, 2) };
+    return { ...result, text: JSON.stringify({ ...JSON.parse(result.text), call_id: originalCallId ?? callId, original_call_id: originalCallId, original_unresolved: true, idempotency_key: key }, null, 2) };
   } finally {
     await lock?.release();
   }
@@ -477,7 +490,7 @@ function refuseKey(
   message: string,
   status: "rejected" | "error" | "unknown" = "rejected"
 ): PayResult {
-  const { audit, auditWarning } = finish(deps.config, {
+  const row = boundAuditEntry({
     ...baseRow(input, deps.config, callId),
     status,
     code,
@@ -485,17 +498,35 @@ function refuseKey(
     // Only a hash of an invalid key, so an oversized one stays out of the log.
     idempotency_key: code === "INVALID_IDEMPOTENCY_KEY" ? undefined : input.idempotency_key,
   });
+  const written = writeAuditRow(deps.config, row);
+  // Rejected payment activity must leave durable evidence; soft-succeeding after the
+  // diagnostic pools are exhausted would hide probing (F-75).
+  if (!written.durable && status !== "unknown") {
+    const failMsg = `Audit evidence for this refusal could not be persisted (${written.warning ?? "not durable"}). Nothing was sent.`;
+    rememberRefusal(callId, { code: "AUDIT_WRITE_FAILED", error: failMsg, idempotency_key: input.idempotency_key });
+    return {
+      ok: false,
+      code: "AUDIT_WRITE_FAILED",
+      text: JSON.stringify(
+        { ok: false, status: "error", code: "AUDIT_WRITE_FAILED", message: failMsg, error: failMsg, call_id: callId, refused_code: code, audit: row, audit_warning: written.warning },
+        null,
+        2
+      ),
+      audit: row,
+      auditWarning: written.warning,
+    };
+  }
   if (status !== "unknown") rememberRefusal(callId, { code, error: message, idempotency_key: code === "INVALID_IDEMPOTENCY_KEY" ? undefined : input.idempotency_key });
   return {
     ok: false,
     code,
     text: JSON.stringify(
-      { ok: false, status, code, message, error: message, call_id: callId, audit, audit_warning: auditWarning },
+      { ok: false, status, code, message, error: message, call_id: callId, audit: row, audit_warning: written.warning },
       null,
       2
     ),
-    audit,
-    auditWarning,
+    audit: row,
+    auditWarning: written.warning,
   };
 }
 
@@ -737,13 +768,13 @@ async function runPay(
       }
     }
 
-    // Cheap authorization before the bounded sync: refuse unsigned or over-budget
-    // callers without occupying the wallet through health.
+    // Cheap authorization before the bounded sync: refuse unsigned callers without
+    // occupying the wallet through health. Do NOT reserve spending yet: a later health
+    // failure (INSUFFICIENT_FUNDS) must not permanently consume the allowance (F-72).
     if (policyPassed && amountZats !== undefined && lock) {
       try {
         lock.assertHeld();
         assertApproval(config, store, keyFields.idempotency_key ?? callId, keyFields.params_sha256 ?? paymentParamsHash(input), viewKeyFingerprint);
-        reserveSpending(config, store, lock, callId, amountZats, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
       } catch (e) {
         policyPassed = false;
         fail(e instanceof PolicyError ? "rejected" : "error", e instanceof PolicyError ? e.code : "STATE_WRITE_FAILED", e instanceof Error ? e.message : String(e));
@@ -929,17 +960,23 @@ async function runPay(
               lock!.assertHeld();
               assertPaymentsEnabled(store);
               assertApproval(config, store, keyFields.idempotency_key ?? callId, keyFields.params_sha256 ?? paymentParamsHash(input), viewKeyFingerprint);
+              // Re-load the allow-list at the transmit fence so a revocation while this call
+              // waited cannot still be paid (F-73).
+              assertRecipientAllowed(input.recipient, loadAllowlist(config.allowlistPath));
               reserveSpending(config, store, lock!, callId, amountZats!, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
               reserveFee(config, store, lock!, callId, calculatedFee, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
-              store.authorizeTransmit(callId, now());
             },
             afterLock: () => {
-              // Re-check expiry/pause/budget after the backend lock wait (F-56).
+              // Re-check expiry/pause/budget/allow-list after the backend lock wait.
+              // Authorize transmit only once the backend lock is held and these checks
+              // pass, so a WalletBusyError before this gate stays local not_sent (F-53).
               lock!.assertHeld();
               assertPaymentsEnabled(store);
               assertApproval(config, store, keyFields.idempotency_key ?? callId, keyFields.params_sha256 ?? paymentParamsHash(input), viewKeyFingerprint);
+              assertRecipientAllowed(input.recipient, loadAllowlist(config.allowlistPath));
               reserveSpending(config, store, lock!, callId, amountZats!, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
               reserveFee(config, store, lock!, callId, calculatedFee, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
+              store.authorizeTransmit(callId, now());
             },
             stage: (txid) => {
               // Between signing and transmitting: the lock must still be this call's, and
@@ -982,16 +1019,20 @@ async function runPay(
                 );
             recordSafely(store, { ts: now(), call_id: callId, state: "unknown", code, error, possible_sends: possibleSends, by: "send" }, warnings);
           } else if (e instanceof FenceError || e instanceof WalletBusyError) {
-            // Fence/busy before any staging is local proof of non-transmission.
-            // After staging, the signed tx exists: keep the interlock as unknown.
-            const staged = store.readCall(callId)?.stagedTxid;
+            // Fence/busy is local proof of non-transmission unless transmit was already
+            // authorized (CLI may have started). Staging alone is not broadcast (F-53).
+            const current = store.readCall(callId);
+            const staged = current?.stagedTxid;
+            const authorized = current?.events.some((ev) => ev.transmit_authorized);
             fail("error", "BUSY", e.message);
-            recordSafely(store, { ts: now(), call_id: callId, state: staged ? "unknown" : "not_sent", code, error, possible_sends: staged ? [{ txid: staged, confidence: "high", matched: ["txid"], status: "signed" }] : undefined, by: "send" }, warnings);
+            recordSafely(store, { ts: now(), call_id: callId, state: authorized ? "unknown" : "not_sent", code, error, possible_sends: staged ? [{ txid: staged, confidence: "high", matched: ["txid"], status: "signed" }] : undefined, by: "send" }, warnings);
           } else {
-            const staged = store.readCall(callId)?.stagedTxid;
+            const current = store.readCall(callId);
+            const staged = current?.stagedTxid;
+            const authorized = current?.events.some((ev) => ev.transmit_authorized);
             fail("error", "CHAIN_ERROR", redactInput(e instanceof Error ? e.message : String(e), input));
-            // A post-stage chain error may have raced a broadcast; never settle as not_sent.
-            recordSafely(store, { ts: now(), call_id: callId, state: staged ? "unknown" : "not_sent", code, error, possible_sends: staged ? [{ txid: staged, confidence: "high", matched: ["txid"], status: "signed" }] : undefined, by: "send" }, warnings);
+            // A post-authorize chain error may have raced a broadcast; never settle as not_sent.
+            recordSafely(store, { ts: now(), call_id: callId, state: (staged && authorized) ? "unknown" : "not_sent", code, error, possible_sends: staged ? [{ txid: staged, confidence: "high", matched: ["txid"], status: "signed" }] : undefined, by: "send" }, warnings);
           }
         }
       }

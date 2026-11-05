@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { dirname, join } from "node:path";
 
-import { createExclusive, ensurePrivateDir, readPrivate, checkPrivateFile } from "../fsafe.js";
+import { createExclusive, ensurePrivateDir, readPrivate, checkPrivateFile, safeRecordPath } from "../fsafe.js";
 import { MAX_AUDIT_ROW_BYTES } from "../policy/limits.js";
 
 /** Each durable reservation covers one maximum-sized row plus its newline. */
@@ -34,12 +34,15 @@ export function parseAuditBudget(value: unknown): number {
  * live beside the sink, not among JSONL files. Never reset while any writer is running.
  */
 export function reserveAudit(file: string, financial: boolean, budget: AuditBudget, daily: boolean): void {
-  // Quota identity follows the physical sink so symlink aliases share one counter.
+  // Quota identity follows the physical sink so symlink aliases share one counter (F-55).
   let abs = file;
-  try { abs = fs.realpathSync(file); } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
-    try { abs = join(fs.realpathSync(dirname(file)), file.split("/").pop()!); } catch { abs = file; }
+  try { abs = safeRecordPath(file); } catch {
+    try { abs = fs.realpathSync(file); } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      try { abs = join(fs.realpathSync(dirname(file)), file.split(/[\\/]/).pop()!); } catch { abs = file; }
+    }
   }
+  try { abs = fs.realpathSync(abs); } catch { /* leaf may not exist yet; pinned parent still shared */ }
   const root = daily ? dirname(abs) : abs;
   const dir = `${root}.budget`;
   ensurePrivateDir(dir);

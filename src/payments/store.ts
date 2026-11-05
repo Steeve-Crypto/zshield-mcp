@@ -135,6 +135,12 @@ function sha(s: string): string {
   return createHash("sha256").update(s).digest("hex");
 }
 
+/** At equal rank, local non-transmission proof beats a historical expiry observation (F-57). */
+function stateBeats(next: CallState, current: CallState): boolean {
+  if (STATE_RANK[next] !== STATE_RANK[current]) return STATE_RANK[next] > STATE_RANK[current];
+  return next === "not_sent" && current === "expired";
+}
+
 /** Fold a call's events: the highest state wins, so a stale or late writer cannot move it back. */
 export function foldEvents(callId: string, intent: CallIntent | undefined, events: CallEvent[]): CallRecord {
   let top: CallEvent | undefined;
@@ -142,7 +148,7 @@ export function foldEvents(callId: string, intent: CallIntent | undefined, event
   let blockHeight: number | undefined;
   for (const e of events) {
     if (!(e.state in STATE_RANK)) continue;
-    if (!top || STATE_RANK[e.state] > STATE_RANK[top.state]) top = e;
+    if (!top || stateBeats(e.state, top.state)) top = e;
   }
   // The txid and height come from the strongest event that has one.
   const withTx = events.filter((e) => e.txid && e.state in STATE_RANK).sort((a, b) => STATE_RANK[b.state] - STATE_RANK[a.state]);
@@ -151,6 +157,14 @@ export function foldEvents(callId: string, intent: CallIntent | undefined, event
     blockHeight = withTx.find((e) => e.block_height !== undefined)?.block_height;
   }
   const stagedTxid = events.find((e) => e.staged_txid)?.staged_txid;
+  // Upgrade interpretation (F-76): a send-path not_sent after staging+authorize is ambiguous.
+  // Recovery may later prove not_sent when the wallet still shows calculated (F-53).
+  if (top?.state === "not_sent" && stagedTxid && events.some((e) => e.transmit_authorized)) {
+    const notSent = events.filter((e) => e.state === "not_sent");
+    if (notSent.length > 0 && notSent.every((e) => e.by === "send")) {
+      top = { ...top, state: "unknown", note: top.note ?? "Staged transmit-authorized not_sent is ambiguous." };
+    }
+  }
   return { callId, intent, state: top?.state ?? "pending", top, txid, blockHeight, stagedTxid, events };
 }
 
@@ -192,8 +206,14 @@ export class PaymentStore {
     // store instance before live use; failure aborts store initialization.
     for (const callId of fs.readdirSync(this.sub("calls"))) {
       if (callId.startsWith(".tmp-")) continue;
-      const state = this.readCall(callId)?.state;
-      if (state === "expired" || state === "failed") this.markPending(callId);
+      const record = this.readCall(callId);
+      if (!record) continue;
+      // Upgrade path (F-76): ambiguous staged+authorized payments must stay pending.
+      if (record.stagedTxid && record.events.some((e) => e.transmit_authorized) && !isSettled(record.state)) {
+        this.markPending(callId);
+        continue;
+      }
+      if (record.state === "expired" || record.state === "failed") this.markPending(callId);
     }
     return notes;
   }
@@ -347,8 +367,14 @@ export class PaymentStore {
    */
   advance(event: CallEvent): CallRecord {
     const current = this.readCall(event.call_id);
-    // After transmit authorization, local busy/fence errors are not proof of non-transmission.
-    if (event.state === "not_sent" && current?.stagedTxid && current.events.some((e) => e.transmit_authorized)) {
+    // After transmit authorization, a send-path busy/fence is not proof of non-transmission.
+    // Recovery may still prove not_sent when the wallet shows the staged tx never left calculated (F-53).
+    if (
+      event.state === "not_sent" &&
+      event.by === "send" &&
+      current?.stagedTxid &&
+      current.events.some((e) => e.transmit_authorized)
+    ) {
       event = { ...event, state: "unknown" };
     }
     const sameTxGainsHeight =
