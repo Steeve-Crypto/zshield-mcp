@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { join } from "node:path";
 
 /** How long a send waits for another send on the same wallet before BUSY, by default. */
-export const SEND_QUEUE_WAIT_DEFAULT_MS = 10_000;
+export const SEND_QUEUE_WAIT_DEFAULT_MS = 20_000;
 export const SEND_QUEUE_WAIT_MAX_MS = 600_000;
 
 export class BusyError extends Error {
@@ -188,6 +188,16 @@ function takeOsLock(file: string, waitMs: number, shared = false): Promise<Walle
  * With `store.requireOsLock` (live mode) a missing perl or an unsupported platform is an
  * error. Without it (the mock chain) the lock falls back to the in-process queue alone.
  */
+/** Exclusive OS turnstile: payments, recovery and maintenance. Shared would let reads starve writers. */
+function needsExclusivePriority(purpose?: string): boolean {
+  return purpose === "zcash_pay" || purpose === "recovery" || purpose === "maintenance" || purpose === "operator";
+}
+
+/** Local queue priority for classes that must not lose to ordinary reads. */
+function isPriorityLocal(purpose?: string): boolean {
+  return needsExclusivePriority(purpose);
+}
+
 export async function acquireWalletLock(
   store: { dir: string; requireOsLock?: boolean },
   waitMs: number,
@@ -195,23 +205,22 @@ export async function acquireWalletLock(
 ): Promise<WalletLock> {
   const start = Date.now();
   const remaining = () => Math.max(0, waitMs - (Date.now() - start));
-  let releaseLocal: (() => void) | undefined;
+  // Local admission FIRST: never spawn a perl holder for a call the in-process mutex will refuse.
+  const releaseLocal = await sendLockFor(store.dir).acquire(waitMs, isPriorityLocal(purpose));
   let priority: WalletLock | undefined;
   let os: WalletLock | undefined;
   try {
     try {
       if (process.platform === "win32") throw new Error("The OS wallet lock is not supported on this platform.");
-      // Take the turnstile BEFORE waiting on the local queue. Otherwise a writer
-      // waiting behind its own read cannot stop another process admitting a new read
-      // at handoff, and can consume two read budgets before it reaches the wallet.
-      priority = await takeOsLock(join(store.dir, "send-priority.flock"), remaining(), purpose !== "zcash_pay");
-    } catch (e) {
-      if (e instanceof BusyError || store.requireOsLock) throw e;
-    }
-    releaseLocal = await sendLockFor(store.dir).acquire(remaining(), purpose === "zcash_pay");
-    if (priority) {
+      // Exclusive turnstile for pay/recovery/maintenance so shared reads cannot cut in
+      // between nonblocking retries. Readers take a shared pass only for admission.
+      priority = await takeOsLock(join(store.dir, "send-priority.flock"), remaining(), !needsExclusivePriority(purpose));
       os = await takeOsLock(join(store.dir, WALLET_LOCK_FILE), remaining());
-      if (purpose !== "zcash_pay") { await priority.release(); priority = undefined; }
+      if (!needsExclusivePriority(purpose)) { await priority.release(); priority = undefined; }
+    } catch (e) {
+      await priority?.release();
+      priority = undefined;
+      if (e instanceof BusyError || store.requireOsLock) throw e;
     }
     let released = false;
     return {
@@ -226,13 +235,13 @@ export async function acquireWalletLock(
         try {
           await os?.release();
         } finally {
-          try { await priority?.release(); } finally { releaseLocal?.(); }
+          try { await priority?.release(); } finally { releaseLocal(); }
         }
       },
     };
   } catch (e) {
     try { await os?.release(); } finally {
-      try { await priority?.release(); } finally { releaseLocal?.(); }
+      try { await priority?.release(); } finally { releaseLocal(); }
     }
     throw e;
   }
