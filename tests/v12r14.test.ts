@@ -7,7 +7,7 @@ import { describe, it, mock } from "node:test";
 import { AUDIT_SLOT_BYTES, reserveAudit } from "../src/audit/budget.ts";
 import { operationalHealth } from "../src/operations/health.ts";
 import { MockChainAdapter } from "../src/chain/mock.ts";
-import { fingerprintViewKey, writeAuditRow } from "../src/audit/log.ts";
+import { freezeAuditWrites, unfreezeAuditWrites, fingerprintViewKey, writeAuditRow } from "../src/audit/log.ts";
 import { acquireWalletLock } from "../src/payments/lock.ts";
 import { resumeOriginal } from "../src/payments/resume.ts";
 import { storeFor, paymentParamsHash, mayHaveBroadcast } from "../src/payments/store.ts";
@@ -55,6 +55,22 @@ function addLegacyUnknown(store: ReturnType<typeof storeFor>) {
     allowlist_hit: true, cap_zec: "0.1", view_key_fingerprint: null } as never);
   store.appendEvent({ ts: now(), call_id: "legacy", state: "unknown", code: "SEND_UNCONFIRMED", by: "send" });
 }
+
+describe("legacy crash interlock", () => {
+  it("an orphan pending marker blocks rather than erasing uncertainty", () => {
+    const { store } = staged(false);
+    store.markPending("orphan");
+    assert.equal(store.unresolvedSend("replacement")?.callId, "orphan");
+  });
+  it("legacy one-step intent without outcome blocks replacement after crash", () => {
+    const { store } = staged(false);
+    store.writeIntent({ call_id: "crashed-legacy", ts: now(), amount_zec: "0.0001", amount_zats: "10000",
+      recipient: R, allowlist_hit: true, cap_zec: "0.1", view_key_fingerprint: null });
+    // The process could have died inside its one-step backend before recording any result.
+    assert.equal(store.readCall("crashed-legacy")!.state, "pending");
+    assert.equal(store.unresolvedSend("replacement")?.callId, "crashed-legacy");
+  });
+});
 
 describe("V12 run 14 regressions", () => {
   it("F-84 a tracked call never authorized to transmit cannot be revived by explicit resume", async () => {
