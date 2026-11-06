@@ -569,4 +569,4 @@ continues to require a POSIX platform; mock mode on Windows needs a compatible P
 
 ## Current reliability checkpoint
 
-See [V12 run 14 response](V12-RUN14-RESPONSE.md), [production readiness](docs/PRODUCTION_READINESS.md), and the [incident runbook](docs/INCIDENT_RUNBOOK.md). Local passing tests alone are not financial release approval. Physical audit-space protection and native-wallet qualification remain release gates.
+See [V12 run 14 response](V12-RUN14-RESPONSE.md), [production readiness](docs/PRODUCTION_READINESS.md), and the [incident runbook](docs/INCIDENT_RUNBOOK.md). Local passing tests alone are not financial release approval. Physical payment-audit reservation is implemented; native-wallet, deployment-storage and independent qualification remain release gates. The [reserved journal runbook](docs/PAYMENT_AUDIT_JOURNAL.md) explains capacity, private export and offline upgrades.
