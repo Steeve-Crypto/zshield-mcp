@@ -1,12 +1,16 @@
 # Audit log format
 
-Append-only JSON Lines under `AUDIT_DIR` (default `./audits/`), one file per UTC day: `YYYY-MM-DD.jsonl`.
+Payment evidence is committed to physically allocated, fixed-slot journals inside each sink's canonical `.budget` directory. Daily append-only JSON Lines under `AUDIT_DIR` and the fallback JSONL file remain compatibility mirrors and bounded traffic logs. See [reserved payment evidence](PAYMENT_AUDIT_JOURNAL.md) for the storage format, platform contract, private export and offline maintenance.
 
-Every call writes at least one row. A call that passes policy writes a `pending` row before the chain send, then a result row (`ok` with the txid, `error`, or `unknown`) after it. `unknown` means the send was started and may have been broadcast, but no txid came back, for example because `zingo-cli` timed out. Both rows share a `call_id`. A call rejected by policy writes a single `rejected` row and never reaches the chain. If the `pending` row cannot be written, the payment is not sent. If the result row cannot be written after a send, the tool still returns the txid and adds an `audit_warning` so the caller does not retry and pay twice. The `pending` row stays in the log as the record of that send.
+A call that passes policy must commit a `pending` record before a chain send. It then records an `ok`, `error` or `unknown` outcome with the same `call_id`. Unknown means a send may have occurred; do not substitute a new key. Policy refusals and preauthorization infrastructure errors use bounded traffic capacity, never payment slots. If refusal evidence cannot persist, the caller gets a generic audit failure rather than an unaudited policy decision.
 
 ## Durability and the fallback file
 
-Each row is written with `fsync` on the file, and on a new file also on its directory, before the server goes on. On a power cut the `pending` row is on disk before anything is sent. A write is tried twice. If the main log still fails, the row goes to the fallback file (`AUDIT_FALLBACK_PATH`, default `audit-fallback.jsonl` next to `AUDIT_DIR`), created with mode `600` and also synced. If that fails too, the row is printed to stderr and the response carries `audit_warning`. For a `pending` row that means the payment is refused with `AUDIT_WRITE_FAILED`. Read the fallback file together with the daily files.
+The reserved journal is zero-filled and fsynced before exclusive publication. Under a cross-process flock, each payment slot receives a durable incomplete marker, a length/checksum/JSON payload, then a durable committed marker. Interrupted slots stay charged; acknowledged records never require file growth. Actual deployment power-loss behavior still needs qualification.
+
+Both primary and fallback reservations are attempted before traffic can consume free space. At least one must be usable at startup. A failed primary payment journal can fall back to the independently reserved fallback journal. If neither can commit the pending record, no payment is sent and the result is `AUDIT_WRITE_FAILED`. A missing JSONL mirror does not invalidate a committed payment record; the result carries a warning. Export both reserved journals as well as reading the JSONL mirrors. A post-send result failure never hides the original txid or authorizes a replacement payment.
+
+Refusal and diagnostic rows are appended to separate-from-journal JSONL files, with file and directory fsync and bounded monotonic counters. Failure is retried and may fall back; stderr is only an operator warning, not durable evidence. Never reset counters or journals with writers live.
 
 ## Idempotency, replay, and recovery rows
 

@@ -85,7 +85,7 @@ describe("policy runs before chain in live mode", () => {
     const root = mkdtempSync(join(tmpdir(), "zshield-live-"));
     const allow = join(root, "allow.json");
     writeFileSync(allow, JSON.stringify({ recipients: [{ address: UTEST }, { address: "u1mainnetlisted" }] }));
-    return { spendingCapZec: 0.01, allowlistPath: allow, chainMode: "live", auditDir: join(root, "a"), viewKeyFingerprintSalt: "s", chainNetwork: "testnet" };
+    return { auditMaxBytes: 128 * 8193, spendingCapZec: 0.01, allowlistPath: allow, chainMode: "live", auditDir: join(root, "a"), viewKeyFingerprintSalt: "s", chainNetwork: "testnet" };
   }
   it("cap and allow-list block before any CLI call", async () => {
     const calls: string[][] = [];

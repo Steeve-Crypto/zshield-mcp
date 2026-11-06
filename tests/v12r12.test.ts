@@ -37,7 +37,7 @@ describe("V12 run 12 regressions", () => {
     await readA.release();
   });
 
-  it("F-37 createExclusive returns true after publish even if dir fsync fails", () => {
+  it("F-37 createExclusive fails closed after unsynced publish", () => {
     const dir = mkdtempSync(join(tmpdir(), "v12r12-excl-"));
     const real = fs.fsyncSync;
     let saw = false;
@@ -53,7 +53,7 @@ describe("V12 run 12 regressions", () => {
       return open(path, flags, mode);
     };
     try {
-      assert.equal(createExclusive(dir, "key.json", '{"ok":1}'), true);
+      assert.throws(() => createExclusive(dir, "key.json", '{"ok":1}'), /fsyncdir boom/);
       assert.ok(fs.existsSync(join(dir, "key.json")));
       assert.ok(saw, "fsync path should have been attempted");
     } finally {

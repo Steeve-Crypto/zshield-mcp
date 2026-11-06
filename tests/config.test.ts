@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../src/config.ts";
 
-const KEYS = ["CHAIN_MODE", "SPENDING_CAP_ZEC", "VIEW_KEY_FINGERPRINT_SALT"];
+const KEYS = ["CHAIN_MODE", "SPENDING_CAP_ZEC", "VIEW_KEY_FINGERPRINT_SALT", "AUDIT_MAX_BYTES"];
 const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
 const emptyDir = () => mkdtempSync(join(tmpdir(), "zshield-cfg-"));
 
@@ -23,6 +23,7 @@ describe("loadConfig", () => {
     assert.equal(c.chainMode, "mock");
     assert.equal(c.spendingCapZec, 0.1);
     assert.equal(c.chainNetwork, undefined);
+    assert.equal(c.auditMaxBytes, 64 * 1024 * 1024, "test fixture limits must not change the production default");
   });
   it("maps testnet to the live adapter on testnet", () => {
     process.env.CHAIN_MODE = "testnet";
