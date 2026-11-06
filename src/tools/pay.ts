@@ -489,7 +489,7 @@ function finish(config: Config, row: AuditEntry): { audit: AuditEntry; auditWarn
 function unauditedRefusal(input: PayInput, config: Config, callId: string, originalCallId?: string, warning?: string): PayResult {
   const message = originalCallId
     ? "Audit evidence could not be persisted. The original payment may remain unresolved. Check payment_status; do not substitute a new key."
-    : "Audit evidence could not be persisted. Nothing was sent.";
+    : "Audit evidence could not be persisted; payment not sent.";
   const audit = boundAuditEntry({ ...baseRow(input, config, callId), status: "error" as const,
     code: "AUDIT_WRITE_FAILED" as const, error: message });
   rememberRefusal(callId, { code: "AUDIT_WRITE_FAILED", error: message });
