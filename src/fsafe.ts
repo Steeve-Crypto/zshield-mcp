@@ -149,7 +149,9 @@ export function readPrivate(path: string, maxBytes: number): string | undefined 
   path = safeRecordPath(path);
   let fd: number;
   try {
-    fd = fs.openSync(path, fs.constants.O_RDONLY | NOFOLLOW);
+    // O_NONBLOCK: a planted FIFO must not block the event loop before we can reject it.
+    const nonblock = fs.constants.O_NONBLOCK ?? 0;
+    fd = fs.openSync(path, fs.constants.O_RDONLY | NOFOLLOW | nonblock);
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw e;
@@ -218,12 +220,9 @@ export function createExclusive(dir: string, name: string, data: string): boolea
   try {
     fsyncDir(dir);
   } catch (e) {
-    // Not durable: unbind the key so it is not consumed and the call can be retried.
-    try {
-      fs.unlinkSync(join(dir, name));
-    } catch {
-      // Already gone.
-    }
+    // Already linked and visible to other processes. Rolling back would drop their
+    // reservations or leave a caller believing the key was free when it is not.
+    if (fs.existsSync(join(dir, name))) return true;
     throw e;
   }
   return true;

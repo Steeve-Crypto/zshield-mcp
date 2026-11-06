@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { dirname, join } from "node:path";
+
 import { createExclusive, ensurePrivateDir, readPrivate, checkPrivateFile } from "../fsafe.js";
 import { MAX_AUDIT_ROW_BYTES } from "../policy/limits.js";
 
@@ -33,7 +34,13 @@ export function parseAuditBudget(value: unknown): number {
  * live beside the sink, not among JSONL files. Never reset while any writer is running.
  */
 export function reserveAudit(file: string, financial: boolean, budget: AuditBudget, daily: boolean): void {
-  const root = daily ? dirname(file) : file;
+  // Quota identity follows the physical sink so symlink aliases share one counter.
+  let abs = file;
+  try { abs = fs.realpathSync(file); } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    try { abs = join(fs.realpathSync(dirname(file)), file.split("/").pop()!); } catch { abs = file; }
+  }
+  const root = daily ? dirname(abs) : abs;
   const dir = `${root}.budget`;
   ensurePrivateDir(dir);
   const baselineFile = join(dir, "baseline.json");
@@ -45,7 +52,7 @@ export function reserveAudit(file: string, financial: boolean, budget: AuditBudg
           .readdirSync(root)
           .filter((n) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(n))
           .map((n) => join(root, n))
-      : [file];
+      : [abs];
     let bytes = 0;
     for (const f of files) {
       try {

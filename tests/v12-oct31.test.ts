@@ -98,12 +98,11 @@ describe("October 31 root causes", () => {
     assert.equal(exits.filter((n) => n === 2).length, 4);
   });
 
-  it("F-37 retry frees only a durably proven failed binding, even if rollback unlink failed", async () => {
+  it("F-37 published bindings survive a directory fsync failure without rollback races", async () => {
     const config = tempConfig();
     const chain = new MockChainAdapter();
     const store = storeFor(config, chain);
-    const realSync = fs.fsyncSync,
-      realUnlink = fs.unlinkSync;
+    const realSync = fs.fsyncSync;
     let armed = true;
     mock.method(fs, "fsyncSync", (fd: number) => {
       if (armed && fs.fstatSync(fd).isDirectory() && fs.realpathSync(`/proc/self/fd/${fd}`).endsWith("/keys")) {
@@ -111,21 +110,14 @@ describe("October 31 root causes", () => {
       }
       return realSync(fd);
     });
-    mock.method(fs, "unlinkSync", (p: fs.PathLike) => {
-      if (armed && String(p).includes("/keys/") && String(p).endsWith(".json"))
-        throw Object.assign(new Error("unlink injected"), { code: "EACCES" });
-      return realUnlink(p);
-    });
     const input = { amount_zec: "0.001", recipient: ALLOWED, idempotency_key: "failed-bind" };
-    assert.equal((await executePay(input, { config, chain })).code, "STATE_WRITE_FAILED");
-    assert.ok(store.readKey(input.idempotency_key));
+    // Publication is visible; rolling back would race other readers, so the bind sticks.
+    const first = await executePay(input, { config, chain });
+    assert.ok(store.readKey(input.idempotency_key), "published key must remain after dir fsync failure");
     armed = false;
     assert.equal((await executePay({ ...input, amount_zec: "0.002" }, { config, chain })).code, "IDEMPOTENCY_CONFLICT");
-    assert.ok(store.readKey(input.idempotency_key), "conflicting parameters must not free the binding");
-    const result = await executePay(input, { config, chain });
-    assert.equal(result.ok, true, result.text);
     const replay = JSON.parse((await executePay(input, { config, chain })).text);
-    assert.equal(replay.idempotent_replay, true);
+    assert.equal(replay.call_id, JSON.parse(first.text).call_id);
   });
 
   it("F-42 policy floods leave payment and status allowances available", async () => {

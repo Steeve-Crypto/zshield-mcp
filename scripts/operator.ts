@@ -24,9 +24,20 @@ async function main() {
  const config=loadConfig(); runStartup(config);
  const chain=createChain(config), store=storeFor(config,chain);
  const pause=join(store.dir,"payments.pause");
- if (command==="pause" || command==="backup") createExclusive(store.dir,"payments.pause","Operator maintenance\n");
+ const hadPause = fs.existsSync(pause);
+ let createdPause = false;
+ if (command==="pause" || command==="backup") {
+   createdPause = createExclusive(store.dir,"payments.pause","Operator maintenance\n");
+ }
  if (command==="pause") { console.log(JSON.stringify({payments_paused:true,in_flight_transmission_may_complete:true})); return; }
- const lock=command==="backup" ? await acquireMaintenanceLock(store) : await acquireWalletLock(store,30000,"operator");
+ let lock;
+ try {
+   lock=command==="backup" ? await acquireMaintenanceLock(store) : await acquireWalletLock(store,30000,"operator");
+ } catch (error) {
+   // Do not leave an emergency pause stranded when maintenance never started.
+   if (createdPause && !hadPause) { try { fs.unlinkSync(pause); fsyncDir(store.dir); } catch { /* best effort */ } }
+   throw error;
+ }
  try {
   lock.assertHeld();
   if (command==="inspect") {
