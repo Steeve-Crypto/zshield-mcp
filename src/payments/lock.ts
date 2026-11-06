@@ -16,28 +16,40 @@ export class BusyError extends Error {
  * A mutex with a bounded wait. One holder at a time; queued payments go first, FIFO within each class, and
  * give up with BusyError after `waitMs`.
  */
+/** Higher rank is served first; FIFO within a rank. Recovery outranks payments. */
+export function lockRank(purpose?: string): number {
+  if (purpose === "recovery") return 3;
+  if (purpose === "maintenance" || purpose === "operator") return 2;
+  if (purpose !== undefined && SHARED_READ_PURPOSES.has(purpose)) return 0;
+  return 1;
+}
+
+/**
+ * Ranked reader-writer lock. Rank 0 (reads) share the hold so history cannot monopolize
+ * a payment; rank >= 1 is exclusive. Highest waiting rank is served first, FIFO within a rank.
+ * Waiting writers block new readers so a flood of history calls cannot starve recovery or pay.
+ */
 export class SendLock {
-  private held = false;
-  private readonly waiters: { grant: () => void; done: boolean; payment: boolean }[] = [];
+  private readers = 0;
+  private writer = false;
+  private readonly waiters: { grant: () => void; done: boolean; rank: number }[] = [];
 
   get locked(): boolean {
-    return this.held;
+    return this.writer || this.readers > 0;
   }
 
-  acquire(waitMs: number, payment = false): Promise<() => void> {
-    const release = () => this.release();
-    if (!this.held) {
-      this.held = true;
-      return Promise.resolve(once(release));
-    }
+  acquire(waitMs: number, payment = false, purpose?: string): Promise<() => void> {
+    const rank = purpose !== undefined ? lockRank(purpose) : payment ? 1 : lockRank(undefined);
+    const release = once(() => this.releaseRank(rank));
+    if (this.tryEnter(rank)) return Promise.resolve(release);
     return new Promise((resolve, reject) => {
       const waiter = {
         done: false,
-        payment,
+        rank,
         grant: () => {
           clearTimeout(timer);
           waiter.done = true;
-          resolve(once(release));
+          resolve(release);
         },
       };
       const timer = setTimeout(() => {
@@ -50,11 +62,50 @@ export class SendLock {
     });
   }
 
-  private release(): void {
-    const payment = this.waiters.findIndex((w) => w.payment);
-    const next = this.waiters.splice(payment < 0 ? 0 : payment, 1)[0];
-    if (next) next.grant();
-    else this.held = false;
+  private tryEnter(rank: number): boolean {
+    if (rank === 0) {
+      if (this.writer || this.waiters.some((w) => !w.done && w.rank > 0)) return false;
+      this.readers++;
+      return true;
+    }
+    if (this.writer || this.readers > 0) return false;
+    this.writer = true;
+    return true;
+  }
+
+  private releaseRank(rank: number): void {
+    if (rank === 0) this.readers = Math.max(0, this.readers - 1);
+    else this.writer = false;
+    this.drain();
+  }
+
+  private drain(): void {
+    for (;;) {
+      let best = -1;
+      for (let i = 0; i < this.waiters.length; i++) {
+        if (this.waiters[i].done) continue;
+        if (best < 0 || this.waiters[i].rank > this.waiters[best].rank) best = i;
+      }
+      if (best < 0) return;
+      const rank = this.waiters[best].rank;
+      if (rank === 0) {
+        // Admit every waiting reader while no writer is ahead.
+        if (this.writer || this.waiters.some((w) => !w.done && w.rank > 0)) return;
+        const readers = this.waiters.filter((w) => !w.done && w.rank === 0);
+        for (const w of readers) {
+          const i = this.waiters.indexOf(w);
+          if (i >= 0) this.waiters.splice(i, 1);
+          this.readers++;
+          w.grant();
+        }
+        return;
+      }
+      if (this.writer || this.readers > 0) return;
+      const w = this.waiters.splice(best, 1)[0];
+      this.writer = true;
+      w.grant();
+      return;
+    }
   }
 }
 
@@ -129,6 +180,78 @@ const HOLDER = [
 
 const RELEASE_GRACE_MS = 3000;
 
+/**
+ * Fair exclusive admission for the payment turnstile: waiters take sequentially numbered
+ * tickets and only the holder of the lowest outstanding ticket may poll for the flock.
+ * Shared readers skip the ticket (they only need to observe writers, not order among themselves).
+ */
+function takeFairTicket(dir: string, waitMs: number): Promise<{ release: () => void }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("perl", ["-e", FAIR_TICKET, "--", dir, String(Math.max(0, Math.floor(waitMs)))], { stdio: ["pipe", "pipe", "ignore"] });
+    let settled = false;
+    let out = "";
+    const gone = new Promise<void>((r) => child.once("close", () => r()));
+    child.unref();
+    (child.stdin as unknown as { unref?: () => void }).unref?.();
+    (child.stdout as unknown as { unref?: () => void }).unref?.();
+    child.stdin.on("error", () => {});
+    const timer = setTimeout(() => settle(new Error("The fair lock ticket holder did not answer.")), waitMs + 5000);
+    const settle = (result: { release: () => void } | Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (result instanceof Error) {
+        child.kill("SIGKILL");
+        reject(result);
+      } else resolve(result);
+    };
+    child.once("error", (e: NodeJS.ErrnoException) =>
+      settle(new Error(e.code === "ENOENT" ? "perl is required for the wallet lock and was not found." : `The fair lock ticket holder could not start: ${e.message}`))
+    );
+    child.once("close", () => settle(new Error("The fair lock ticket holder exited early.")));
+    child.stdout.on("data", (d: Buffer) => {
+      out += d.toString();
+      if (settled) return;
+      if (out.includes("READY")) {
+        let released = false;
+        settle({
+          release() {
+            if (released) return;
+            released = true;
+            child.stdin.end();
+          },
+        });
+        void gone;
+      } else if (out.includes("BUSY")) settle(new BusyError(waitMs, "Another zshield-mcp process holds the wallet lock."));
+      else if (out.includes("ERR")) settle(new Error("The fair lock ticket file could not be opened."));
+    });
+  });
+}
+
+const FAIR_TICKET = [
+  "use strict; use Fcntl qw(:flock O_RDWR O_RDONLY O_CREAT O_NOFOLLOW O_NONBLOCK O_WRONLY O_EXCL); use Time::HiRes qw(time sleep); use IO::Handle;",
+  "$| = 1; my ($dir, $wait) = @ARGV; umask(077);",
+  "my $seq = \"$dir/ticket.seq\";",
+  "sysopen(my $sfh, $seq, O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK, 0600) or do { print \"ERR\\n\"; exit 77 };",
+  "my @sst = stat($sfh); unless (-f $sfh && @sst && $sst[4] == $<) { print \"ERR\\n\"; exit 77 }",
+  "my $end = time() + $wait / 1000;",
+  "until (flock($sfh, LOCK_EX | LOCK_NB)) { if (time() >= $end) { print \"BUSY\\n\"; exit 75 } sleep(0.01) }",
+  "sysseek($sfh, 0, 0); read($sfh, my $cur, 32); $cur = 0 if !defined $cur || $cur !~ /^[0-9]+$/; my $ticket = 0 + $cur; my $next = $ticket + 1;",
+  "sysseek($sfh, 0, 0); truncate($sfh, 0); print $sfh $next; $sfh->flush;",
+  "my $base = sprintf(\"ticket.%020d.%d\", $ticket, $$); my $mine = \"$dir/$base\";",
+  // The ticket is created and flocked while the sequence lock is held, so a ticket file whose flock
+  // can be taken (under the sequence lock) belongs to a dead waiter and is removed instead of blocking everyone.
+  "sysopen(my $tfh, $mine, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600) or do { flock($sfh, LOCK_UN); print \"ERR\\n\"; exit 77 };",
+  "flock($tfh, LOCK_EX | LOCK_NB) or do { unlink($mine); flock($sfh, LOCK_UN); print \"ERR\\n\"; exit 77 };",
+  "flock($sfh, LOCK_UN);",
+  "sub earliest { my $best; opendir(my $d, $dir) or return undef; for my $n (readdir($d)) { next unless $n =~ /^ticket\\.\\d+\\.\\d+$/; $best = $n if !defined $best || $n lt $best } closedir($d); $best }",
+  "sub reap { my ($n) = @_; sysopen(my $o, \"$dir/$n\", O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or return; if (flock($o, LOCK_EX | LOCK_NB)) { if (flock($sfh, LOCK_EX | LOCK_NB)) { unlink(\"$dir/$n\"); flock($sfh, LOCK_UN) } } close($o) }",
+  "for (;;) { my $e = earliest(); last if defined $e && $e eq $base; if (time() >= $end) { unlink($mine); print \"BUSY\\n\"; exit 75 } reap($e) if defined $e; sleep(0.02) }",
+  "print \"READY\\n\";",
+  "1 while sysread(STDIN, my $buf, 4096);",
+  "unlink($mine); close($tfh);",
+].join(" ");
+
 function takeOsLock(file: string, waitMs: number, shared = false): Promise<WalletLock> {
   return new Promise((resolve, reject) => {
     const child = spawn("perl", ["-e", HOLDER, "--", file, String(Math.max(0, Math.floor(waitMs))), shared ? "1" : "0"], { stdio: ["pipe", "pipe", "ignore"] });
@@ -189,8 +312,15 @@ function takeOsLock(file: string, waitMs: number, shared = false): Promise<Walle
  * error. Without it (the mock chain) the lock falls back to the in-process queue alone.
  */
 /** Exclusive OS turnstile: payments, recovery and maintenance. Shared would let reads starve writers. */
+/** Wallet reads that may share the lock with each other. Anything else, known or not, is exclusive. */
+const SHARED_READ_PURPOSES = new Set(["zcash_history", "zcash_balance", "zcash_receive_address", "zcash_payment_status"]);
+
+function isSharedRead(purpose?: string): boolean {
+  return purpose !== undefined && SHARED_READ_PURPOSES.has(purpose);
+}
+
 function needsExclusivePriority(purpose?: string): boolean {
-  return purpose === "zcash_pay" || purpose === "recovery" || purpose === "maintenance" || purpose === "operator";
+  return !isSharedRead(purpose);
 }
 
 /** Local queue priority for classes that must not lose to ordinary reads. */
@@ -205,21 +335,35 @@ export async function acquireWalletLock(
 ): Promise<WalletLock> {
   const start = Date.now();
   const remaining = () => Math.max(0, waitMs - (Date.now() - start));
+  const exclusive = needsExclusivePriority(purpose);
   // Local admission FIRST: never spawn a perl holder for a call the in-process mutex will refuse.
-  const releaseLocal = await sendLockFor(store.dir).acquire(waitMs, isPriorityLocal(purpose));
+  // Recovery outranks payments so unresolved-send probes cannot starve crash recovery (F-69).
+  const releaseLocal = await sendLockFor(store.dir).acquire(waitMs, isPriorityLocal(purpose), purpose);
+  let ticket: { release: () => void } | undefined;
   let priority: WalletLock | undefined;
   let os: WalletLock | undefined;
   try {
     try {
       if (process.platform === "win32") throw new Error("The OS wallet lock is not supported on this platform.");
+      // Exclusive writers take a fair cross-process ticket before the flock so later payments
+      // cannot leapfrog an earlier authorized one at the OS turnstile (F-65).
+      if (exclusive) ticket = await takeFairTicket(store.dir, remaining());
       // Exclusive turnstile for pay/recovery/maintenance so shared reads cannot cut in
       // between nonblocking retries. Readers take a shared pass only for admission.
-      priority = await takeOsLock(join(store.dir, "send-priority.flock"), remaining(), !needsExclusivePriority(purpose));
-      os = await takeOsLock(join(store.dir, WALLET_LOCK_FILE), remaining());
-      if (!needsExclusivePriority(purpose)) { await priority.release(); priority = undefined; }
+      priority = await takeOsLock(join(store.dir, "send-priority.flock"), remaining(), !exclusive);
+      // The ticket only orders admission to the turnstile. Once the exclusive turnstile is held no
+      // later ticket can pass it, so hand the ticket on now: the send must not depend on it staying alive.
+      ticket?.release();
+      ticket = undefined;
+      // Reads share send.flock so a history scan cannot monopolize payments (F-28).
+      // Payments still take it exclusive and wait only for the short read deadline.
+      os = await takeOsLock(join(store.dir, WALLET_LOCK_FILE), remaining(), !exclusive);
+      if (!exclusive) { await priority.release(); priority = undefined; }
     } catch (e) {
       await priority?.release();
       priority = undefined;
+      ticket?.release();
+      ticket = undefined;
       if (e instanceof BusyError || store.requireOsLock) throw e;
     }
     let released = false;
@@ -235,13 +379,17 @@ export async function acquireWalletLock(
         try {
           await os?.release();
         } finally {
-          try { await priority?.release(); } finally { releaseLocal(); }
+          try { await priority?.release(); } finally {
+            try { ticket?.release(); } finally { releaseLocal(); }
+          }
         }
       },
     };
   } catch (e) {
     try { await os?.release(); } finally {
-      try { await priority?.release(); } finally { releaseLocal(); }
+      try { await priority?.release(); } finally {
+        try { ticket?.release(); } finally { releaseLocal(); }
+      }
     }
     throw e;
   }

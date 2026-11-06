@@ -53,9 +53,10 @@ describe("V12 run 11 regressions", () => {
 
   it("F-60 local admission happens before spawning OS holders", async () => {
     const dir = mkdtempSync(join(tmpdir(), "v12r11-local-"));
-    const first = await acquireWalletLock({ dir, requireOsLock: true }, 0, "zcash_balance");
+    // A held payment makes a zero-wait peer refuse locally without waiting on perl.
+    const first = await acquireWalletLock({ dir, requireOsLock: true }, 0, "zcash_pay");
     const before = Date.now();
-    await assert.rejects(() => acquireWalletLock({ dir, requireOsLock: true }, 0, "zcash_balance"), BusyError);
+    await assert.rejects(() => acquireWalletLock({ dir, requireOsLock: true }, 0, "zcash_pay"), BusyError);
     assert.ok(Date.now() - before < 500, "zero-wait refusal should not wait on perl");
     await first.release();
   });
