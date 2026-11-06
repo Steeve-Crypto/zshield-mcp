@@ -1,3 +1,4 @@
+import { validatePaymentState, invalidPaymentState } from "./schema.js";
 import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -219,6 +220,7 @@ export class PaymentStore {
       const n = ensurePrivateDir(d);
       if (n) notes.push(n);
     }
+    void this.initialized; // Unknown metadata versions fail closed before migration or repair.
     // Older versions cleared the pending index for expired and failed calls. Rebuild once per
     // store instance before live use; failure aborts store initialization.
     for (const callId of fs.readdirSync(this.sub("calls"))) {
@@ -237,7 +239,9 @@ export class PaymentStore {
   }
 
   get initialized(): boolean {
-    return readPrivate(join(this.dir, "meta.json"), MAX_FILE_BYTES) !== undefined;
+    const value = this.readJson<unknown>(join(this.dir, "meta.json"));
+    if (value !== undefined) validatePaymentState("meta", value);
+    return value !== undefined;
   }
 
   markInitialized(note: string): void {
@@ -250,7 +254,7 @@ export class PaymentStore {
     try {
       return JSON.parse(text) as T;
     } catch {
-      return undefined;
+      invalidPaymentState();
     }
   }
 
@@ -258,7 +262,8 @@ export class PaymentStore {
   readKey(key: string): KeyBinding | undefined {
     if (typeof key !== "string" || key.length > 128) throw new Error("Invalid idempotency key length.");
     const b = this.readJson<KeyBinding>(join(this.sub("keys"), `${sha(key)}.json`));
-    return b && b.key === key ? b : undefined;
+    if (b !== undefined) { validatePaymentState("binding", b); if (b.key !== key) invalidPaymentState(); }
+    return b;
   }
 
   /**
@@ -329,7 +334,9 @@ export class PaymentStore {
   /** The call an operation id was made for. Undefined for an unknown or malformed id. One small file read. */
   callForOperation(operationId: string): string | undefined {
     if (!OPERATION_ID_PATTERN.test(operationId)) return undefined;
-    return this.readJson<{ call_id: string }>(join(this.sub("ops"), `${operationId}.json`))?.call_id;
+    const index = this.readJson<{ call_id: string }>(join(this.sub("ops"), `${operationId}.json`));
+    if (index !== undefined) validatePaymentState("index", index);
+    return index?.call_id;
   }
 
   /**
@@ -337,15 +344,16 @@ export class PaymentStore {
    * may have been broadcast, and its notes are still spoken for. Undefined when there is none.
    */
   unresolvedSend(exceptCallId?: string): { callId: string; txid?: string } | undefined {
+    let found: { callId: string; txid?: string } | undefined;
     for (const callId of this.pendingCalls()) {
       if (callId === exceptCallId) continue;
       const r = this.readCall(callId);
-      if (!r) return { callId }; // Missing state is uncertainty, never permission to pay.
+      if (!r) { found ??= { callId }; continue; } // Missing state is uncertainty, never permission to pay.
       // Any unsettled call that is not proven never to have transmitted blocks new sends, including
       // legacy one-step unknowns with no recorded txid (F-80).
-      if (r && !isSettled(r.state) && (mayHaveBroadcast(r) || (this.requireOsLock && r.state === "expired"))) return { callId, txid: r.stagedTxid ?? r.txid };
+      if (!isSettled(r.state) && (mayHaveBroadcast(r) || (this.requireOsLock && r.state === "expired"))) found ??= { callId, txid: r.stagedTxid ?? r.txid };
     }
-    return undefined;
+    return found;
   }
 
   /** Add one event. Events are never rewritten. */
@@ -372,12 +380,18 @@ export class PaymentStore {
       throw e;
     }
     const intent = this.readJson<CallIntent>(join(dir, "intent.json"));
+    if (intent !== undefined) { validatePaymentState("intent", intent); if (intent.call_id !== callId) invalidPaymentState(); }
     const events: CallEvent[] = [];
-    for (const n of names.filter((x) => x !== "intent.json" && !x.startsWith(".tmp-")).sort().slice(0, MAX_EVENTS_PER_CALL)) {
+    const eventNames = names.filter((x) => x !== "intent.json" && !x.startsWith(".tmp-")).sort();
+    if (eventNames.length > MAX_EVENTS_PER_CALL) invalidPaymentState();
+    for (const n of eventNames) {
       const e = this.readJson<CallEvent>(join(dir, n));
-      if (e && e.call_id === callId) events.push(e);
+      validatePaymentState("event", e);
+      if (!e || e.call_id !== callId) invalidPaymentState();
+      events.push(e);
     }
     if (!intent && events.length === 0) return undefined;
+    if (!intent) invalidPaymentState();
     return foldEvents(callId, intent, events);
   }
 
@@ -422,7 +436,9 @@ export class PaymentStore {
 
   /** Which call a txid was credited to. */
   txidOwner(txid: string): string | undefined {
-    return this.readJson<{ call_id: string }>(join(this.sub("txids"), safeName(txid, "txid")))?.call_id;
+    const index = this.readJson<{ call_id: string }>(join(this.sub("txids"), safeName(txid, "txid")));
+    if (index !== undefined) validatePaymentState("index", index);
+    return index?.call_id;
   }
 
   /**
@@ -431,6 +447,7 @@ export class PaymentStore {
    */
   readTipMark(): number | undefined {
     const j = this.readJson<{ height?: unknown }>(join(this.dir, "tip.json"));
+    if (j !== undefined) validatePaymentState("tip", j);
     const h = j?.height;
     return typeof h === "number" && Number.isSafeInteger(h) && h >= 0 ? h : undefined;
   }
@@ -494,7 +511,9 @@ function openFor(config: Pick<Config, "auditDir" | "auditFallbackPath">, chain: 
     // private folder in the temp dir, one per audit dir. A wallet's store never moves.
     try {
       new PaymentStore(dir).ensureLayout();
-    } catch {
+    } catch (e) {
+      // A corrupt store is not a missing writable path. Never move to an empty store.
+      if ((e as NodeJS.ErrnoException).code === "STATE_READ_FAILED") throw e;
       const alt = join(tmpdir(), `zshield-state-${process.getuid?.() ?? "u"}-${sha(resolve(config.auditDir)).slice(0, 16)}`);
       const cached = stores.get(alt);
       if (cached) return cached;
