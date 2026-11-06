@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MockChainAdapter } from "../src/chain/mock.ts";
+import { MockChainAdapter, MOCK_UFVK } from "../src/chain/mock.ts";
 import { executePay } from "../src/tools/pay.ts";
-import type { Config } from "../src/types.ts";
+import type { ChainAdapter } from "../src/chain/types.ts";
+import type { AuditEntry, Config, PaymentRequest } from "../src/types.ts";
+import { unusedReads } from "./helpers.ts";
 
 function tempConfig(overrides: Partial<Config> = {}): Config {
   const root = mkdtempSync(join(tmpdir(), "zshield-pay-"));
@@ -47,12 +49,12 @@ describe("executePay (mock)", () => {
     assert.equal(result.audit.status, "ok");
     assert.ok(result.audit.mock_txid?.startsWith("mock_"));
     assert.equal(result.audit.allowlist_hit, true);
-    assert.match(result.audit.view_key_fingerprint, /^[a-f0-9]{16}$/);
+    assert.match(result.audit.view_key_fingerprint ?? "", /^[a-f0-9]{16}$/);
 
     const day = result.audit.ts.slice(0, 10);
     const log = readFileSync(join(config.auditDir, `${day}.jsonl`), "utf8");
     assert.ok(log.includes(result.audit.mock_txid!));
-    assert.ok(!log.includes("vk_mock_")); // raw view-key material must not appear
+    assert.ok(!log.includes(MOCK_UFVK)); // the viewing key itself must never appear
   });
 
   it("rejects over-cap", async () => {
@@ -96,5 +98,179 @@ describe("executePay with a broken allow-list", () => {
     const day = result.audit.ts.slice(0, 10);
     const lines = readFileSync(join(config.auditDir, `${day}.jsonl`), "utf8").trim().split("\n");
     assert.equal(lines.length, 1);
+  });
+});
+
+const ALLOWED = "u1mockrecipientaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+function readAudit(config: Config): AuditEntry[] {
+  // Read every day file so a call that crosses UTC midnight still shows both rows.
+  return readdirSync(config.auditDir)
+    .sort()
+    .flatMap((f) => readFileSync(join(config.auditDir, f), "utf8").trim().split("\n"))
+    .map((l) => JSON.parse(l));
+}
+
+describe("audit row is written before the chain send", () => {
+  it("writes a pending row before broadcast and an error row when the send throws", async () => {
+    const config = tempConfig();
+    let seenAtSend: AuditEntry[] = [];
+    const chain: ChainAdapter = {
+      ...unusedReads,
+      mode: "mock",
+      getViewingKey: async () => MOCK_UFVK,
+      async pay(_req: PaymentRequest) {
+        seenAtSend = readAudit(config);
+        throw new Error("broadcast failed");
+      },
+    };
+    const result = await executePay({ amount_zec: 0.05, recipient: ALLOWED }, { config, chain });
+
+    assert.equal(seenAtSend.length, 1);
+    assert.equal(seenAtSend[0].status, "pending");
+    assert.equal(seenAtSend[0].amount_zec, 0.05);
+    assert.equal(seenAtSend[0].recipient, ALLOWED);
+
+    assert.equal(result.ok, false);
+    assert.equal(result.audit.status, "error");
+    assert.match(result.audit.error ?? "", /broadcast failed/);
+
+    const rows = readAudit(config);
+    assert.deepEqual(rows.map((r) => r.status), ["pending", "error"]);
+    assert.equal(rows[0].call_id, rows[1].call_id);
+    assert.equal(rows[1].call_id, result.audit.call_id);
+  });
+
+  it("writes pending then ok rows on success", async () => {
+    const config = tempConfig();
+    const result = await executePay(
+      { amount_zec: 0.05, recipient: ALLOWED },
+      { config, chain: new MockChainAdapter() }
+    );
+    assert.equal(result.ok, true);
+    const rows = readAudit(config);
+    assert.deepEqual(rows.map((r) => r.status), ["pending", "ok"]);
+    assert.equal(rows[0].mock_txid, undefined);
+    assert.equal(rows[1].mock_txid, result.audit.mock_txid);
+    assert.equal(rows[0].call_id, rows[1].call_id);
+  });
+
+  it("writes one rejected row and never calls the chain on a policy rejection", async () => {
+    const config = tempConfig();
+    let calls = 0;
+    const chain: ChainAdapter = {
+      ...unusedReads,
+      mode: "mock",
+      getViewingKey: async () => MOCK_UFVK,
+      async pay() {
+        calls++;
+        throw new Error("should not be called");
+      },
+    };
+    const result = await executePay({ amount_zec: 1, recipient: ALLOWED }, { config, chain });
+    assert.equal(result.audit.status, "rejected");
+    assert.equal(calls, 0);
+    const rows = readAudit(config);
+    assert.deepEqual(rows.map((r) => r.status), ["rejected"]);
+  });
+
+  it("does not send when the pending row cannot be written", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zshield-noaudit-"));
+    const blocker = join(root, "not-a-dir");
+    writeFileSync(blocker, "x");
+    const config = tempConfig({ auditDir: join(blocker, "audits") });
+    let calls = 0;
+    const chain: ChainAdapter = {
+      ...unusedReads,
+      mode: "mock",
+      getViewingKey: async () => MOCK_UFVK,
+      async pay() {
+        calls++;
+        throw new Error("should not be called");
+      },
+    };
+    const result = await executePay({ amount_zec: 0.05, recipient: ALLOWED }, { config, chain });
+    assert.equal(calls, 0);
+    assert.equal(result.ok, false);
+    assert.equal(result.audit.status, "error");
+    assert.match(result.audit.error ?? "", /payment not sent/);
+  });
+
+  it("returns the txid instead of throwing when the result row cannot be written", async () => {
+    const config = tempConfig();
+    let calls = 0;
+    const chain: ChainAdapter = {
+      ...unusedReads,
+      mode: "mock",
+      getViewingKey: async () => MOCK_UFVK,
+      async pay(req: PaymentRequest) {
+        calls++;
+        // Break the audit log after the pending row: swap each day file for a directory.
+        for (const f of readdirSync(config.auditDir)) {
+          rmSync(join(config.auditDir, f));
+          mkdirSync(join(config.auditDir, f));
+        }
+        for (let d = -1; d <= 1; d++) {
+          const day = new Date(Date.now() + d * 86_400_000).toISOString().slice(0, 10);
+          mkdirSync(join(config.auditDir, `${day}.jsonl`), { recursive: true });
+        }
+        return new MockChainAdapter().pay(req);
+      },
+    };
+    const result = await executePay({ amount_zec: 0.05, recipient: ALLOWED }, { config, chain });
+    assert.equal(calls, 1);
+    assert.equal(result.ok, true);
+    assert.ok(result.audit.mock_txid);
+    assert.match(result.auditWarning ?? "", /could not be written/);
+    const body = JSON.parse(result.text);
+    assert.equal(body.txid, result.audit.mock_txid);
+    assert.match(body.audit_warning, /could not be written/);
+  });
+});
+
+describe("executePay amounts in zatoshis", () => {
+  const recipient = "u1mockrecipientaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+  it("accepts a decimal string and records exact zatoshis", async () => {
+    const config = tempConfig();
+    const result = await executePay(
+      { amount_zec: "0.05", recipient },
+      { config, chain: new MockChainAdapter() }
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.audit.amount_zats, "5000000");
+  });
+
+  it("rejects and audits an amount with more than 8 decimals", async () => {
+    const config = tempConfig();
+    const result = await executePay(
+      { amount_zec: "0.050000001", recipient },
+      { config, chain: new MockChainAdapter() }
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.audit.status, "rejected");
+    assert.equal(result.audit.amount_zats, undefined);
+    assert.match(result.audit.error ?? "", /more than 8 decimal places/);
+    const day = result.audit.ts.slice(0, 10);
+    const lines = readFileSync(join(config.auditDir, `${day}.jsonl`), "utf8").trim().split("\n");
+    assert.equal(lines.length, 1);
+  });
+
+  it("rejects zero and negative amounts", async () => {
+    const config = tempConfig();
+    for (const amount_zec of [0, "0", -0.01, "-1"]) {
+      const result = await executePay({ amount_zec, recipient }, { config, chain: new MockChainAdapter() });
+      assert.equal(result.audit.status, "rejected", String(amount_zec));
+    }
+  });
+
+  it("rejects when the configured cap has more than 8 decimals", async () => {
+    const config = tempConfig({ spendingCapZec: "0.100000001" });
+    const result = await executePay(
+      { amount_zec: "0.01", recipient },
+      { config, chain: new MockChainAdapter() }
+    );
+    assert.equal(result.audit.status, "rejected");
+    assert.match(result.audit.error ?? "", /Invalid spending cap/);
   });
 });

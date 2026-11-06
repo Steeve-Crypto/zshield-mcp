@@ -1,0 +1,98 @@
+This session is deliberately offline (--offline): network-requiring commands are unavailable, and nothing touches the network. The only exit is to relaunch without --offline.
+Launching save task...
+
+{
+    txid: c0f2f121316f6429929491e259144d1b31689364732c387ca9a2f0c76268ad06
+    datetime: 2026-10-12 14:23:01 UTC
+    status: confirmed
+    blockheight: 4492422
+    kind: received
+    value: 12500000
+    fee: 10000
+    zec price: not available
+    pools sent from: 
+    ironwood notes: 
+	{
+            value: 12500000
+            spend status: confirmed spent in 59d9cb1b5a473a84602c4812a7809217f6e9d359174deb178e7fd52c151ae8fc
+            output index: 1
+            memo: 
+        }
+    orchard notes: 
+    sapling notes: 
+    transparent coins: 
+    outgoing ironwood notes: 
+    outgoing orchard notes: 
+    outgoing sapling notes: 
+    outgoing transparent coins: 
+}
+{
+    txid: 59d9cb1b5a473a84602c4812a7809217f6e9d359174deb178e7fd52c151ae8fc
+    datetime: 2026-10-13 00:52:06 UTC
+    status: confirmed
+    blockheight: 4493943
+    kind: sent
+    value: 100000
+    fee: 10000
+    zec price: not available
+    pools sent from: Ironwood
+    ironwood notes: 
+	{
+            value: 12390000
+            spend status: confirmed spent in 50b19b866eaa2bb6146e0e560ad28c0e4dab014ae6b81b9830ae9e3f65fe0196
+            output index: 1
+            memo: 
+        }
+    orchard notes: 
+    sapling notes: 
+    transparent coins: 
+    outgoing ironwood notes: 
+	{
+            value: 100000
+            memo: zshield-mcp testnet demo
+            recipient: utest1tkzp6v69yg97zyv8c908xvkmell8p97vmgs7dq30v3cxghsjxkaslg2ff90slfscscf9gs8mftg2ucf5raa36w4zehug0feluukfahv0
+            recipient unified address: utest1tkzp6v69yg97zyv8c908xvkmell8p97vmgs7dq30v3cxghsjxkaslg2ff90slfscscf9gs8mftg2ucf5raa36w4zehug0feluukfahv0
+            output index: 0
+            account id: 0
+            scope: external
+        }
+    outgoing orchard notes: 
+    outgoing sapling notes: 
+    outgoing transparent coins: 
+}
+{
+    txid: 50b19b866eaa2bb6146e0e560ad28c0e4dab014ae6b81b9830ae9e3f65fe0196
+    datetime: 2026-10-27 12:50:38 UTC
+    status: confirmed
+    blockheight: 4547481
+    kind: sent
+    value: 10000
+    fee: 10000
+    zec price: not available
+    pools sent from: Ironwood
+    ironwood notes: 
+	{
+            value: 12370000
+            spend status: unspent
+            output index: 1
+            memo: 
+        }
+    orchard notes: 
+    sapling notes: 
+    transparent coins: 
+    outgoing ironwood notes: 
+	{
+            value: 10000
+            memo: zshield reliable sends
+            recipient: utest1tkzp6v69yg97zyv8c908xvkmell8p97vmgs7dq30v3cxghsjxkaslg2ff90slfscscf9gs8mftg2ucf5raa36w4zehug0feluukfahv0
+            recipient unified address: utest1tkzp6v69yg97zyv8c908xvkmell8p97vmgs7dq30v3cxghsjxkaslg2ff90slfscscf9gs8mftg2ucf5raa36w4zehug0feluukfahv0
+            output index: 0
+            account id: 0
+            scope: external
+        }
+    outgoing orchard notes: 
+    outgoing sapling notes: 
+    outgoing transparent coins: 
+}
+Save task shutdown successfully.
+Zingo CLI quit successfully.

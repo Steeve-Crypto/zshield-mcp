@@ -1,0 +1,17 @@
+Server-Selection Sweep: bootstrapping a dedicated sweep transport (its Exit Node is recycled when the sweep completes)...
+Server-Selection Sweep: 1 of 2 candidates answered; judging the live cohort...
+Server-Selection Sweep: sync attaches to the pinned server https://testnet.zec.rocks:443/ (live cohort of 1).
+Launching save task...
+{
+  "version": "v0.5.4",
+  "git_commit": "c22ca9ba67676e61cd8ee107538ffd9a77799bab",
+  "server_uri": "https://testnet.zec.rocks:443/",
+  "vendor": "ECC LightWalletD",
+  "taddr_support": true,
+  "chain_name": "test",
+  "sapling_activation_height": 280000,
+  "consensus_branch_id": "77190ad9",
+  "latest_block_height": 4547637
+}
+Save task shutdown successfully.
+Zingo CLI quit successfully.
