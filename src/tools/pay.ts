@@ -740,10 +740,11 @@ async function runPay(
     // Live mode: a signed payment that is not settled may already be on the network, and its
     // notes are spoken for. No new send leaves this wallet until it is resolved (mined, or
     // proven never sent) by recovery or zcash_payment_status.
-    if (policyPassed && amountZats !== undefined && lock && config.chainMode === "live") {
+    // Validate pending record integrity in every mode; only live mode enforces the network interlock.
+    if (policyPassed && amountZats !== undefined && lock) {
       try {
         const stuck = store.unresolvedSend(callId);
-        if (stuck) {
+        if (stuck && config.chainMode === "live") {
           policyPassed = false;
           fail("error", "UNRESOLVED_PAYMENT", `An earlier payment from this wallet (call ${stuck.callId}, ${stuck.txid ? `transaction ${stuck.txid}` : "no recorded transaction id"}) is not resolved. It may have been broadcast. Check it with zcash_payment_status. Nothing was sent.`);
         }
