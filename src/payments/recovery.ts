@@ -1,4 +1,5 @@
 import { hasTransmitAuthorization, resumeOriginal } from "./resume.js";
+import { PolicyError } from "../policy/caps.js";
 import { withOperationBudget } from "../chain/read-budget.js";
 import { findTransaction } from "../chain/types.js";
 import type { ChainAdapter } from "../chain/types.js";
@@ -299,11 +300,30 @@ async function reconcileStaged(
   if (e && (e.status === "transmitted" || e.status === "mempool")) {
     return { ...base, status: "broadcast", txid, confidence: "high", note: `Transmitted; the wallet reports it as ${e.status}. Do not pay again.` };
   }
+  if (e && e.status === "calculated") {
+    // Still calculated: never broadcast. Keep unknown so an explicit resume can transmit the
+    // original. Live busy/fence without authorize records not_sent on the send path (F-53).
+    return {
+      ...base,
+      status: "unknown",
+      txid,
+      possible_sends: candidate(e.status),
+      note: "The staged transaction remains calculated and was never transmitted. Resume the original; do not pay again with a new key.",
+    };
+  }
   if (e && e.status !== "calculated") {
     return { ...base, status: "unknown", txid, note: "The wallet reports an unrecognized transaction state. No transmission or settlement can be inferred. Do not pay again." };
   }
-  // Absent, or built and never transmitted as far as this wallet knows: the same proof as
-  // for any call that has no sent transaction.
+  // Absent after staging: a transmit_tracked call without authorization never could have
+  // broadcast. Legacy untracked staged calls, and authorized tracked ones, stay on proveNotSent.
+  if (intent.transmit_tracked && !record.events.some((ev) => ev.transmit_authorized)) {
+    return {
+      ...base,
+      status: "not_sent",
+      txid,
+      note: "The staged transaction was never authorized for transmit and is absent from the wallet. Nothing was sent.",
+    };
+  }
   return proveNotSent(base, intent, now, startedAt, opts);
 }
 
@@ -423,18 +443,56 @@ async function recoverLocked(
       store.clearPending(callId);
       continue;
     }
-    let row = await reconcile(record, once, {
-      now: opts.now,
-      offline: sync !== undefined,
-      evidence,
-      claimedBy: (txid) => store.txidOwner(txid),
-      live: chain.checkHealth !== undefined,
-      rivals: countRivals(store, record),
-    });
-    // Continue a durable outbox item, never rebuild a transaction or guess non-payment.
-    // Status/read paths never call this. Legacy calls need an explicit resume request.
-    if (row.status === "unknown" && record.stagedTxid && hasTransmitAuthorization(record) && chain.resumeSigned) {
-      row = (await resumeOriginal(config, chain, store, lock, record)).row;
+    let row: RecoveryAuditEntry;
+    try {
+      row = await reconcile(record, once, {
+        now: opts.now,
+        offline: sync !== undefined,
+        evidence,
+        claimedBy: (txid) => store.txidOwner(txid),
+        live: chain.checkHealth !== undefined,
+        rivals: countRivals(store, record),
+      });
+      // Continue a durable outbox item, never rebuild a transaction or guess non-payment.
+      // Status/read paths never call this. Legacy calls need an explicit resume request.
+      if (row.status === "unknown" && record.stagedTxid && hasTransmitAuthorization(record) && chain.resumeSigned) {
+        try {
+          row = (await resumeOriginal(config, chain, store, lock, record)).row;
+        } catch (e) {
+          // A policy refusal of THIS resume must not abort the rest of the startup batch (F-78).
+          if (e instanceof PolicyError) {
+            row = {
+              ts: new Date().toISOString(),
+              tool: "zcash_pay_recovery",
+              call_id: callId,
+              status: "unknown",
+              txid: record.stagedTxid,
+              idempotency_key: record.intent?.idempotency_key,
+              note: `Automatic resume refused by policy (${e.code}): ${e.message}. The original signed transaction remains unresolved.`,
+            };
+          } else throw e;
+        }
+      }
+    } catch (e) {
+      if (e instanceof PolicyError) {
+        row = {
+          ts: new Date().toISOString(),
+          tool: "zcash_pay_recovery",
+          call_id: callId,
+          status: "unknown",
+          txid: record.stagedTxid,
+          idempotency_key: record.intent?.idempotency_key,
+          note: `Recovery skipped a policy refusal (${e.code}) and continued the batch.`,
+        };
+      } else {
+        row = {
+          ts: new Date().toISOString(),
+          tool: "zcash_pay_recovery",
+          call_id: callId,
+          status: "unknown",
+          note: `Recovery could not finish this call: ${e instanceof Error ? e.message : String(e)}`,
+        };
+      }
     }
     const before = store.readCall(callId);
     const after = recordReconcile(store, row, "recovery");
