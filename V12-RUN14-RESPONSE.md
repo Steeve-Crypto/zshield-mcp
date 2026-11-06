@@ -44,13 +44,13 @@ Use payment-only preallocated journal extents or genuinely isolated capacity wit
 
 Pristine detached baseline, all discovered existing test files: 596 passed, 0 failed. Typecheck and build passed. Native testnet was not enabled.
 
-Current typecheck and build passed. npm audit reports 0 known vulnerabilities. Full recursive coverage run result will be recorded below when complete. No lint script exists. Node on the box is 24.22.1; proposed CI uses Node 22 and has not run on GitHub.
+Current typecheck and build passed. npm audit reports 0 known vulnerabilities. Full recursive coverage rerun: 610 tests, 609 passed, 1 failed. The sole failure is the active F-82 disk-protection regression. All other new and existing cases passed. The first full run also found an obsolete failed-binding shape assertion and a generic-error wording compatibility issue; both were corrected, 40 focused tests passed, and the complete suite was rerun. The binding invariant now requires explicit retryable no-send proof rather than assuming every terminal binding is burned. No financial assertion was disabled. No lint script exists. Node on the box is 24.22.1; proposed CI uses Node 22 and has not run on GitHub.
 
 CI now installs, typechecks, builds, audits dependencies and recursively runs all test files with coverage. Discovery no longer depends on an enumerated package.json list. `test:invariants` remains an optional focused command. The F-82 regression intentionally prevents a misleading green result.
 
 ## Self-review and release limits
 
-Checked the changed send/resume boundary for stale records, superseded transactions, wallet concurrency, budget refusals, audit failure before versus after transmit, binding publication and failed outcome writes. Existing exact-txid concurrency and crash sweeps remain part of the full suite. SIGKILL simulation does not prove power-loss persistence.
+Checked the changed send/resume boundary for stale records, superseded transactions, wallet concurrency, budget refusals, audit failure before versus after transmit, binding publication and failed outcome writes. Existing exact-txid concurrency and crash sweeps remain part of the full suite. SIGKILL simulation does not prove power-loss persistence. The full payment crash matrix exercised 68 kill points without duplicate sends. Seventeen preauthorization points (40 through 56) ended with zero sends and a clean error rather than successful same-key continuation. The harness permits clean refusals there: this is safety evidence, not a proof of uninterrupted payment liveness. The tracked transaction cannot revive after that local non-send classification. Native-wallet behavior and operational replacement guidance remain release gates.
 
 Further production gaps: native funded scratch-wallet qualification, physical audit-space reservation, incomplete record schema/corruption validation, bounded graceful shutdown, readiness linked to recovery completion, and structured operational logging. These are not certified by this patch. See docs/PRODUCTION_READINESS.md and docs/INCIDENT_RUNBOOK.md. No V12 review has been triggered.
 
@@ -59,3 +59,17 @@ Further production gaps: native funded scratch-wallet qualification, physical au
 - OWASP transaction authorization: enforce allowed state transitions and a final execution gate: https://cheatsheetseries.owasp.org/cheatsheets/Transaction_Authorization_Cheat_Sheet.html
 - Linux allocation guarantees apply to writes within the allocated range, with concurrency caveats for emulated fallocation: https://man7.org/linux/man-pages/man3/posix_fallocate.3.html
 - The public Grok Bot/X search found no payment-audit reservation implementation suitable to reuse. Social posts are not security evidence.
+
+
+Final logs on the box:
+
+- `/workspace/zshield-pristine-baseline.log`: immutable base full suite, 596/596.
+- `/workspace/zshield-run14-before.log`: initial independent reproduction, 4 failures out of 5.
+- `/workspace/zshield-binding-before.log`: unsynced binding incorrectly allowed payment.
+- `/workspace/zshield-audit-before.log`: F-75, F-83 and F-85 failures.
+- `/workspace/zshield-legacy-before.log`: legacy pending crash interlock failure.
+- `/workspace/zshield-resume-refusal-before.log`: non-durable refused resume exposed its decision.
+- `/workspace/zshield-compat-after.log`: 40 focused tests passing after the final corrections.
+- `/workspace/zshield-final-rerun.log`: complete final coverage run, 609/610. All-files coverage is 97.21% lines, 88.58% branches, 93.62% functions, including test fixtures and temporary fake CLI programs; these are not source-only or native-network coverage percentages.
+
+Additional compatibility/invariant correction: `136553b` (Verify retryable no-send bindings). New regression evidence and financial review rules are preserved in AGENTS.md so the next round cannot mistake visibility for durable authorization or omit a recovery path.

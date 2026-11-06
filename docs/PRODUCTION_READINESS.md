@@ -126,3 +126,5 @@ Status: NOT production ready. No change in this checkpoint has been pushed or su
 - [ ] Define and test readiness and bounded shutdown behavior with surviving backend processes.
 - [ ] Rehearse pause, backup, restore, storage exhaustion and reviewed unpause using the incident runbook.
 - [ ] Independent security review of the final commit, followed by owner merge and deployment decision.
+
+Final local verification for this checkpoint: pristine base 596/596 tests passed; changed branch 609/610 tests passed, with only the intentionally active F-82 regression failing. Typecheck, build and npm audit passed. No push or PR is permitted from this checkpoint. The coverage report is in `/workspace/zshield-final-rerun.log` on the box. The 68-point crash sweep establishes no duplicate sends, but 17 preauthorization points cleanly refuse continuation rather than complete the payment. Native testnet remains disabled.
