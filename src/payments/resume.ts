@@ -10,7 +10,7 @@ import { assertRecipientAllowed, loadAllowlist } from "../policy/allowlist.js";
 import { assertPayInputBounded } from "../policy/limits.js";
 import type { Config } from "../types.js";
 import type { RecoveryAuditEntry } from "./recovery.js";
-import { isSettled, paymentParamsHash, type CallRecord, type PaymentStore } from "./store.js";
+import { isSettled, mayHaveBroadcast, paymentParamsHash, type CallRecord, type PaymentStore } from "./store.js";
 import type { WalletLock } from "./lock.js";
 
 /** Never constructs a new transaction. An ambiguous retry remains the SAME signed tx. */
@@ -25,7 +25,7 @@ export function hasTransmitAuthorization(record: CallRecord): boolean {
 /**
  * Caller holds the exclusive wallet lock. Only a verified, still-calculated transaction
  * bound to this intent can be transmitted. No chain absence or error proves not_sent.
- * `explicit` permits a caller to authorize resuming an older two-step record.
+ * `explicit` permits legacy two-step recovery, never revival of tracked non-sends.
  */
 export async function resumeOriginal(
   config: Config, chain: ChainAdapter, store: PaymentStore, lock: WalletLock,
@@ -46,6 +46,18 @@ export async function resumeOriginal(
     if (!intent?.two_step || !txid || (record.txid !== undefined && record.txid !== txid) || !/^[0-9a-f]{64}$/.test(txid) || store.txidOwner(txid) !== record.callId) {
       return unknown("There is no exclusively owned, staged transaction to resume. No replacement was built.");
     }
+    // The same proof that permits a replacement must forbid later revival.
+    if (!mayHaveBroadcast(record)) return unknown("This call has no possible broadcast and cannot be revived; no transmission attempted.");
+    const assertNoOtherSend = () => {
+      lock.assertHeld();
+      const current = store.readCall(record.callId);
+      if (!current || isSettled(current.state) || !mayHaveBroadcast(current)) {
+        throw new ResumeAuditError("The original call is no longer eligible for transmission.");
+      }
+      const other = store.unresolvedSend(record.callId);
+      if (other) throw new ResumeAuditError(`Unresolved payment ${other.callId} blocks this resume; resolve it first.`);
+    };
+    assertNoOtherSend();
     if (!explicit && !hasTransmitAuthorization(record)) return unknown("Transmit was not authorized for this call.");
     // A fresh explicit request cannot revive a call already proven not_sent; the settled
     // check above preserves that proof. Original bindings are never reset or reassigned.
@@ -89,7 +101,7 @@ export async function resumeOriginal(
     reserveFee(config, store, lock, record.callId, originalFee, paymentParamsHash(intent), intent.idempotency_key!);
     lock.assertHeld();
     await chain.resumeSigned(txid, { fence: () => {
-      lock.assertHeld();
+      assertNoOtherSend();
       assertPaymentsEnabled(store);
       assertApproval(config, store, intent.idempotency_key!, paymentParamsHash(intent), fingerprint);
       assertRecipientAllowed(intent.recipient, loadAllowlist(config.allowlistPath));
