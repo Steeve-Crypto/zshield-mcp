@@ -1,9 +1,9 @@
-# V12 run 14 response: local checkpoint
+# V12 run 14 response
 
 Base: `4a2fff132201f4a1110dc6930d3d9453d0cf3ff3` on `origin/main`.
-Branch: `fix/root-causes`. Nothing pushed. No PR, comment, reviewer request or network payment.
+Branch: `fix/root-causes`. No merge, reviewer request, V12 trigger or network payment.
 
-This is NOT a production approval. F-82 remains reproducible and intentionally has an active failing regression. The local branch must not be pushed as an all-green fix.
+This is not financial deployment approval. The code fixes, including F-82, have passed local verification. Native-wallet, actual deployment-storage and independent qualification remain release gates. See the latest verification below.
 
 ## Findings
 
@@ -14,7 +14,7 @@ This is NOT a production approval. F-82 remains reproducible and intentionally h
 | F-59 | STALE | Base `src/payments/resume.ts:83-105` validates durable fee, spending and fee reservations before financial audit inside the execution fence. Tests: v12r13 "F-59 refused resumes never consume payment audit capacity" and run14 "F-59 durable fee mismatch never charges payment audit capacity". Repeated mismatches cause zero transmit attempts and no payment-counter growth. |
 | F-75 | CONFIRMED | Ordinary pre-intent policy refusals ignored final audit durability, and non-attempted resume results also ignored it. Fixed in `c864dbe` and `afec9fb`. `audit-contract.test.ts`: "F-75 ordinary rejected payments fail closed when refusal audit is unavailable". `v12r14.test.ts`: "F-75 refused resume hides unaudited decision but preserves original uncertainty". Both failed before their fixes. Return AUDIT_WRITE_FAILED, without hiding a potentially earlier payment. |
 | F-80 | STALE for legacy unknown with no txid | Base `src/payments/store.ts:178-184,338-344` already passes v12r13 "F-80 a legacy one-step unknown with no txid blocks new live sends". Run 14's F-86 explicitly relies on this supported shape, contradicting F-80's description. Additional self-review found legacy PENDING intents with no result still bypassed the predicate. `d7bd1f2` conservatively blocks those crash windows and orphan pending markers. Test "legacy one-step intent without outcome blocks replacement after crash" failed before, passes after. |
-| F-82 | CONFIRMED, OPEN RELEASE BLOCKER | `audit-disk-reserve.test.ts`: "F-82 refusal rows cannot use disk still promised to payment rows" fails on base and remains failing locally. Pool counters do not allocate physical blocks. Refusal logging can consume payment disk. A statfs threshold alone races concurrent writers and is not represented as a complete fix. See the structural design needed below. |
+| F-82 | CONFIRMED, FIXED | `529b186` preallocates actual zero-filled blocks and fsyncs the complete journal before exclusive publication. Payment evidence is written in place under a cross-process flock using incomplete and committed slot markers. Refusal/diagnostic rows never enter the reserved segment. Existing "F-82 refusal rows cannot use disk still promised to payment rows" now verifies allocated blocks, fixed size/block count and successful reserved writes while traffic appends return ENOSPC. Seven additional physical-reservation tests cover exhaustion, restart, SIGKILL during allocation, ENOSPC during allocation, interrupted slots, process concurrency and legacy charges. See [journal design and operator procedure](docs/PAYMENT_AUDIT_JOURNAL.md). |
 | F-83 | CONFIRMED | `b0bd6ba` makes health report whole usable slots, matching enforcement. `audit-capacity-health.test.ts`: "F-83 health reports usable slots rather than stranded remainder" failed before and passes after. |
 | F-84 | CONFIRMED | `34dcba4` shares the existing mayHaveBroadcast contract with resume eligibility. A tracked never-authorized staged transaction cannot first permit a replacement and later revive through explicit resume. Test "F-84 a tracked call never authorized to transmit cannot be revived by explicit resume" failed before, passes after. |
 | F-85 | CONFIRMED | `c864dbe` replaces the returned audit object as well as the top-level code with a generic storage failure. The original code, error and refused_code no longer escape. Test "F-85 unaudited key decisions are absent from response and returned audit" failed before and passes after. |
@@ -26,11 +26,19 @@ This is NOT a production approval. F-82 remains reproducible and intentionally h
 2. Publication was confused with durability. Returning success after directory fsync fails can lose the binding on a power cut after a real payment. Exclusive creation now retains publication but propagates durability failure. Existing explicit no-send binding recovery is used instead of optimistic sending or unsafe rollback.
 3. Decision exposure was not tied to durable refusal evidence. Ordinary refusals and non-attempted resume results now fail closed with a generic result. A prior uncertain payment is still described as uncertain, never as disproven.
 4. Health and enforcement used different units. Health now floors to usable reservations.
-5. Audit pools isolate logical counters, not physical storage. This root cause is still OPEN.
+5. Audit pools isolated logical counters, not physical storage. Fixed by independent, physically allocated journals for primary and fallback. Compatibility JSONL failure cannot negate committed payment evidence.
+6. Persisted record parsing silently ignored malformed JSON, unknown states and truncated event histories. `c76f49a` validates intent, event, binding, metadata, tip and index shapes, rejects unknown fields/versions and refuses missing/mismatched identities. `5379441` verifies restart cannot redirect a corrupt store into fresh fallback state. All six original schema tests failed before this fix and pass afterward; a seventh covers restart.
+7. Self-review found pre-intent infrastructure errors still used protected audit slots. `f377962` classifies those as refusal traffic while retaining tx-bearing and legacy unknown evidence in the payment pool. A repeated backend-error regression failed before the fix and passes after it.
 
-### Required F-82 design
+### Implemented F-82 storage contract
 
-Use payment-only preallocated journal extents or genuinely isolated capacity with enforceable quotas. Payment evidence must be written INTO its reserved extents, not into a different append file after freeing a spare reserve file. Allocation, slot ownership, crash recovery, rotation and migration must be serialized across processes and fail closed. Both primary and fallback, including shared-filesystem configurations, need explicit guarantees. Test ENOSPC, inodes, quotas, unsupported allocation, two processes, concurrent refusal floods, interrupted reservations and restart migration. Existing counters must never be reset while writers are live. Do not silently convert statfs monitoring into a storage guarantee.
+The primary and fallback canonical `.budget` directories each contain a fixed-slot `payment-evidence.bin`. Real blocks are written in bounded chunks and fsynced before an exclusive final name is published. A crash cannot publish a partially initialized reservation. Writers flock the inherited journal inode, fsync an incomplete marker, write and fsync length/checksum/JSON, then fsync the committed marker before acknowledging durability. An interrupted slot remains consumed; no lease or restart reclaims it. No financial append grows the file.
+
+Refusal and diagnostic logging uses the separate bounded traffic files. Payment JSONL rows are best-effort mirrors, not the protected evidence source. Both reservations are attempted before traffic; startup fails if neither is usable. Existing baseline bytes and old payment counters remain charged without creating fresh payment-counter metadata during a reserved write. Operator health counts complete and incomplete slots.
+
+Only qualified Linux ext4 and XFS are supported for these reservations. Mixed-version writers, live reflinks, deduplication and compression are unsupported. Increasing capacity requires offline reviewed migration, not truncation or replacement of evidence. Both `.budget` directories are already included by coordinated snapshots. Export complete rows with `npm run audit:payments -- /absolute/path/payment-evidence.bin` and keep the output private.
+
+Tests verify real block allocation plus injected ENOSPC for traffic writes. They do not destructively fill a deployed volume or establish host power-loss behavior. Actual deployment storage still requires qualification.
 
 ## What prior rounds missed
 
@@ -42,34 +50,36 @@ Use payment-only preallocated journal extents or genuinely isolated capacity wit
 
 ## Verification
 
-Pristine detached baseline, all discovered existing test files: 596 passed, 0 failed. Typecheck and build passed. Native testnet was not enabled.
+Immutable clean base: typecheck and build passed; 596/596 recursively discovered tests passed. The first local checkpoint had 609/610 with F-82 still failing. No failure was disabled or skipped to obtain the final result.
 
-Current typecheck and build passed. npm audit reports 0 known vulnerabilities. Full recursive coverage rerun: 610 tests, 609 passed, 1 failed. The sole failure is the active F-82 disk-protection regression. All other new and existing cases passed. The first full run also found an obsolete failed-binding shape assertion and a generic-error wording compatibility issue; both were corrected, 40 focused tests passed, and the complete suite was rerun. The binding invariant now requires explicit retryable no-send proof rather than assuming every terminal binding is burned. No financial assertion was disabled. No lint script exists. Node on the box is 24.22.1; proposed CI uses Node 22 and has not run on GitHub.
+After physical reservations and strict record validation, Node 24.22.1 passed all 623 tests. Self-review then added preauthorization isolation and corrupt-store restart coverage. Node 22.23.4, matching the CI major version, passed the expanded 625-test suite with coverage. The final rerun after bounding test-only allocation sizes also passed: 625 tests across 143 suites, zero failures, cancellations or skipped cases, in 214.84 seconds on Node 22.23.4. Coverage across all files was 97.85% lines, 90.47% branches and 94.19% functions, including tests and fake CLI fixtures. Production default capacity remains 64 MiB per destination and has an explicit configuration assertion. Real default reservations consume about 192 MiB in total; test fixtures use smaller actual allocations, not sparse mocks.
 
-CI now installs, typechecks, builds, audits dependencies and recursively runs all test files with coverage. Discovery no longer depends on an enumerated package.json list. `test:invariants` remains an optional focused command. The F-82 regression intentionally prevents a misleading green result.
+Typecheck, build and npm audit passed; npm audit reported zero known vulnerabilities. No lint script exists. Native testnet was not enabled. CI installs, typechecks, builds, audits dependencies and recursively runs every test file with coverage on Node 22. Branch push plus PR creation no longer launches duplicate CI runs: branch verification is on PRs, with main pushes also verified.
 
-## Self-review and release limits
+## Self-review and limits
 
-Checked the changed send/resume boundary for stale records, superseded transactions, wallet concurrency, budget refusals, audit failure before versus after transmit, binding publication and failed outcome writes. Existing exact-txid concurrency and crash sweeps remain part of the full suite. SIGKILL simulation does not prove power-loss persistence. The full payment crash matrix exercised 68 kill points without duplicate sends. Seventeen preauthorization points (40 through 56) ended with zero sends and a clean error rather than successful same-key continuation. The harness permits clean refusals there: this is safety evidence, not a proof of uninterrupted payment liveness. The tracked transaction cannot revive after that local non-send classification. Native-wallet behavior and operational replacement guidance remain release gates.
+Reviewed crash and fsync boundaries, concurrent slot ownership, canonical path aliases, old-counter migration, exhausted journals, failed compatibility mirrors, interrupted initialization, stale/superseded resume, missing authorization, budget refusals, malformed persisted records and restart fallback. Positive controls still resume exactly the original authorized txid. Existing process crash and concurrent-payment suites remain enabled.
 
-Further production gaps: native funded scratch-wallet qualification, physical audit-space reservation, incomplete record schema/corruption validation, bounded graceful shutdown, readiness linked to recovery completion, and structured operational logging. These are not certified by this patch. See docs/PRODUCTION_READINESS.md and docs/INCIDENT_RUNBOOK.md. No V12 review has been triggered.
+The final original-payment sweep exercised 83 durable kill points with no duplicate sends: 66 continued to mined, while 17 preauthorization points cleanly refused continuation with CHAIN_ERROR and zero sends. That is safety evidence, not uninterrupted-liveness proof. Process SIGKILL is not a host power-loss test. No real Zcash transaction, native-wallet qualification, deployment or independent security review was performed.
+
+Remaining work, ranked by risk: native backend calculated-tx and rebroadcast qualification; actual storage exhaustion/power-loss and mixed-version migration rehearsal; independent review of the final commit; bounded graceful shutdown; recovery-aware readiness and consistently structured operational logs. Strict record schemas deliberately stop on unknown legacy shapes or future fields. Inventory and review actual deployment records before upgrade; do not repair them by deleting keys or markers.
+
+See [production scorecard](docs/PRODUCTION_READINESS.md), [journal contract](docs/PAYMENT_AUDIT_JOURNAL.md) and [incident runbook](docs/INCIDENT_RUNBOOK.md).
 
 ## Research
 
-- OWASP transaction authorization: enforce allowed state transitions and a final execution gate: https://cheatsheetseries.owasp.org/cheatsheets/Transaction_Authorization_Cheat_Sheet.html
-- Linux allocation guarantees apply to writes within the allocated range, with concurrency caveats for emulated fallocation: https://man7.org/linux/man-pages/man3/posix_fallocate.3.html
-- The public Grok Bot/X search found no payment-audit reservation implementation suitable to reuse. Social posts are not security evidence.
+- OWASP final execution gates and allowed state transitions: https://cheatsheetseries.owasp.org/cheatsheets/Transaction_Authorization_Cheat_Sheet.html
+- Allocation guarantees apply to writes within the allocated range, not to a separate append file after freeing a spare reserve: https://man7.org/linux/man-pages/man3/posix_fallocate.3.html
 
+## Logs on the box
 
-Final logs on the box:
+- `/workspace/zshield-pristine-baseline.log`: immutable clean baseline, 596/596.
+- `/workspace/zshield-final-rerun.log`: initial held checkpoint, 609/610, F-82 open.
+- `/workspace/zshield-reservation-focused.log`: physical reservation regressions.
+- `/workspace/zshield-schema-before.log`: six schema regressions failing before validation.
+- `/workspace/zshield-preintent-before.log`: protected-slot drain from preauthorization errors.
+- `/workspace/zshield-final-physical-schema.log`: Node 24, 623/623.
+- `/workspace/zshield-node22-final.log`: Node 22 expanded suite.
+- `/workspace/zshield-node22-release.log`: final CI-matching rerun and coverage after test-resource controls.
 
-- `/workspace/zshield-pristine-baseline.log`: immutable base full suite, 596/596.
-- `/workspace/zshield-run14-before.log`: initial independent reproduction, 4 failures out of 5.
-- `/workspace/zshield-binding-before.log`: unsynced binding incorrectly allowed payment.
-- `/workspace/zshield-audit-before.log`: F-75, F-83 and F-85 failures.
-- `/workspace/zshield-legacy-before.log`: legacy pending crash interlock failure.
-- `/workspace/zshield-resume-refusal-before.log`: non-durable refused resume exposed its decision.
-- `/workspace/zshield-compat-after.log`: 40 focused tests passing after the final corrections.
-- `/workspace/zshield-final-rerun.log`: complete final coverage run, 609/610. All-files coverage is 97.21% lines, 88.58% branches, 93.62% functions, including test fixtures and temporary fake CLI programs; these are not source-only or native-network coverage percentages.
-
-Additional compatibility/invariant correction: `136553b` (Verify retryable no-send bindings). New regression evidence and financial review rules are preserved in AGENTS.md so the next round cannot mistake visibility for durable authorization or omit a recovery path.
+All-files coverage includes test fixtures and temporary fake CLI programs. Do not present it as source-only or native-network coverage.

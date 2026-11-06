@@ -1,6 +1,6 @@
 # Payment incident runbook
 
-This revision is not approved for financial production. See [release blockers](../V12-RUN14-RESPONSE.md).
+This revision is not approved for financial deployment without native and independent qualification. See [review evidence](../V12-RUN14-RESPONSE.md).
 
 ## Stuck or uncertain payment
 
@@ -16,8 +16,8 @@ This revision is not approved for financial production. See [release blockers](.
 1. Pause. Keep the caller's original key and any returned txid. A result-log failure after transmission does not undo the payment.
 2. Check both audit destinations, filesystem free blocks, free inodes, quotas and permissions. Default primary and fallback usually share a filesystem.
 3. Archive only through a coordinated offline maintenance procedure with verified backups. Do not reset monotonic budget counters on a live writer.
-4. Increase storage or configure reviewed isolated storage. Logical audit counters do not currently reserve physical disk space (F-82 remains open).
-5. Rehearse recovery and check operator health before reviewed unpause. Positive raw free bytes do not prove capacity for another row.
+4. Export and preserve both reserved payment journals using the [journal runbook](PAYMENT_AUDIT_JOURNAL.md). JSONL may be missing a committed payment mirror. Increase storage or migrate capacity only with every writer stopped; never replace the published journal to clear an error.
+5. Rehearse recovery and check operator health before reviewed unpause. Free disk bytes do not prove a remaining journal slot. Uncommitted slots remain charged.
 
 ## Key binding failure
 

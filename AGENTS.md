@@ -16,3 +16,7 @@
 - Logical audit pools and statfs thresholds are not physical disk reservations. Do not claim guaranteed evidence capacity without qualifying the storage mechanism and concurrent writers.
 - Run npm test or npm run test:coverage for recursive discovery, plus typecheck and build. Do not disable a failing financial regression to obtain a green release.
 - Preserve already accepted payment identity in error responses. Failure to log a result cannot undo a transmission or authorize a replacement key.
+
+- Payment evidence now lives in fixed, physically allocated journals. JSONL rows may be absent compatibility mirrors; use the private journal export before concluding that evidence is missing.
+- Never reset, reflink, deduplicate, compress or replace live reservation segments. Stop all writers for upgrades, capacity migration and maintenance; old and new writers cannot be mixed.
+- Unknown persisted record shapes require reviewed migration. Never redirect a validation failure to a new empty store.

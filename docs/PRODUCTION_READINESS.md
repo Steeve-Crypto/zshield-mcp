@@ -96,35 +96,34 @@ The distributable patch was applied to the reviewed base in a disposable checkou
 and its resulting tree was compared with the committed source tree.
 
 
-## 2026-11-06 root-cause checkpoint
+## 2026-11-06 root-cause review
 
-Status: NOT production ready. No change in this checkpoint has been pushed or submitted for independent review. See [per-finding evidence](../V12-RUN14-RESPONSE.md) and [incident runbook](INCIDENT_RUNBOOK.md).
+Code fixes have passed local verification. Financial deployment is not approved without the remaining native, storage and independent qualification. See [per-finding evidence](../V12-RUN14-RESPONSE.md), [physical audit contract](PAYMENT_AUDIT_JOURNAL.md) and [incident runbook](INCIDENT_RUNBOOK.md).
 
-| Risk | Area | Evidence / remaining work |
+| Risk / status | Area | Evidence / remaining work |
 | --- | --- | --- |
-| Critical release gate | Native payment lifecycle | Fake CLI crash and concurrency tests exist. Native funded scratch-wallet exact-txid continuation, calculated-tx persistence, auto-broadcast behavior and host power-loss tests remain required. No real payments were made. |
-| High, OPEN | Audit disk isolation, F-82 | Active regression demonstrates caller-controlled refusals consume payment-promised disk. Logical pools are not physical reservations. Implement preallocated payment journal extents or reviewed isolated capacity and crash-safe migration. |
-| High, locally fixed | Send/resume consistency | Shared eligibility and wallet-wide gate now apply at resume admission and inside execution fence. Never-authorized tracked calls cannot revive. Legacy pending one-step crash windows block replacement. |
-| High, locally fixed | Binding durability | Directory fsync failures propagate without deleting the published name. No-send proof permits identical-key retry under lock. Test proves zero sends before durable binding. |
-| High, remaining | State corruption | Orphan pending markers block. Full persisted-record schema validation is not implemented; malformed JSON or truncated/mismatched event records need fail-closed tests and repair procedures. |
-| Medium, locally fixed | Refusal evidence and decision privacy | Non-durable ordinary and non-attempted resume refusals return generic audit failure. Previously uncertain payment identity is retained. |
-| Medium, partial | Startup/readiness | Fail-fast configuration, local filesystem and financial-profile checks already exist. MCP starts before background recovery completes; there is no dedicated readiness gate for completion. |
-| Medium, remaining | Graceful shutdown | No explicit SIGTERM/SIGINT drain. Crash recovery is a fallback, not a bounded drain contract. Define admission closure, in-flight completion, backend lifetime and supervisor deadlines before implementation. |
-| Medium, partial | Operations | Operator health, pause, cumulative allowance, signed approvals and snapshot controls exist. Health now reports usable audit slots. Logs are redacted but not consistently structured JSON. Pager and backup encryption are deployment responsibilities. |
-| Medium, partial | Security | Tool schemas and bounds, rate limits, private paths, redaction and pinned backend exist. npm audit: zero known advisories this checkpoint. No penetration test or new trust-boundary certification. |
-| Medium, locally added | CI and complete tests | Recursive test discovery includes run 13 and all new regressions. CI installs, typechecks, builds, audits and runs coverage. GitHub CI itself has not run. No lint script is currently defined. |
-| Required release gate | Independent review | Submit the complete final, green change for independent review only after unresolved blockers are fixed. No V12 trigger or request was made. |
+| Critical release gate | Native payment lifecycle | Fake subprocess crash and concurrency tests pass. Qualify the actual pinned wallet's calculated-tx persistence, exact-txid continuation, automatic broadcast behavior and recovery on a funded disposable testnet wallet. No native or real-network payment was performed here. |
+| High release gate | Deployment storage and rollout | Real zero-filled, fsynced extents protect payment evidence. Allocation failure, injected traffic ENOSPC, SIGKILL initialization, restart, incomplete slots, migration charges and cross-process ownership pass locally. Rehearse actual volume exhaustion, inodes, quotas, host power loss and offline upgrade on deployment storage. Never mix old and new writers or reflink/deduplicate/compress live journals. |
+| Required release gate | Independent review | Review the final commit independently before owner merge and deployment approval. No V12 trigger or review request was sent. |
+| High, locally fixed | Send/resume consistency | Shared eligibility and wallet-wide gates apply before resume and inside the execution fence. Never-authorized tracked calls cannot revive. Legacy pending one-step crash windows and orphan markers block replacement. |
+| High, locally fixed | Binding durability | Directory fsync failures propagate without deleting publication. Identical-key retry requires explicit durable no-send proof under the wallet lock. |
+| High, locally fixed | Physical audit isolation, F-82 | Payment evidence goes into preallocated fixed slots, not a growing JSONL file. Refusal and diagnostic traffic cannot consume those slots. JSONL mirrors are best effort; a failed mirror does not discard a committed payment record. |
+| High, locally fixed | Persisted-state integrity | Strict schemas reject malformed JSON, unknown fields/versions/states, type errors, mismatched identities and over-limit event histories. Restart cannot silently redirect corrupt state into a fresh store. Review real legacy records before rollout; unknown shapes intentionally fail closed. |
+| Medium, locally fixed | Refusal evidence/privacy | Non-durable ordinary and resume refusals return generic audit failure while preserving earlier uncertainty. Preauthorization infrastructure errors no longer charge protected payment evidence. |
+| Medium, remaining | Shutdown/readiness/logs | No explicit bounded SIGTERM/SIGINT drain or readiness gate tied to background recovery completion. Operational logs are redacted but not consistently structured JSON. Crash recovery is not graceful drain. |
+| Medium, deployment responsibility | Operations | Pause, cumulative principal-plus-fee allowance, signed approvals, coordinated snapshots and operator health exist. Rehearse private journal export, encrypted off-host backup, pager routing, restore and reviewed unpause. |
+| Locally verified | Tests and CI | Recursive discovery, typecheck, build, npm audit and coverage run on Node 22. No lint script exists. GitHub CI will verify the PR; local success is not a claim that remote checks have completed. |
 
-### Production release checklist
+### Release checklist
 
-- [ ] Close F-82 with physical-space and concurrency evidence, not only statfs thresholds.
-- [ ] All recursively discovered tests, typecheck, build and dependency audit green on the final tree and supported deployment Node version.
-- [ ] Native testnet qualification with a disposable funded wallet, approved by the operator; capture exact txids and crash/recovery observations.
-- [ ] Validate calculated transactions cannot auto-broadcast outside authorization; document exclusive wallet ownership.
-- [ ] Qualify filesystem durability, quotas, locks, low inode space and power-loss behavior on deployment storage.
-- [ ] Fail closed on corrupt persisted records and rehearse reviewed recovery without deleting keys or pending markers.
-- [ ] Define and test readiness and bounded shutdown behavior with surviving backend processes.
-- [ ] Rehearse pause, backup, restore, storage exhaustion and reviewed unpause using the incident runbook.
-- [ ] Independent security review of the final commit, followed by owner merge and deployment decision.
+- [x] Fix F-82 using real allocated payment extents, with exhaustion, crash, restart and concurrency regressions.
+- [x] Reject corrupt or unknown persisted payment records instead of silently ignoring them.
+- [x] Preserve complete default test discovery, typecheck, build, dependency audit and coverage gates.
+- [ ] Native testnet qualification and explicit operator approval for any funded tests.
+- [ ] Qualify deployed storage guarantees, actual full-volume behavior and offline migration.
+- [ ] Review actual legacy records against the strict schemas without deleting financial identity.
+- [ ] Define and test recovery-aware readiness and bounded shutdown with surviving backend processes.
+- [ ] Rehearse backups, audit-journal export, storage incidents and reviewed unpause.
+- [ ] Independent review of the final commit, followed by owner merge and deployment decision.
 
-Final local verification for this checkpoint: pristine base 596/596 tests passed; changed branch 609/610 tests passed, with only the intentionally active F-82 regression failing. Typecheck, build and npm audit passed. No push or PR is permitted from this checkpoint. The coverage report is in `/workspace/zshield-final-rerun.log` on the box. The 68-point crash sweep establishes no duplicate sends, but 17 preauthorization points cleanly refuse continuation rather than complete the payment. Native testnet remains disabled.
+The clean base passed 596 tests. Node 24 passed all 623 tests after the first physical/schema fixes, and the expanded Node 22 suite passed 625 tests. The final CI-matching Node 22 rerun after bounded test allocations also passed all 625 tests across 143 suites, with zero failures. Typecheck, build and dependency audit passed; there were zero known advisories. The 83-point original-payment crash sweep had no duplicate sends, with 17 safe preauthorization refusals rather than completion. Full evidence is in V12-RUN14-RESPONSE.md. Native tests remain disabled; no mainnet or testnet transaction was submitted.
