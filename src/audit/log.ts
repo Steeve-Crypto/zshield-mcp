@@ -1,4 +1,4 @@
-import { reserveAudit, type AuditBudget } from "./budget.js";
+import { reserveAudit, type AuditBudget, type AuditPool } from "./budget.js";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { appendPrivate, ensurePrivateDir } from "../fsafe.js";
@@ -97,7 +97,7 @@ export function appendAuditEntry(
   const day = entry.ts.slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error("Invalid audit date.");
   const file = join(auditDir, `${day}.jsonl`);
-  reserveAudit(file, financialRow(entry), budget, true);
+  reserveAudit(file, auditPool(entry), budget, true);
   appendDurable(file, `${JSON.stringify(boundAuditEntry(entry))}\n`);
   return file;
 }
@@ -122,10 +122,17 @@ let auditFreezeDepth = 0;
 export function freezeAuditWrites(): void { auditFreezeDepth++; }
 export function unfreezeAuditWrites(): void { auditFreezeDepth = Math.max(0, auditFreezeDepth - 1); }
 export function auditWritesFrozen(): boolean { return auditFreezeDepth > 0; }
-function financialRow(row: AuditRow): boolean {
-  // Payment refusals are financial evidence too: they must not fall into the finite
-  // diagnostic pool where exhaustion silently drops per-call proof (F-75).
-  return row.tool === "zcash_pay" ? row.status !== "replayed" : row.tool === "zcash_pay_recovery";
+function auditPool(row: AuditRow): AuditPool {
+  // Only rows that record or precede a real payment mutation use the protected pool. A
+  // refused payment or resume is per-call evidence in its own
+  // fail-closed pool, so caller-controlled refusals cannot exhaust payment capacity (F-59),
+  // and cannot fall into the diagnostic pool where exhaustion drops evidence (F-75).
+  if (row.tool === "zcash_pay") {
+    if (row.status === "replayed") return "diagnostic";
+    return row.status === "rejected" || (row as { refusal?: boolean }).refusal ? "refusal" : "payment";
+  }
+  if (row.tool === "zcash_pay_recovery") return (row as { refusal?: boolean }).refusal ? "refusal" : "payment";
+  return "diagnostic";
 }
 // Capacity refusals must not turn stderr into an unbounded replacement audit sink.
 const capacityWarnings = new Set<string>();
@@ -166,7 +173,7 @@ export function writeAuditRow(
   const fallback = fallbackAuditPath(auditDir, target.auditFallbackPath);
   try {
     ensureDurableDir(dirname(fallback));
-    reserveAudit(fallback, financialRow(entry), target, false);
+    reserveAudit(fallback, auditPool(entry), target, false);
     appendDurable(fallback, line);
     return {
       durable: true,
