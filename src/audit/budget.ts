@@ -11,7 +11,14 @@ export const DEFAULT_AUDIT_MAX_BYTES = 64 * 1024 * 1024;
 export interface AuditBudget {
   auditMaxBytes?: number;
   auditDiagnosticMaxBytes?: number;
+  auditRefusalMaxBytes?: number;
 }
+/**
+ * Three separate pools. `payment` is protected evidence for real payment mutations and is
+ * never consumed by caller-controlled refusals; `refusal` holds per-call evidence of rejected
+ * payment activity and fails closed when full; `diagnostic` is everything else (F-59/F-75).
+ */
+export type AuditPool = "payment" | "refusal" | "diagnostic";
 
 function capacity(): never {
   throw Object.assign(new Error("Audit capacity exhausted; archive logs before renewing capacity."), {
@@ -33,7 +40,9 @@ export function parseAuditBudget(value: unknown): number {
  * stale-lock deletion, or log/state pruning. Legacy slot files remain charged. Budget directories
  * live beside the sink, not among JSONL files. Never reset while any writer is running.
  */
-export function reserveAudit(file: string, financial: boolean, budget: AuditBudget, daily: boolean): void {
+export function reserveAudit(file: string, poolOrFinancial: AuditPool | boolean, budget: AuditBudget, daily: boolean): void {
+  // A boolean means the original two-pool call: true is payment, false is diagnostic.
+  const pool: AuditPool = poolOrFinancial === true ? "payment" : poolOrFinancial === false ? "diagnostic" : poolOrFinancial;
   // Quota identity follows the physical sink so symlink aliases share one counter (F-55).
   let abs = file;
   try { abs = safeRecordPath(file); } catch {
@@ -72,11 +81,11 @@ export function reserveAudit(file: string, financial: boolean, budget: AuditBudg
   const bytes = JSON.parse(baseline ?? "null")?.bytes;
   if (!Number.isSafeInteger(bytes) || bytes < 0) throw new Error("Invalid audit capacity record.");
   const max = parseAuditBudget(
-    (financial ? budget.auditMaxBytes : budget.auditDiagnosticMaxBytes) ?? DEFAULT_AUDIT_MAX_BYTES,
+    (pool === "payment" ? budget.auditMaxBytes : pool === "refusal" ? budget.auditRefusalMaxBytes ?? budget.auditDiagnosticMaxBytes : budget.auditDiagnosticMaxBytes) ?? DEFAULT_AUDIT_MAX_BYTES,
   );
   const slots = Math.floor((max - bytes) / AUDIT_SLOT_BYTES);
   // Keep legacy charges; never delete evidence or reset capacity during upgrade.
-  const prefix = financial ? "payment" : "diagnostic";
+  const prefix = pool;
   const legacy = fs.readdirSync(dir).filter((name) => new RegExp(`^${prefix}-[0-9]+$`).test(name)).length;
   const ledger = join(dir, `${prefix}.counter`);
   if (!fs.existsSync(ledger)) createExclusive(dir, `${prefix}.counter`, "");
