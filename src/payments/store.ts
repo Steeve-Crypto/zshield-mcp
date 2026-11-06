@@ -173,15 +173,16 @@ export function foldEvents(callId: string, intent: CallIntent | undefined, event
  * Whether an unsettled call could have put a transaction on the network. Only local protocol
  * proof says no: a tracked call never authorized to transmit, or a two-step call that never
  * staged a transaction. A still-pending call with no recorded outcome counts as possible only
- * once something beyond its intent was written, so a brand-new intent is not a send.
+ * the backend may have started: legacy one-step intents have no durable pre-send boundary.
  */
 export function mayHaveBroadcast(r: CallRecord): boolean {
   if (r.txid || r.stagedTxid) {
     return !(r.intent?.transmit_tracked && !r.txid && !r.events.some((e) => e.transmit_authorized));
   }
   if (r.intent?.two_step || r.intent?.transmit_tracked) return false;
-  // Legacy one-step call without a txid: an unknown outcome may be a broadcast whose id was lost.
-  return r.state === "unknown";
+  // A crash inside a legacy one-step backend can lose BOTH the outcome and its txid.
+  // An intent alone is therefore not proof of non-transmission.
+  return r.state !== "not_sent";
 }
 
 /** Whether `next` moves a call in `current` state forward. */
@@ -339,6 +340,7 @@ export class PaymentStore {
     for (const callId of this.pendingCalls()) {
       if (callId === exceptCallId) continue;
       const r = this.readCall(callId);
+      if (!r) return { callId }; // Missing state is uncertainty, never permission to pay.
       // Any unsettled call that is not proven never to have transmitted blocks new sends, including
       // legacy one-step unknowns with no recorded txid (F-80).
       if (r && !isSettled(r.state) && (mayHaveBroadcast(r) || (this.requireOsLock && r.state === "expired"))) return { callId, txid: r.stagedTxid ?? r.txid };
