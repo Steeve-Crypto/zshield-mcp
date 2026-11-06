@@ -95,9 +95,10 @@ describe("single-flight sends", () => {
   it("SendLock hands over in order and frees on release", async () => {
     const lock = new SendLock();
     const order: number[] = [];
-    const r1 = await lock.acquire(10);
-    const p2 = lock.acquire(1_000).then((r) => (order.push(2), r));
-    const p3 = lock.acquire(1_000).then((r) => (order.push(3), r));
+    // Exclusive (payment) admissions are FIFO and one-at-a-time.
+    const r1 = await lock.acquire(10, true);
+    const p2 = lock.acquire(1_000, true).then((r) => (order.push(2), r));
+    const p3 = lock.acquire(1_000, true).then((r) => (order.push(3), r));
     r1();
     r1(); // a second release is ignored
     (await p2)();
@@ -106,9 +107,9 @@ describe("single-flight sends", () => {
     assert.equal(lock.locked, false);
     await assert.rejects(
       (async () => {
-        const held = await lock.acquire(10);
+        const held = await lock.acquire(10, true);
         try {
-          await lock.acquire(10);
+          await lock.acquire(10, true);
         } finally {
           held();
         }

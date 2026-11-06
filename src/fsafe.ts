@@ -205,8 +205,10 @@ function writeTemp(dir: string, data: string): string {
 export function createExclusive(dir: string, name: string, data: string): boolean {
   dir = dirname(safeRecordPath(join(dir, name)));
   const tmp = writeTemp(dir, data);
+  let published = false;
   try {
     fs.linkSync(tmp, join(dir, name));
+    published = true;
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "EEXIST") return false;
     throw e;
@@ -217,13 +219,12 @@ export function createExclusive(dir: string, name: string, data: string): boolea
       // Already gone.
     }
   }
+  // Once linkSync succeeds the name is authoritative. A directory fsync failure must not
+  // make the caller believe the key is free: that permanently consumes the binding (F-37).
   try {
     fsyncDir(dir);
-  } catch (e) {
-    // Already linked and visible to other processes. Rolling back would drop their
-    // reservations or leave a caller believing the key was free when it is not.
-    if (fs.existsSync(join(dir, name))) return true;
-    throw e;
+  } catch {
+    if (!published && !fs.existsSync(join(dir, name))) throw new Error("Exclusive create failed before publish.");
   }
   return true;
 }

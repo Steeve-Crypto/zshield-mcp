@@ -1,13 +1,11 @@
 import { approvalKeys } from "./payments/approval.js";
 import { parseZecToZats } from "./policy/amount.js";
-import { statfsSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { existsSync, readdirSync, statfsSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import { assertFingerprintSalt } from "./config.js";
 import { resolveWalletDir } from "./chain/live.js";
 import { assertWalletPrivate } from "./chain/perms.js";
 import type { Config } from "./types.js";
-import { existsSync, readdirSync } from "node:fs";
-import { join } from "node:path";
 import { fallbackAuditPath } from "./audit/log.js";
 import { assertSafeAncestors, checkPrivateFile, ensurePrivateDir } from "./fsafe.js";
 import { pinDir } from "./chain/pin.js";
@@ -85,6 +83,10 @@ export function startupChecks(config: Config, platform: string = process.platfor
   assertSafeAncestors(pin.path);
   assertCoherentWalletFilesystem(pin.path, platform);
   const stateDir = deps.stateDir ?? walletStateDir(pin.path);
+  // Audit durability and capacity flocks need the same local filesystem guarantees (F-77).
+  for (const p of [config.auditDir, fallbackAuditPath(config.auditDir, config.auditFallbackPath), stateDir]) {
+    assertCoherentRecordFilesystem(p, platform);
+  }
   const warnings = assertWalletPrivate(pin.path, platform);
   warnings.push(...checkRecordPaths(config, stateDir, platform));
   return warnings;
@@ -132,10 +134,23 @@ export function assertFinancialProfile(config: Config, platform: string = proces
 
 /** All live flocks need a coherent local lock domain; not only the strict financial profile. */
 export function assertCoherentWalletFilesystem(walletDir: string, platform: string = process.platform): void {
+  assertCoherentRecordFilesystem(walletDir, platform, "Live mode requires a local ext4, XFS or Btrfs wallet volume so advisory locks and fsync stay coherent.");
+}
+
+/** Audit, fallback and budget counters also require durable local fsync/flock semantics (F-77). */
+export function assertCoherentRecordFilesystem(
+  path: string,
+  platform: string = process.platform,
+  message = "Audit and payment record paths require a local ext4, XFS or Btrfs volume so capacity flocks and fsync stay durable.",
+): void {
   if (platform !== "linux") return;
-  // Refuse network filesystems, tmpfs and unqualified container overlays.
   const supported = new Set([0xef53, 0x58465342, 0x9123683e]); // ext4, XFS, Btrfs
-  if (!supported.has(statfsSync(walletDir).type)) {
-    throw new Error("Live mode requires a local ext4, XFS or Btrfs wallet volume so advisory locks and fsync stay coherent.");
+  let target = path;
+  try {
+    while (!existsSync(target) && dirname(target) !== target) target = dirname(target);
+    if (!supported.has(statfsSync(target).type)) throw new Error(message);
+  } catch (e) {
+    if (e instanceof Error && e.message === message) throw e;
+    throw new Error(message);
   }
 }
