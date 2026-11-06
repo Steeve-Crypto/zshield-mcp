@@ -43,7 +43,7 @@ export function operationalHealth(config: Config, store: PaymentStore) {
     try{count+=fs.statSync(file).size;}catch(e){if((e as NodeJS.ErrnoException).code!=="ENOENT")throw e;}
     const limit=(pool==="payment"?config.auditMaxBytes:pool==="refusal"?config.auditRefusalMaxBytes??config.auditDiagnosticMaxBytes:config.auditDiagnosticMaxBytes)??DEFAULT_AUDIT_MAX_BYTES;
     const reserved=baseline+count*AUDIT_SLOT_BYTES;
-    return [pool,{reserved_bytes:reserved,limit_bytes:limit,remaining_bytes:Math.max(0,limit-reserved)}];
+    return [pool,{reserved_bytes:reserved,limit_bytes:limit,remaining_bytes:Math.max(0,Math.floor((limit-baseline)/AUDIT_SLOT_BYTES)-count)*AUDIT_SLOT_BYTES}];
    }));
   } catch {return null;}
  };
