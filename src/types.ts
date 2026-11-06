@@ -37,6 +37,8 @@ export interface Config {
   /** Lifetime byte budgets per destination, separately for payment evidence and diagnostics. */
   auditMaxBytes?: number;
   auditDiagnosticMaxBytes?: number;
+  /** Per-call evidence of refused payment activity; defaults to the diagnostic budget */
+  auditRefusalMaxBytes?: number;
   lightwalletd?: string;
   /** Tool calls allowed per minute in this process; default 60 */
   rateLimitPerMin?: number;
@@ -80,6 +82,8 @@ export interface AuditEntry {
   operation_id?: string;
   /** sha256 of amount in zatoshis, recipient, and memo: what the key is bound to */
   params_sha256?: string;
+  /** Set on refusal rows: nothing was sent, and the row uses the refusal audit pool */
+  refusal?: true;
   /** Replay rows only: the call whose outcome was returned. Nothing was sent */
   replay_of?: string;
   /** Testnet pending rows: the height an expiry is proven from (see CallIntent.chain_tip) */
