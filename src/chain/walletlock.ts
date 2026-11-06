@@ -49,13 +49,15 @@ export class WalletBusyError extends Error {
 const SCRIPT = [
   "use strict; use Fcntl qw(:flock); use Time::HiRes qw(time sleep);",
   "BEGIN { $^F = 1023; }",
-  "my ($file, $nonce, $wait, @cmd) = @ARGV;",
+  "select STDERR; $| = 1; select STDOUT; $| = 1;",
+  "my ($file, $nonce, $wait, $gate, @cmd) = @ARGV;",
   "sub stop { my ($code, $why) = @_; print STDERR \"ZSHIELD-WRAP $nonce $why\\n\"; exit $code; }",
   "umask(077);",
   "stop(77, 'symlink') if -l $file;",
   "open(my $fh, '>>', $file) or stop(77, 'open');",
   "my $end = time() + $wait / 1000;",
   "until (flock($fh, LOCK_EX | LOCK_NB)) { stop(75, 'busy') if time() >= $end; sleep(0.05); }",
+  "if ($gate ne '') { print STDERR \"ZSHIELD-WRAP $nonce ready\\n\"; my ($g,$ppid)=(time()+30,getppid()); until (-f $gate) { stop(75, 'gate') if time()>=$g || getppid()!=$ppid; sleep(0.01) } unlink($gate); }",
   "exec { $cmd[0] } @cmd or stop(78, 'exec');",
 ].join(" ");
 
@@ -63,6 +65,8 @@ export interface WrapOptions {
   lockFile: string;
   /** How long to wait for the lock, in milliseconds. */
   waitMs: number;
+  /** When set, wrapper takes the lock then waits until this path exists before exec. */
+  gateFile?: string;
 }
 
 export interface Wrapped {
@@ -84,7 +88,7 @@ export function wrapForWallet(bin: string, args: string[], opts: WrapOptions): W
   const nonce = randomBytes(12).toString("hex");
   return {
     bin: "perl",
-    args: ["-e", SCRIPT, "--", opts.lockFile, nonce, String(Math.max(0, Math.floor(opts.waitMs))), bin, ...args],
+    args: ["-e", SCRIPT, "--", opts.lockFile, nonce, String(Math.max(0, Math.floor(opts.waitMs))), opts.gateFile ?? "", bin, ...args],
     nonce,
   };
 }
@@ -94,11 +98,13 @@ export function wrapForWallet(bin: string, args: string[], opts: WrapOptions): W
  * this run's nonce counts, so nothing zingo-cli prints can pass for it.
  */
 export function wrapperRefusal(nonce: string, stderr: string): WalletBusyError | undefined {
-  const m = stderr.match(new RegExp(`^ZSHIELD-WRAP ${nonce} (busy|symlink|open|exec)$`, "m"));
+  const m = stderr.match(new RegExp(`^ZSHIELD-WRAP ${nonce} (busy|symlink|open|exec|gate)$`, "m"));
   if (!m) return undefined;
   switch (m[1]) {
     case "busy":
       return new WalletBusyError("Another zingo-cli process is using this wallet. Nothing was started. Try again shortly.", "busy");
+    case "gate":
+      return new WalletBusyError("The wallet lock was released before transmission was authorized. Nothing was started.", "busy");
     default:
       return new WalletBusyError(`The wallet lock could not be taken (${m[1]}). Nothing was started.`, "unavailable");
   }

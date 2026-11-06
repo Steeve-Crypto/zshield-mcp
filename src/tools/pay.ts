@@ -4,7 +4,6 @@ import { assertPaymentsEnabled } from "../payments/pause.js";
 import { resumeOriginal, RESUME_TIMEOUT_MS } from "../payments/resume.js";
 import { eventFor, recordReconcile } from "../payments/recovery.js";
 import { withOperationBudget } from "../chain/read-budget.js";
-import { LIVE_PAYMENT_READ_WAIT_MS } from "../chain/read-budget.js";
 import { assertFingerprintSalt } from "../config.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -376,7 +375,7 @@ async function resumePay(input: PayInput, deps: PayDeps, store: PaymentStore, ca
     originalCallId = binding.call_id;
     if (binding.params_sha256 !== paymentParamsHash(input)) return refuseKey(input, deps, callId, "IDEMPOTENCY_CONFLICT", "The key belongs to a payment with different parameters. Nothing was sent.");
     const configured = deps.config.sendQueueWaitMs ?? SEND_QUEUE_WAIT_DEFAULT_MS;
-    lock = await acquireWalletLock(store, Math.max(configured, LIVE_PAYMENT_READ_WAIT_MS), "zcash_pay");
+    lock = await acquireWalletLock(store, configured, "zcash_pay");
     // Re-read after admission; another process may have resolved it while we waited.
     const current = store.readKey(key);
     if (!current || current.call_id !== binding.call_id || current.params_sha256 !== binding.params_sha256) throw new Error("The original binding changed.");
@@ -401,6 +400,9 @@ async function resumePay(input: PayInput, deps: PayDeps, store: PaymentStore, ca
     return { ...result, text: JSON.stringify({ ...JSON.parse(result.text), transmission_attempted: resumed.attempted, resume_note: resumed.row.note,
       audit_warning: [result.auditWarning, written.warning, stateWarning].filter(Boolean).join(" ") || undefined }, null, 2) };
   } catch (e) {
+    if (e instanceof PolicyError) {
+      return refuseKey(input, deps, callId, e.code as PayCode, e.message, "rejected");
+    }
     // A failure of recovery must never be represented as proof about the original send.
     const result = refuseKey(input, deps, callId, e instanceof BusyError ? "BUSY" : "SEND_UNCONFIRMED",
       "The original payment remains unresolved. Check payment_status or resume the same key; do not substitute a new key.", "unknown");
@@ -673,9 +675,7 @@ async function runPay(
   if (policyPassed && amountZats !== undefined) {
     try {
       const configuredWait = config.sendQueueWaitMs ?? SEND_QUEUE_WAIT_DEFAULT_MS;
-      // A live payment must outwait one admitted read, including process termination.
-      const waitMs = config.chainMode === "live" ? Math.max(configuredWait, LIVE_PAYMENT_READ_WAIT_MS) : configuredWait;
-      lock = await acquireWalletLock(store, waitMs, "zcash_pay");
+      lock = await acquireWalletLock(store, configuredWait, "zcash_pay");
     } catch (e) {
       policyPassed = false;
       if (e instanceof BusyError) fail("error", "BUSY", e.message);
@@ -734,6 +734,19 @@ async function runPay(
         const message = e instanceof Error ? e.message : String(e);
         if (e instanceof WalletBusyError) fail("error", "BUSY", `${message} Nothing was sent.`);
         else fail("error", "VIEWKEY_UNAVAILABLE", `Wallet viewing key could not be read, so the payment was not sent: ${message}`);
+      }
+    }
+
+    // Cheap authorization before the bounded sync: refuse unsigned or over-budget
+    // callers without occupying the wallet through health.
+    if (policyPassed && amountZats !== undefined && lock) {
+      try {
+        lock.assertHeld();
+        assertApproval(config, store, keyFields.idempotency_key ?? callId, keyFields.params_sha256 ?? paymentParamsHash(input), viewKeyFingerprint);
+        reserveSpending(config, store, lock, callId, amountZats, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
+      } catch (e) {
+        policyPassed = false;
+        fail(e instanceof PolicyError ? "rejected" : "error", e instanceof PolicyError ? e.code : "STATE_WRITE_FAILED", e instanceof Error ? e.message : String(e));
       }
     }
 
@@ -827,6 +840,7 @@ async function runPay(
       }
       if (ready) {
         try {
+          // Re-check under the same lock after health; first check was before sync.
           assertApproval(config, store, keyFields.idempotency_key ?? callId, keyFields.params_sha256 ?? paymentParamsHash(input), viewKeyFingerprint);
           reserveSpending(config, store, lock, callId, amountZats, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
           store.writeIntent(intent);
@@ -919,6 +933,14 @@ async function runPay(
               reserveFee(config, store, lock!, callId, calculatedFee, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
               store.authorizeTransmit(callId, now());
             },
+            afterLock: () => {
+              // Re-check expiry/pause/budget after the backend lock wait (F-56).
+              lock!.assertHeld();
+              assertPaymentsEnabled(store);
+              assertApproval(config, store, keyFields.idempotency_key ?? callId, keyFields.params_sha256 ?? paymentParamsHash(input), viewKeyFingerprint);
+              reserveSpending(config, store, lock!, callId, amountZats!, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
+              reserveFee(config, store, lock!, callId, calculatedFee, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
+            },
             stage: (txid) => {
               // Between signing and transmitting: the lock must still be this call's, and
               // the txid is recorded durably first. If either fails, nothing is transmitted.
@@ -960,13 +982,16 @@ async function runPay(
                 );
             recordSafely(store, { ts: now(), call_id: callId, state: "unknown", code, error, possible_sends: possibleSends, by: "send" }, warnings);
           } else if (e instanceof FenceError || e instanceof WalletBusyError) {
-            // Neither started zingo-cli: the lock was lost at the fence, or a zingo-cli left
-            // by a killed process held the wallet past the wait.
+            // Fence/busy before any staging is local proof of non-transmission.
+            // After staging, the signed tx exists: keep the interlock as unknown.
+            const staged = store.readCall(callId)?.stagedTxid;
             fail("error", "BUSY", e.message);
-            recordSafely(store, { ts: now(), call_id: callId, state: "not_sent", code, error, by: "send" }, warnings);
+            recordSafely(store, { ts: now(), call_id: callId, state: staged ? "unknown" : "not_sent", code, error, possible_sends: staged ? [{ txid: staged, confidence: "high", matched: ["txid"], status: "signed" }] : undefined, by: "send" }, warnings);
           } else {
+            const staged = store.readCall(callId)?.stagedTxid;
             fail("error", "CHAIN_ERROR", redactInput(e instanceof Error ? e.message : String(e), input));
-            recordSafely(store, { ts: now(), call_id: callId, state: "not_sent", code, error, by: "send" }, warnings);
+            // A post-stage chain error may have raced a broadcast; never settle as not_sent.
+            recordSafely(store, { ts: now(), call_id: callId, state: staged ? "unknown" : "not_sent", code, error, possible_sends: staged ? [{ txid: staged, confidence: "high", matched: ["txid"], status: "signed" }] : undefined, by: "send" }, warnings);
           }
         }
       }

@@ -73,9 +73,19 @@ export async function createSnapshot(sources: Record<string,string>, destination
     // Exclusive publication: destination must still be absent. Rename is only under
     // the trusted operator-owned parent; another operator must not reuse this path.
     if (fs.existsSync(destination)) throw new Error("Snapshot destination appeared");
-    fs.renameSync(temp,destination); fsyncDir(dirname(destination));
+    fs.renameSync(temp,destination);
+    try {
+      fsyncDir(dirname(destination));
+    } catch (error) {
+      // Publication was visible; remove the secret copy rather than leave it after a reported failure.
+      try { fs.rmSync(destination,{recursive:true,force:true}); } catch { /* best effort */ }
+      throw error;
+    }
     return {manifest_sha256:hash(json),files:entries.filter(e=>!e.directory).length};
-  } catch (error) {fs.rmSync(temp,{recursive:true,force:true});throw error;}
+  } catch (error) {
+    fs.rmSync(temp,{recursive:true,force:true});
+    throw error;
+  }
 }
 
 /** Restore to a NEW quarantine directory, never over an active wallet. */
@@ -106,6 +116,11 @@ export async function restoreSnapshot(source: string, destination: string, expec
     try {fs.writeFileSync(marker,"Restored wallet: reconciliation and operator review required\n");fs.fsyncSync(marker);} finally {fs.closeSync(marker);}
     fsyncDir(state);
     if (fs.existsSync(destination)) throw new Error("Restore target appeared");
-    fs.renameSync(staging,destination);fsyncDir(dirname(resolve(destination)));
+    fs.renameSync(staging,destination);
+    try { fsyncDir(dirname(resolve(destination))); }
+    catch (error) {
+      try { fs.rmSync(destination,{recursive:true,force:true}); } catch { /* best effort */ }
+      throw error;
+    }
   } catch (error) {fs.rmSync(staging,{recursive:true,force:true});throw error;}
 }

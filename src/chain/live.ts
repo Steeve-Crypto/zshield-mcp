@@ -3,9 +3,11 @@ import { pinExecutable } from "./executable.js";
 import { readCommandBudget, readQuitGrace } from "./read-budget.js";
 import { projectHistory, streamingHistoryRunner, type HistorySelection } from "./history-stream.js";
 import { checkServerUrl } from "../config.js";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import fs from "node:fs";
+import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import type { ChainAdapter } from "./types.js";
 import type { ChainHealth, OutgoingNote, PaymentReceipt, PaymentRequest, TxSummary, WalletBalance } from "../types.js";
 import { assertNetworkAddress, NetworkError } from "./network.js";
@@ -43,6 +45,8 @@ export interface RunOptions {
    */
   lockFile?: string;
   lockWaitMs?: number;
+  /** Runs after the OS wallet lock is held and before zingo-cli starts. */
+  afterLock?: () => void;
 }
 
 /** Runs a zingo-cli invocation and returns stdout. Injectable for tests. */
@@ -132,6 +136,16 @@ export function redactingRunner(runner: CliRunner): CliRunner {
   };
 }
 
+/** Injected runners have no OS gate; run afterLock immediately before they start. */
+export function withImmediateAfterLock(runner: CliRunner): CliRunner {
+  return async (bin, args, opts = {}) => {
+    if (!opts.afterLock) return runner(bin, args, opts);
+    const { afterLock, ...rest } = opts;
+    afterLock();
+    return runner(bin, args, rest);
+  };
+}
+
 /** A CLI that ignores SIGTERM after its timeout is killed outright after this long. */
 export const RUNNER_KILL_GRACE_MS = 5_000;
 
@@ -139,42 +153,78 @@ export const defaultRunner: CliRunner = (bin, args, opts = {}) => opts.historySe
   new Promise((resolve, reject) => {
     const timeout = opts.timeoutMs ?? SEND_TIMEOUT_MS;
     let wrapped: Wrapped | undefined;
+    let gateFile: string | undefined;
     if (opts.lockFile) {
       try {
+        if (opts.afterLock) {
+          gateFile = join(dirname(opts.lockFile), `.gate-${process.pid}-${randomBytes(6).toString("hex")}`);
+          try { fs.unlinkSync(gateFile); } catch { /* must be absent until afterLock succeeds */ }
+        }
         wrapped = wrapForWallet(bin, args, {
           lockFile: opts.lockFile,
           waitMs: lockWaitWithin(opts.lockWaitMs ?? READ_LOCK_WAIT_MS, timeout),
+          gateFile,
         });
       } catch (e) {
         reject(e);
         return;
       }
     }
-    // execFile's own timeout only sends SIGTERM, and a process can ignore it and keep the
-    // call, and the wallet lock above it, waiting forever. This timer makes the bound hard.
-    const hardKill = setTimeout(() => child.kill("SIGKILL"), timeout + (opts.killGraceMs ?? RUNNER_KILL_GRACE_MS));
-    const child = execFile(wrapped?.bin ?? bin, wrapped?.args ?? args, { maxBuffer: 16 * 1024 * 1024, timeout }, (err, stdout, stderr) => {
-      clearTimeout(hardKill);
+    const finishErr = (err: NodeJS.ErrnoException & { killed?: boolean; signal?: NodeJS.Signals | null }, stdout: string, stderr: string) => {
       if (err && wrapped) {
-        const refusal = wrapperRefusal(wrapped.nonce, stderr.toString()) ?? missingPerl(err as NodeJS.ErrnoException);
-        if (refusal) {
-          reject(refusal);
-          return;
-        }
+        const refusal = wrapperRefusal(wrapped.nonce, stderr.toString()) ?? missingPerl(err);
+        if (refusal) return reject(refusal);
       }
       if (err) {
-        // With the wrapper, err.message holds the whole wrapper command line, so it is not
-        // used: only what the process printed, or its exit status.
-        const detail = (stderr || (wrapped ? `exit ${String((err as { code?: unknown }).code ?? err.signal ?? "unknown")}` : err.message)).toString().slice(0, 500);
-        // execFile sets killed and signal when the timeout fires or the process is killed.
+        // Redact before truncating so a cut cannot leave a secret prefix visible.
+        const raw = (stderr || (wrapped ? `exit ${String(err.code ?? err.signal ?? "unknown")}` : err.message)).toString();
+        const detail = redact(raw).slice(0, 500);
         if (err.killed || err.signal) {
           reject(new CliTimeoutError(`zingo-cli was stopped (${err.signal ?? "killed"}) after ${timeout} ms: ${detail}`));
         } else {
           reject(new Error(`zingo-cli failed: ${detail}`));
         }
-      }
-      else resolve(opts.input === undefined ? stdout.toString() : `${stdout}\n${stderr}`);
-    });
+      } else resolve(opts.input === undefined ? stdout.toString() : `${stdout}\n${stderr}`);
+    };
+    // execFile's own timeout only sends SIGTERM, and a process can ignore it and keep the
+    // call, and the wallet lock above it, waiting forever. This timer makes the bound hard.
+    const hardKill = setTimeout(() => child.kill("SIGKILL"), timeout + (opts.killGraceMs ?? RUNNER_KILL_GRACE_MS));
+    const child = (gateFile
+      ? spawn(wrapped!.bin, wrapped!.args, { stdio: ["pipe", "pipe", "pipe"] })
+      : execFile(wrapped?.bin ?? bin, wrapped?.args ?? args, { maxBuffer: 16 * 1024 * 1024, timeout }, (err, stdout, stderr) => {
+          clearTimeout(hardKill);
+          finishErr(err as any, stdout?.toString() ?? "", stderr?.toString() ?? "");
+        })) as ReturnType<typeof spawn>;
+    if (gateFile) {
+      let stdout = "";
+      let stderr = "";
+      let gated = false;
+      let settled = false;
+      const settle = (fn: () => void) => { if (settled) return; settled = true; clearTimeout(hardKill); fn(); };
+      child.stdout!.on("data", (d: Buffer) => { stdout += d.toString(); });
+      child.stderr!.on("data", (d: Buffer) => {
+        stderr += d.toString();
+        if (!gated && wrapped && stderr.includes(`ZSHIELD-WRAP ${wrapped.nonce} ready`)) {
+          gated = true;
+          try {
+            opts.afterLock!();
+            fs.writeFileSync(gateFile!, "", { flag: "wx", mode: 0o600 });
+          } catch (e) {
+            try { child.kill("SIGKILL"); } catch { /* already gone */ }
+            try { fs.unlinkSync(gateFile!); } catch { /* best effort */ }
+            settle(() => reject(e));
+          }
+        }
+      });
+      child.on("error", (e) => settle(() => reject(missingPerl(e as NodeJS.ErrnoException) ?? e)));
+      child.on("close", (code, signal) => {
+        try { fs.unlinkSync(gateFile!); } catch { /* best effort */ }
+        settle(() => {
+          if (code === 0 && !signal) finishErr(null as any, stdout, stderr);
+          else finishErr(Object.assign(new Error("failed"), { code, signal, killed: Boolean(signal) }) as any, stdout, stderr);
+        });
+      });
+    }
     if (opts.input !== undefined) {
       child.stdin?.on("error", () => {
         // The CLI exited before reading everything; the exit callback reports it.
@@ -303,7 +353,8 @@ export class LiveChainAdapter implements ChainAdapter {
       registerServerUrl(this.server);
       registerRedaction(this.dataDir, "[wallet dir]");
       registerRedaction(this.walletPath, "[wallet dir]");
-      return bindRedactor(redactingRunner(opts.runner ?? defaultRunner));
+      const base = opts.runner ? withImmediateAfterLock(opts.runner) : defaultRunner;
+      return bindRedactor(redactingRunner(base));
     });
     const syncer = opts.syncer ?? (opts.runner ? skipSync : defaultSyncer);
     this.syncer = privacy.run(() => bindRedactor(async (...args: Parameters<WalletSyncer>) => {
@@ -578,10 +629,10 @@ export class LiveChainAdapter implements ChainAdapter {
     this.invalidateScans();
     try {
       if (this.network === "mainnet") { await this.getViewingKey(); await this.checkHealth({ sync: false }); }
-      opts.fence();
       this.assertPinned();
       const sent = await this.exec([...this.baseArgs(), "--nosync"], {
         input, timeoutMs: Math.min(opts.timeoutMs, SEND_TIMEOUT_MS), lockWaitMs: SEND_LOCK_WAIT_MS,
+        afterLock: () => { opts.fence(); },
       });
       if (!transmitted(sent, txid)) throw new Error("The wallet did not acknowledge the exact original transaction.");
     } catch (e) {
@@ -635,6 +686,8 @@ export class LiveChainAdapter implements ChainAdapter {
     // A lost lock stops here, before the wallet process starts.
     req.fence?.();
     this.assertPinned();
+    // Durable transmit authorization stays before the backend-lock wait so a crash here
+    // cannot leave a gate-waiter holding zingo.flock. Expiry is re-checked afterLock.
     req.beforeTransmit?.();
     let sent: string;
     try {
@@ -642,6 +695,7 @@ export class LiveChainAdapter implements ChainAdapter {
         timeoutMs: SEND_TIMEOUT_MS,
         input: transmitInput,
         lockWaitMs: SEND_LOCK_WAIT_MS,
+        afterLock: () => { req.fence?.(); req.afterLock?.(); },
       });
     } catch (e) {
       // The wallet process never started: nothing was transmitted.

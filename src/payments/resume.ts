@@ -5,7 +5,7 @@ import { fingerprintViewKey, writeAuditRow } from "../audit/log.js";
 import { assertFingerprintSalt } from "../config.js";
 import { assertNetworkAddress } from "../chain/network.js";
 import { findTransaction, type ChainAdapter } from "../chain/types.js";
-import { assertWithinCap } from "../policy/caps.js";
+import { assertWithinCap, PolicyError } from "../policy/caps.js";
 import { assertRecipientAllowed, loadAllowlist } from "../policy/allowlist.js";
 import { assertPayInputBounded } from "../policy/limits.js";
 import type { Config } from "../types.js";
@@ -79,21 +79,24 @@ export async function resumeOriginal(
     if (entry.status !== "calculated") return unknown("The original transaction is not in a resumable calculated state. No replacement was built.");
     assertPaymentsEnabled(store);
     assertApproval(config, store, intent.idempotency_key!, paymentParamsHash(intent), fingerprint);
-    // Record financial evidence BEFORE a possible network mutation. A failed write or
-    // capacity refusal must not be bypassed by calling this a diagnostic replay.
-    const audit = writeAuditRow(config, { ...base, status: "unknown", note: "Resuming only the originally signed transaction by exact txid; no replacement transaction authorized." });
-    if (!audit.durable) return unknown("Audit evidence could not be persisted; no resume attempted.");
     const fees = record.events.filter(e => e.calculated_fee_zats !== undefined).map(e => e.calculated_fee_zats!);
     const originalFee = fees.length === 1 && /^[1-9][0-9]{0,15}$/.test(fees[0]) ? BigInt(fees[0]) : undefined;
     if (config.totalSpendingCapZec !== undefined && originalFee !== entry.feeZats) return unknown("The original durable fee does not match the wallet transaction.");
+    // Budget and fee gates before any financial audit charge: a policy refusal must not
+    // consume protected capacity, and can be repeated safely.
     reserveSpending(config, store, lock, record.callId, amount, paymentParamsHash(intent), intent.idempotency_key!);
     reserveFee(config, store, lock, record.callId, originalFee, paymentParamsHash(intent), intent.idempotency_key!);
+    // Record financial evidence BEFORE a possible network mutation.
+    const audit = writeAuditRow(config, { ...base, status: "unknown", note: "Resuming only the originally signed transaction by exact txid; no replacement transaction authorized." });
+    if (!audit.durable) return unknown("Audit evidence could not be persisted; no resume attempted.");
     if (!hasTransmitAuthorization(record)) store.authorizeTransmit(record.callId, new Date().toISOString());
     lock.assertHeld();
     attempted = true;
     await chain.resumeSigned(txid, { fence: () => { lock.assertHeld(); reserveFee(config, store, lock, record.callId, originalFee, paymentParamsHash(intent), intent.idempotency_key!); assertPaymentsEnabled(store); assertApproval(config, store, intent.idempotency_key!, paymentParamsHash(intent), fingerprint); reserveSpending(config, store, lock, record.callId, amount, paymentParamsHash(intent), intent.idempotency_key!); }, timeoutMs: RESUME_TIMEOUT_MS });
     return { attempted, row: { ...base, status: "broadcast", confidence: "high", note: "Resumed the original signed transaction by exact txid. No replacement was built." } };
-  } catch {
+  } catch (e) {
+    // Policy refusals of THIS attempt are exact and must not look like a benign replay.
+    if (e instanceof PolicyError) throw e;
     // Even a proven refusal of THIS retry says nothing about the FIRST attempt.
     return unknown("The original transaction remains unresolved after the resume attempt. Retry the same key with resume=true, or check payment_status. Never substitute a new payment key.");
   }
