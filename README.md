@@ -566,3 +566,7 @@ recovery cannot manufacture a safe replacement from that observation.
 Audit reservation counters require Perl with `flock` and `IO::Handle::sync`, including
 for mock-mode audit writes. Without it, durable audit writes fail closed. Live mode
 continues to require a POSIX platform; mock mode on Windows needs a compatible Perl.
+
+## Current reliability checkpoint
+
+See [V12 run 14 response](V12-RUN14-RESPONSE.md), [production readiness](docs/PRODUCTION_READINESS.md), and the [incident runbook](docs/INCIDENT_RUNBOOK.md). Local passing tests alone are not financial release approval. Physical audit-space protection and native-wallet qualification remain release gates.
