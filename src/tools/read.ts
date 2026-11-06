@@ -1,3 +1,4 @@
+import { withReadBudget } from "../chain/read-budget.js";
 import { randomUUID } from "node:crypto";
 import { writeAuditRow } from "../audit/log.js";
 import type { ChainAdapter } from "../chain/types.js";
@@ -45,7 +46,7 @@ export async function withWalletRead<T>(store: PaymentStore, purpose: string, fn
     throw e;
   }
   try {
-    return await fn();
+    return await withReadBudget(fn);
   } finally {
     await lock.release();
   }

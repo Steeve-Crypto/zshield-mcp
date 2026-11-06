@@ -1,3 +1,4 @@
+import { assertFinancialProfile } from "./startup.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { MockChainAdapter } from "./chain/mock.js";
 import { executePaymentStatus, paymentStatusInputSchema } from "./tools/status.js";
@@ -34,6 +35,7 @@ export function rateLimitedResult(): ToolResult {
 }
 
 export function createChain(config: Config): ChainAdapter {
+  assertFinancialProfile(config);
   assertFingerprintSalt(config);
   checkServerUrl(config.lightwalletd);
   const privacy = createRedactor();
@@ -42,7 +44,10 @@ export function createChain(config: Config): ChainAdapter {
     return config.chainMode === "live"
       ? new LiveChainAdapter({
           network: config.chainNetwork,
+          mainnetEnabled: config.mainnetEnabled,
+          expectedConsensusBranch: config.expectedConsensusBranch,
           zingoBin: config.zingoBin,
+          binarySha256: config.zingoBinarySha256,
           dataDir: config.zingoDataDir,
           server: config.lightwalletd,
         })
@@ -77,6 +82,7 @@ function redactResult(r: ToolResult): ToolResult {
 }
 
 export function createServer(config: Config = loadConfig(), chain: ChainAdapter = createChain(config)): McpServer {
+  assertFinancialProfile(config);
   assertFingerprintSalt(config);
   checkServerUrl(config.lightwalletd);
   const privacy = createRedactor();

@@ -69,6 +69,44 @@ function world() {
 }
 
 describe("V12 November 2 root causes", () => {
+  for (const [label, patch] of [
+    ["missing verification", { verified: undefined }],
+    ["negative verification", { verified: false }],
+    ["unknown wallet status", { status: "future-wallet-state" }],
+    ["empty wallet status", { status: "" }],
+    ["extra outgoing payment", { outgoing: [
+      { recipient: R, valueZats: 10000n, memo: "" },
+      { recipient: "utest1other", valueZats: 1n, memo: "" },
+    ] }],
+  ] as [string, Partial<TxSummary>][]) {
+    it(`recovery refuses ${label} without releasing the payment interlock`, async () => {
+      const w = world();
+      w.chain.getTransaction = async () => [{ txid: TX, status: "confirmed", blockHeight: 1100,
+        kind: "sent", valueZats: 10000n, verified: true, ...patch }];
+      const rows = await recoverPendingPayments(w.config, w.chain);
+      assert.equal(rows[0].status, "unknown");
+      assert.equal((await paymentStatus(w.config, w.chain, { call_id: "original" })).state, "unknown");
+      assert.ok(w.store.pendingCalls().includes("original"));
+      assert.equal((await executePay({ recipient: R, amount_zec: "0.0001", idempotency_key: "replacement" }, w)).code,
+        "UNRESOLVED_PAYMENT");
+      assert.equal(w.sends(), 0);
+    });
+  }
+  for (const [label, patch] of [
+    ["missing verification", { verified: undefined }],
+    ["unknown wallet status", { status: "future-wallet-state" }],
+    ["calculated but not transmitted", { status: "calculated" }],
+  ] as [string, Partial<TxSummary>][]) {
+    it(`status does not upgrade an acknowledged send from ${label}`, async () => {
+      const w = world();
+      w.store.advance({ call_id: "original", ts: new Date().toISOString(), state: "sent", txid: TX, by: "send" });
+      w.chain.getTransaction = async () => [{ txid: TX, status: "confirmed", blockHeight: 1100,
+        kind: "sent", valueZats: 10000n, verified: true, ...patch }];
+      assert.equal((await paymentStatus(w.config, w.chain, { call_id: "original" })).state, "unknown");
+      assert.equal(w.store.readCall("original")?.state, "sent");
+      assert.equal(w.sends(), 0);
+    });
+  }
   it("327483 absence past every height/time margin stays unresolved, then a deep reorg can reveal the original", async () => {
     const w = world();
     const first = await paymentStatus(w.config, w.chain, { call_id: "original" });

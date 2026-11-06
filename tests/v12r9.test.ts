@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, it } from "node:test";
+import { beforeEach, describe, it, mock } from "node:test";
 import { appendAuditEntry } from "../src/audit/log.ts";
 import { MockChainAdapter } from "../src/chain/mock.ts";
 import { fallbackAuditPath } from "../src/audit/log.ts";
@@ -194,17 +195,17 @@ describe("F-24, F-31: the allow-list file", posix, () => {
       assert.throws(() => loadAllowlist(list(tmp(), mode)), /writable by group or other/);
     }
   });
-  it("refuses a file owned by another user", { skip: process.getuid?.() === 0 }, () => {
+  it("refuses a file owned by another user, including when the suite runs as root", () => {
     const f = list(tmp());
-    // Pretend the process is a different user by checking the same rule through the owner field.
-    const uid = process.getuid!();
-    const real = process.getuid;
-    (process as { getuid: () => number }).getuid = () => uid + 1;
-    try {
-      assert.throws(() => loadAllowlist(f), /owned by another user|namespace is unsafe/);
-    } finally {
-      (process as { getuid: typeof real }).getuid = real;
-    }
+    const actual = fs.lstatSync;
+    const foreignUid = (process.getuid?.() ?? 0) + 1001;
+    const hook = mock.method(fs, "lstatSync", ((path: fs.PathLike, ...args: unknown[]) => {
+      const st = (actual as Function)(path, ...args);
+      return String(path) === f ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid: foreignUid }) : st;
+    }) as typeof fs.lstatSync);
+    try { assert.throws(() => loadAllowlist(f), /owned by another user/); }
+    finally { hook.mock.restore(); }
+    assert.doesNotThrow(() => loadAllowlist(f));
   });
   it("refuses a file swapped for another between the check and the open", () => {
     const dir = tmp();
@@ -266,9 +267,16 @@ describe("F-24, F-31: directories above the paths", posix, () => {
     assert.throws(() => assertSafeAncestors(join(via, "link", "x")), /not sticky/);
     chmodSync(open, 0o700);
   });
-  it("refuses an ancestor owned by another non-root user", { skip: process.getuid?.() === 0 }, () => {
+  it("refuses an ancestor owned by another non-root user, including when the suite runs as root", () => {
     const root = tmp();
-    assert.throws(() => assertSafeAncestors(join(root, "x"), process.getuid!() + 1), /owned by uid/);
+    const actual = fs.lstatSync;
+    const foreignUid = (process.getuid?.() ?? 0) + 1001;
+    const hook = mock.method(fs, "lstatSync", ((path: fs.PathLike, ...args: unknown[]) => {
+      const st = (actual as Function)(path, ...args);
+      return String(path) === root ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid: foreignUid }) : st;
+    }) as typeof fs.lstatSync);
+    try { assert.throws(() => assertSafeAncestors(join(root, "x")), /owned by uid/); }
+    finally { hook.mock.restore(); }
     assert.doesNotThrow(() => assertSafeAncestors(join(root, "x")));
   });
   it("startup checks the state, audit, allow-list, and wallet paths", () => {

@@ -65,7 +65,7 @@ export async function executeHistory(input: HistoryInput, deps: ReadDeps) {
         value_zec: formatZats(t.valueZats),
         fee_zats: t.feeZats?.toString(),
         // No recipients or memos here. TxSummary.outgoing stays inside the server.
-        explorer_url: live ? `${TESTNET_EXPLORER}${t.txid}` : undefined,
+        explorer_url: live ? `${deps.config.chainNetwork === "mainnet" ? "https://blockexplorer.one/zcash/mainnet/tx/" : TESTNET_EXPLORER}${t.txid}` : undefined,
       })),
     }),
     { limit: input.limit }

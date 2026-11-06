@@ -12,12 +12,21 @@ export interface AllowlistFile {
 export interface Config {
   /** Hard per-call cap in ZEC, at most 8 decimals; compared as integer zatoshis */
   spendingCapZec: number | string;
+  /** Lifetime principal and fee allowance; reservations never automatically reset or refund. */
+  totalSpendingCapZec?: number | string;
+  approvalPublicKeys?: string[];
+  approvalThreshold?: number;
+  approvalDir?: string;
   allowlistPath: string;
   chainMode: ChainMode;
   auditDir: string;
   viewKeyFingerprintSalt: string;
   chainNetwork?: string;
+  mainnetEnabled?: boolean;
+  expectedConsensusBranch?: string;
   zingoBin?: string;
+  zingoBinarySha256?: string;
+  requireFinancialControls?: boolean;
   zingoDataDir?: string;
   /** Live mode: how many blocks behind the tip the wallet may be and still send. Default 10 */
   healthMaxLagBlocks?: number;
@@ -192,6 +201,10 @@ export interface PaymentRequest {
    * must record it durably. If it throws, nothing is transmitted.
    */
   stage?: (txid: string) => void;
+  /** Durably authorize transmit after staging and the final fence. Throws before broadcast. */
+  beforeTransmit?: () => void;
+  /** Reserve the exact calculated fee before any transmission. */
+  authorizeFee?: (feeZats: bigint) => void;
 }
 
 export interface PaymentReceipt {

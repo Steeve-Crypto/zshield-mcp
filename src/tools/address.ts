@@ -10,6 +10,6 @@ export async function executeReceiveAddress(deps: ReadDeps) {
     "zcash_receive_address",
     deps.config,
     () => withWalletRead(storeFor(deps.config, deps.chain), "zcash_receive_address", () => deps.chain.getReceiveAddress({ offline: false })),
-    (address) => ({ address, network: deps.config.chainMode === "live" ? "testnet" : "mock" })
+    (address) => ({ address, network: deps.config.chainMode === "live" ? deps.config.chainNetwork : "mock" })
   );
 }

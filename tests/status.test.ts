@@ -28,7 +28,7 @@ function result(config: Config, callId: string, extra: Partial<AuditEntry>) {
 }
 function tx(over: Partial<TxSummary> = {}): TxSummary {
   return {
-    txid: TX, time: new Date(T0 + 2000).toISOString(), status: "confirmed", blockHeight: 500, kind: "sent",
+    verified: true, txid: TX, time: new Date(T0 + 2000).toISOString(), status: "confirmed", blockHeight: 500, kind: "sent",
     valueZats: -10000n, outgoing: [{ recipient: R, valueZats: 10000n, memo: "inv-7" }], ...over,
   };
 }
