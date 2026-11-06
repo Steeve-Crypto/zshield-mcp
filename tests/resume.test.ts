@@ -228,27 +228,40 @@ describe("exact transaction recovery", () => {
     for (const result of results) assert.equal(result.txid, staged(w)[0].txid, JSON.stringify(result));
     assert.equal(sends(w).length, 1); assert.equal(overlap(w), "");
   });
-  it("every durable resume crash point recovers the original without another calculation", { timeout: 300000 }, async () => {
+  it("every durable resume crash point recovers the original without another calculation", async (t) => {
     const fast = { STATUS_SYNC_TIMEOUT_MS: "0", HEALTH_SYNC_TIMEOUT_MS: "0" };
     const baseline = world();
     await proc(baseline, "initial", ["pay", "key", "0.001"], { ...fast, CRASH_AFTER_AUTHORIZE: "1" }).exited;
     const probe = await proc(baseline, "probe", ["resume", "key", "0.001"], { ...fast, CRASH_AT: "0" }).done;
     assert.ok(probe.durable_calls > 0);
-    for (let point = 1; point <= probe.durable_calls; point++) {
-      const w = world();
-      await proc(w, "initial", ["pay", "key", "0.001"], { ...fast, CRASH_AFTER_AUTHORIZE: "1" }).exited;
-      assert.equal(staged(w).length, 1);
-      const original = staged(w)[0].txid;
-      const crashed = proc(w, "resume", ["resume", "key", "0.001"], { ...fast, CRASH_AT: String(point), CRASH_DIR: w.root });
-      await crashed.exited;
-      killGroup(crashed.child, "SIGKILL");
-      await proc(w, "recovery", ["recover"], fast).done;
-      const result = await proc(w, "retry", ["resume", "key", "0.001"], fast).done;
-      assert.equal(result.txid, original, `crash point ${point}: ${JSON.stringify(result)}`);
-      assert.equal(sends(w).length, 1, `crash point ${point} accepted more than once`);
-      assert.equal(commands(w).filter(c => c.cmd === "calculate").length, 1, `crash point ${point} built again`);
-      assert.equal(overlap(w), "", `crash point ${point} overlapped wallet processes`);
+    // Probe the current implementation rather than hard-code the number of crash points.
+    // Keep fresh worlds and all safety assertions, but bound each small batch instead
+    // of timing out the entire sweep on slower, coverage-instrumented CI runners.
+    assert.ok(Number.isSafeInteger(probe.durable_calls));
+    const batchSize = 8;
+    let verified = 0;
+    for (let start = 1; start <= probe.durable_calls; start += batchSize) {
+      const end = Math.min(start + batchSize - 1, probe.durable_calls);
+      await t.test(`durable resume crash points ${start}-${end}`, { timeout: 120000 }, async () => {
+        for (let point = start; point <= end; point++) {
+          const w = world();
+          await proc(w, "initial", ["pay", "key", "0.001"], { ...fast, CRASH_AFTER_AUTHORIZE: "1" }).exited;
+          assert.equal(staged(w).length, 1);
+          const original = staged(w)[0].txid;
+          const crashed = proc(w, "resume", ["resume", "key", "0.001"], { ...fast, CRASH_AT: String(point), CRASH_DIR: w.root });
+          await crashed.exited;
+          killGroup(crashed.child, "SIGKILL");
+          await proc(w, "recovery", ["recover"], fast).done;
+          const result = await proc(w, "retry", ["resume", "key", "0.001"], fast).done;
+          assert.equal(result.txid, original, `crash point ${point}: ${JSON.stringify(result)}`);
+          assert.equal(sends(w).length, 1, `crash point ${point} accepted more than once`);
+          assert.equal(commands(w).filter(c => c.cmd === "calculate").length, 1, `crash point ${point} built again`);
+          assert.equal(overlap(w), "", `crash point ${point} overlapped wallet processes`);
+          verified++;
+        }
+      });
     }
+    assert.equal(verified, probe.durable_calls, "every probed durable resume point must pass");
     console.log(`Verified ${probe.durable_calls} durable resume crash points`);
   });
   it("SIGKILL after durable authorization recovers across actual server processes, without another calculation", async () => {
