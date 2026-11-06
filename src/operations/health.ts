@@ -37,11 +37,11 @@ export function operationalHealth(config: Config, store: PaymentStore) {
    }
    if(!Number.isSafeInteger(baseline)||baseline<0)throw new Error("bad baseline");
    const names=fs.existsSync(directory)?fs.readdirSync(directory):[];
-   return Object.fromEntries(["payment","diagnostic"].map(pool=>{
+   return Object.fromEntries(["payment","refusal","diagnostic"].map(pool=>{
     const file=join(directory,pool+".counter");checkPrivateFile(file);
     let count=names.filter(n=>new RegExp(`^${pool}-[0-9]+$`).test(n)).length;
     try{count+=fs.statSync(file).size;}catch(e){if((e as NodeJS.ErrnoException).code!=="ENOENT")throw e;}
-    const limit=(pool==="payment"?config.auditMaxBytes:config.auditDiagnosticMaxBytes)??DEFAULT_AUDIT_MAX_BYTES;
+    const limit=(pool==="payment"?config.auditMaxBytes:pool==="refusal"?config.auditRefusalMaxBytes??config.auditDiagnosticMaxBytes:config.auditDiagnosticMaxBytes)??DEFAULT_AUDIT_MAX_BYTES;
     const reserved=baseline+count*AUDIT_SLOT_BYTES;
     return [pool,{reserved_bytes:reserved,limit_bytes:limit,remaining_bytes:Math.max(0,limit-reserved)}];
    }));
