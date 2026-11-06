@@ -482,6 +482,17 @@ function finish(config: Config, row: AuditEntry): { audit: AuditEntry; auditWarn
   return { audit, auditWarning: written.warning };
 }
 
+/** No unaudited policy decision may escape a refusal-storage failure. */
+function unauditedRefusal(input: PayInput, config: Config, callId: string, warning?: string): PayResult {
+  const message = "Audit evidence could not be persisted. Nothing was sent.";
+  const audit = boundAuditEntry({ ...baseRow(input, config, callId), status: "error" as const,
+    code: "AUDIT_WRITE_FAILED" as const, error: message });
+  rememberRefusal(callId, { code: "AUDIT_WRITE_FAILED", error: message });
+  return { ok: false, code: "AUDIT_WRITE_FAILED", audit, auditWarning: warning,
+    text: JSON.stringify({ ok: false, status: "error", code: "AUDIT_WRITE_FAILED", message,
+      error: message, call_id: callId, audit, audit_warning: warning }) };
+}
+
 function refuseKey(
   input: PayInput,
   deps: PayDeps,
@@ -503,19 +514,7 @@ function refuseKey(
   // Rejected payment activity must leave durable evidence; soft-succeeding after the
   // diagnostic pools are exhausted would hide probing (F-75).
   if (!written.durable && status !== "unknown") {
-    const failMsg = `Audit evidence for this refusal could not be persisted (${written.warning ?? "not durable"}). Nothing was sent.`;
-    rememberRefusal(callId, { code: "AUDIT_WRITE_FAILED", error: failMsg, idempotency_key: input.idempotency_key });
-    return {
-      ok: false,
-      code: "AUDIT_WRITE_FAILED",
-      text: JSON.stringify(
-        { ok: false, status: "error", code: "AUDIT_WRITE_FAILED", message: failMsg, error: failMsg, call_id: callId, refused_code: code, audit: row, audit_warning: written.warning },
-        null,
-        2
-      ),
-      audit: row,
-      auditWarning: written.warning,
-    };
+    return unauditedRefusal(input, deps.config, callId, written.warning);
   }
   if (status !== "unknown") rememberRefusal(callId, { code, error: message, idempotency_key: code === "INVALID_IDEMPOTENCY_KEY" ? undefined : input.idempotency_key });
   return {
@@ -1046,6 +1045,9 @@ async function runPay(
     final = writeAuditRow(config, audit);
   } finally {
     await lock?.release();
+  }
+  if (!wroteIntent && status !== "ok" && !final.durable) {
+    return unauditedRefusal(input, config, callId, final.warning);
   }
   if (!wroteIntent && status !== "ok") rememberRefusal(callId, { code, error, amount_zats: amountZats?.toString(), idempotency_key: keyFields.idempotency_key });
   if (final.warning) warnings.push(final.warning);
