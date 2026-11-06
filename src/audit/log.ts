@@ -164,7 +164,11 @@ function auditPool(row: AuditRow): AuditPool {
   // and cannot fall into the diagnostic pool where exhaustion drops evidence (F-75).
   if (row.tool === "zcash_pay") {
     if (row.status === "replayed") return "diagnostic";
-    return row.status === "rejected" || (row as { refusal?: boolean }).refusal ? "refusal" : "payment";
+    // Infrastructure/busy errors before an operation exists are refusals of THIS attempt,
+    // not payment mutations. Keep legacy unknown/tx-bearing evidence protected.
+    const preauthorizationError = row.status === "error" && !row.operation_id && !row.mock_txid
+      && !row.possible_txids?.length && !row.possible_sends?.length;
+    return row.status === "rejected" || preauthorizationError || (row as { refusal?: boolean }).refusal ? "refusal" : "payment";
   }
   if (row.tool === "zcash_pay_recovery") return (row as { refusal?: boolean }).refusal ? "refusal" : "payment";
   return "diagnostic";
