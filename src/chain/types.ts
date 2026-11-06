@@ -5,12 +5,15 @@ export interface ChainAdapter {
   readonly mode: "mock" | "live";
   /** This adapter cannot transmit until req.stage has durably recorded the txid. */
   readonly stagesBeforeBroadcast?: true;
+  readonly tracksTransmitAuthorization?: true;
   /**
    * The payment store folder for this wallet, absolute, shared by every process on it.
    * Undefined for a chain with no wallet directory; the store then sits beside the audit dir.
    */
   readonly stateDir?: string;
   pay(req: PaymentRequest): Promise<PaymentReceipt>;
+  /** Transmit ONLY this stored signed txid; must never build, calculate, or select another tx. */
+  resumeSigned?(txid: string, opts: { fence: () => void; timeoutMs: number }): Promise<void>;
   /** Read-only. Never moves funds. */
   getBalance(opts?: { offline?: boolean }): Promise<WalletBalance>;
   /** Read-only. The wallet's current unified address. */

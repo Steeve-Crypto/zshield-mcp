@@ -120,3 +120,15 @@ describe("policy runs before chain in live mode", () => {
     assert.equal(calls.length, 0);
   });
 });
+
+it("refuses malformed or ambiguous fee reports before transmitting", async () => {
+  for (const fee of ['-1', '1.5', '1e4', '"10000"', '10000,"fee":10000']) {
+    let transmissions = 0;
+    const chain = new LiveChainAdapter({ network: "testnet", runner: async (_bin, _args, opts) => {
+      if (opts?.input?.startsWith("transmit")) transmissions++;
+      return `{"fee":${fee}}\n{"txids":["${"ab".repeat(32)}"]}`;
+    }});
+    await assert.rejects(chain.pay({ amountZats: 10000n, recipient: UTEST }));
+    assert.equal(transmissions, 0);
+  }
+});

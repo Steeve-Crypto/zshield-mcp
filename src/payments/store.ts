@@ -21,7 +21,8 @@ const MAX_EVENTS_PER_CALL = 64;
 
 /**
  * Where a call stands. Ordered: a call's state is the highest of its events, so it only
- * ever moves forward. `not_sent` and `expired` both mean proven not sent.
+ * ever moves forward. `not_sent` is local proof; live `expired` is historical
+ * evidence only and never clears the wallet interlock.
  */
 export type CallState = "pending" | "unknown" | "not_sent" | "expired" | "sent" | "failed" | "mined";
 /**
@@ -38,6 +39,7 @@ export function isSettled(state: CallState): boolean {
 
 /** What a call set out to do, written before anything is sent. */
 export interface CallIntent {
+  network?: string;
   call_id: string;
   ts: string;
   amount_zec: number | string;
@@ -65,6 +67,8 @@ export interface CallIntent {
    * anything. Such a call with no recorded id never transmitted: no history entry is its own.
    */
   two_step?: boolean;
+  /** New protocol: no broadcast until a transmit_authorized event is durable. */
+  transmit_tracked?: boolean;
 }
 
 export interface CallEvent {
@@ -79,6 +83,8 @@ export interface CallEvent {
   note?: string;
   /** The txid of the signed transaction, written before it was transmitted */
   staged_txid?: string;
+  transmit_authorized?: boolean;
+  calculated_fee_zats?: string;
   /** Who wrote it. "import" only on events an older version wrote */
   by: "send" | "recovery" | "status" | "import";
 }
@@ -355,6 +361,10 @@ export class PaymentStore {
   stageTxid(callId: string, txid: string, ts: string): void {
     if (!this.claimTxid(txid, callId)) throw new Error("Another call already owns this transaction id.");
     this.appendEvent({ ts, call_id: callId, state: "pending", staged_txid: txid, note: "Signed, not yet transmitted.", by: "send" });
+  }
+
+  authorizeTransmit(callId: string, ts: string): void {
+    this.appendEvent({ ts, call_id: callId, state: "pending", transmit_authorized: true, by: "send" });
   }
 
   /** Which call a txid was credited to. */

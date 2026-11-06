@@ -1,3 +1,4 @@
+import { withReadBudget } from "../chain/read-budget.js";
 import { findTransaction } from "../chain/types.js";
 import { z } from "zod";
 import { TESTNET_EXPLORER } from "../chain/live.js";
@@ -113,7 +114,7 @@ async function byTxid(
   const found = await findTransaction(chain, txid, { offline });
   // Listed twice, or not vouched for by the wallet's JSON: a memo may have forged it. Nothing
   // is read from it and nothing is recorded.
-  if (found.length > 1 || found[0]?.verified === false) {
+  if (found.length > 1 || found[0]?.verified === false || (found[0] && (chain.mode === "live" || chain.checkHealth !== undefined) && found[0].verified !== true)) {
     return { state: "unknown", txid, message: "The wallet's listing for this transaction is ambiguous or not confirmed by the wallet's own JSON, so nothing was recorded. Check the explorer. Do not pay again." };
   }
   const tx = found[0];
@@ -123,7 +124,8 @@ async function byTxid(
       : { state: "unknown", txid, message: "Sent, but not in the wallet's history. Check the explorer. Do not pay again." };
   }
   if (tx.status === "failed") return { state: "failed", txid, message: "The wallet marks this transaction failed." };
-  if (tx.status !== "confirmed") return { state: "broadcast", txid, message: `Sent; the wallet reports it as ${tx.status}.` };
+  if (tx.status === "transmitted" || tx.status === "mempool") return { state: "broadcast", txid, message: `Sent; the wallet reports it as ${tx.status}.` };
+  if (tx.status !== "confirmed") return { state: "unknown", txid, message: "The wallet does not currently establish transmission or confirmation. Do not pay again." };
   let walletHeight: number | undefined;
   try {
     walletHeight = await chain.walletHeight?.();
@@ -175,25 +177,27 @@ export async function paymentStatus(
     throw e;
   }
   try {
-    const sync = await boundedSync(chain);
-    // Re-read: another process may have settled the call while this one synced.
-    const record = found.store.readCall(found.callId) ?? found.record;
-    const s = settledStatus(record, base, config.chainMode === "live") ?? (await fromChain(config, chain, found.store, record, base, now, sync ?? { complete: false, elapsedMs: 0, detail: "not synced" }));
-    if (!chain.syncWallet || sync?.complete) return s;
-    let walletHeight = s.wallet_height;
-    if (walletHeight === undefined) {
-      try {
-        walletHeight = await chain.walletHeight?.();
-      } catch {
-        walletHeight = undefined;
+    return await withReadBudget(async () => {
+      const sync = await boundedSync(chain);
+      // Re-read: another process may have settled the call while this one synced.
+      const record = found.store.readCall(found.callId) ?? found.record;
+      const s = settledStatus(record, base, config.chainMode === "live") ?? (await fromChain(config, chain, found.store, record, base, now, sync ?? { complete: false, elapsedMs: 0, detail: "not synced" }));
+      if (!chain.syncWallet || sync?.complete) return s;
+      let walletHeight = s.wallet_height;
+      if (walletHeight === undefined) {
+        try {
+          walletHeight = await chain.walletHeight?.();
+        } catch {
+          walletHeight = undefined;
+        }
       }
-    }
-    return {
-      ...s,
-      stale: true,
-      wallet_height: walletHeight,
-      sync_note: `Wallet sync did not finish: ${sync?.detail ?? "no detail"}. This is the last state the wallet knew.`,
-    };
+      return {
+        ...s,
+        stale: true,
+        wallet_height: walletHeight,
+        sync_note: `Wallet sync did not finish: ${sync?.detail ?? "no detail"}. This is the last state the wallet knew.`,
+      };
+    });
   } finally {
     await lock.release();
   }
@@ -319,7 +323,7 @@ export async function executePaymentStatus(input: PaymentStatusInput, deps: Read
       ref = s.call_id;
       return s;
     },
-    (s) => ({ ...s, explorer_url: live && s.txid ? `${TESTNET_EXPLORER}${s.txid}` : undefined }),
+    (s) => ({ ...s, explorer_url: live && s.txid ? `${deps.config.chainNetwork === "mainnet" ? "https://blockexplorer.one/zcash/mainnet/tx/" : TESTNET_EXPLORER}${s.txid}` : undefined }),
     () => (ref ? { ref_call_id: ref } : {})
   );
 }

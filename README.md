@@ -10,7 +10,9 @@ Open-source **MCP server** that exposes `zcash_pay` for agent-initiated **shield
 - **Recipient allow-list**
 - **Append-only viewing-key fingerprinted audit log**
 
-Spend keys never belong in the model. Mock chain by default. A live adapter sends real shielded payments on Zcash **testnet only** through zingo-cli.
+Spend keys never belong in the model. Mock chain by default. A live adapter sends real shielded payments on Zcash testnet through zingo-cli, with explicitly enabled mainnet support under mandatory financial controls. See [mainnet configuration](docs/OPERATOR_CONTROLS.md#mainnet-configuration).
+
+Financial-use release status and outstanding validation: [production readiness](docs/PRODUCTION_READINESS.md).
 
 ![Flow: AI agent to zshield-mcp to Zcash testnet](docs/images/flow.png)
 
@@ -84,10 +86,10 @@ The payment store is a folder, `.zshield-state`, inside the wallet directory (be
 Other protections on every send:
 
 - **No two wallet holders, ever.** Every `zingo-cli` process the server starts (sync, reads, send, transmit) goes through a small `perl` wrapper that takes an exclusive `flock` on `.zshield-state/zingo.flock` and then runs `zingo-cli`, which inherits the lock. A `zingo-cli` left running by a killed server is waited for, never run beside. This needs `perl` and a POSIX platform; without them live mode refuses to run. Testnet mode refuses to start on Windows with a clear error. Mock mode runs on Windows, but its state files there have no ACL protection, so use it only for tests and demos.
-- **One send at a time per wallet, across processes.** A second call waits up to `SEND_QUEUE_WAIT_MS` for the first to finish, then gets `BUSY`. The paying process holds one OS lock (`flock` on `.zshield-state/send.flock`, held by a tiny `perl` child tied to the server process) for the whole send, from before the build to after the transmit. The kernel drops it the moment the process dies, so there is no lease, no timer and no stale-lock breaking. A frozen payer that is still alive keeps the lock until it finishes or dies, and nobody else sends meanwhile. Reads (`zcash_balance`, `zcash_receive_address`, `zcash_history`, and `zcash_payment_status` when it must read the wallet) return `BUSY` while a send holds the lock, so none runs between the build and the transmit. Under the lock the server also re-reads the key, so a key used by another process is replayed instead of paid again.
+- **One send at a time per wallet, across processes.** A second call waits up to `SEND_QUEUE_WAIT_MS` (at least 20 seconds in live mode) for the first to finish, then gets `BUSY`. The paying process holds one OS lock (`flock` on `.zshield-state/send.flock`, held by a tiny `perl` child tied to the server process) for the whole send, from before the build to after the transmit. The kernel drops it the moment the process dies, so there is no lease, no timer and no stale-lock breaking. A frozen payer that is still alive keeps the lock until it finishes or dies, and nobody else sends meanwhile. Reads (`zcash_balance`, `zcash_receive_address`, `zcash_history`, and `zcash_payment_status` when it must read the wallet) return `BUSY` while a send holds the lock, so none runs between the build and the transmit. Under the lock the server also re-reads the key, so a key used by another process is replayed instead of paid again.
 - **Two-stage send, exact memo.** A live send first builds and signs the transaction (`send` and `calculate`, nothing is broadcast), records its txid on the call, and only then runs `transmit <txid>`. A timeout or crash during the broadcast therefore leaves the call's own txid on record, and recovery asks the wallet about that txid. The memo is checked once and is exact: no trimming, no control characters, no leading or trailing whitespace, at most 512 UTF-8 bytes, and an empty memo means no memo. The same string is what policy checks, the audit row and intent hold, and what is sent.
 - **Health check first (testnet mode).** Before the `pending` row, the server syncs the wallet for at most `HEALTH_SYNC_TIMEOUT_MS`, then checks that the lightwalletd server answers, the wallet is within `HEALTH_MAX_LAG_BLOCKS` of the chain tip, and spendable funds cover the amount plus a 0.0001 ZEC fee estimate. A failure returns `CHAIN_UNREACHABLE`, `WALLET_NOT_SYNCED`, or `INSUFFICIENT_FUNDS` and sends nothing. A wallet whose sync has not finished can report a spendable balance of 0, so low funds after an unfinished sync are `WALLET_NOT_SYNCED`, not `INSUFFICIENT_FUNDS`.
-- **Recovery on startup.** If the server stopped between the `pending` row and the result row, the next start looks for the send in wallet history. A transaction counts only if the recipient (or its unified address), the amount, and the memo are all equal, and it is placed after the call started by its time or its block height. A call with no memo never matches someone else's memo payment, and a call that had no memo is never confirmed from history by a lone match: it stays `unknown` with the candidate listed. A call with a recorded txid is settled by that txid alone. History entries are also checked against `zingo-cli`'s JSON (`notes all`, `coins all`, `messages`), and an entry the JSON does not vouch for never confirms a call. Identical calls started close together stay `unknown`. It reads the whole history, never a recent slice, and writes one `zcash_pay_recovery` row: `confirmed` with the txid, `not_found` only with proof, or `unknown`. Proof means the wallet is synced, the whole history was read, the server's tip agrees with the wallet and has not gone backwards, the wallet has scanned more than 181 blocks past the height recorded before the send (the 120 block expiry of the pinned zingolib, plus a 60 block margin), and at least two hours have passed. A send is refused up front when the server's tip is below the wallet's own height or below a tip it reported before. Each run handles at most 100 calls within a time budget and leaves the rest for the next start. States only move forward: a call once seen as sent or mined never goes back. It never sends again. It holds the wallet lock while it runs and syncs first, for at most `STATUS_SYNC_TIMEOUT_MS`, so a payment made right after startup waits for it and may get `BUSY`. `unknown` ones are checked again on the next start.
+- **Recovery on startup.** Pending calls are reconciled by their durable transaction identity under the wallet lock. Live chain absence, elapsed time, and expiry heights never prove irreversible non-payment. Calls that never reached durable transmit authorization have a local non-transmission proof. An authorized call still listed as a verified, matching calculated transaction can resume that exact txid after audit, wallet-identity, binding, and current-policy checks. Recovery never creates a replacement transaction. Ordinary replays and status remain read-only; older staged calls can be resumed explicitly with the original parameters, original key, and `resume: true`. Missing, contradictory, expired, or failed evidence remains unresolved.
 
 ## Resource: `zshield://policy`
 
@@ -122,7 +124,7 @@ Read this before paying to see the rules the server will apply. It is JSON, buil
 }
 ```
 
-`mode` is `mock` or `testnet`. `size` counts unique addresses in the allow-list file right now. If the file cannot be read, `size` is `null`, `error` says why, and every `zcash_pay` call is rejected until it is fixed. The cap is per call only; there is no daily or rolling limit yet. The fingerprint salt is never shown.
+`mode` is `mock`, `testnet`, or explicitly configured `mainnet`. `size` counts unique addresses in the allow-list file right now. If the file cannot be read, `size` is `null`, `error` says why, and every `zcash_pay` call is rejected until it is fixed. The per-call cap can be combined with a durable cumulative principal and fee allowance and signed approvals; see [operator controls](docs/OPERATOR_CONTROLS.md). There is no automatic daily or rolling reset. The fingerprint salt is never shown.
 
 ### Rejection codes
 
@@ -149,6 +151,9 @@ Branch on `code`. It is stable. `message` is for people and may change. `error` 
 | `INVALID_AMOUNT` | Amount is not a positive decimal with at most 8 decimals, or is above the 21,000,000 ZEC supply |
 | `CAP_EXCEEDED` | Amount is above `SPENDING_CAP_ZEC` |
 | `INVALID_CAP` | The configured cap itself is not valid, so every payment is refused |
+| `PAYMENTS_PAUSED` | Operator pause prevents new payments; historical status remains available |
+| `SPENDING_BUDGET_REFUSED` | The durable cumulative principal and fee allowance is exhausted, unavailable or inconsistent; no reset or refund is inferred |
+| `APPROVAL_REQUIRED` | An exact wallet/key/payment approval is missing, expired, invalid or lacks the required distinct signers |
 | `MAINNET_REFUSED` | Testnet mode got a mainnet address (`u1`, `zs1`, `t1`, `t3`, `zc`). Refused even if it is on the allow-list |
 | `INVALID_ADDRESS` | Testnet mode got an address from no known Zcash network |
 | `NOT_ALLOWLISTED` | Recipient is not an exact match for an allow-list entry |
@@ -178,7 +183,7 @@ Branch on `code`. It is stable. `message` is for people and may change. `error` 
 
 | Code | Meaning |
 |------|---------|
-| `SEND_UNCONFIRMED` | `zingo-cli` timed out, was killed, or finished without a txid or an error. The payment may have been broadcast. Do not pay again: call `zcash_payment_status` with the `call_id`, which reports `expired` only once the payment is proven never sent. The response and the audit row list `possible_sends`, sent transactions in the whole wallet history to the same recipient with the same amount (and memo, when one was given) found right after the failure, each with a `confidence`. `possible_txids` holds just their txids. Amount alone never counts as a match. An empty list does not prove nothing went out, because the wallet may not have synced the send yet |
+| `SEND_UNCONFIRMED` | `zingo-cli` timed out, was killed, or finished without a txid or an error. The payment may have been broadcast. Do not pay again: call `zcash_payment_status` with the `call_id`, which keeps uncertain live outcomes unresolved; expiry alone is not proof of non-payment. The response and the audit row list `possible_sends`, sent transactions in the whole wallet history to the same recipient with the same amount (and memo, when one was given) found right after the failure, each with a `confidence`. `possible_txids` holds just their txids. Amount alone never counts as a match. An empty list does not prove nothing went out, because the wallet may not have synced the send yet |
 | `PAYMENT_PENDING` | A repeat call with an `idempotency_key` whose first call has a `pending` row and no result yet. Nothing was sent again. Call `zcash_payment_status` with the key |
 
 Checks run in this order, and the first failure decides the code: recipient and memo size, allow-list file, amount, cap, address network (testnet mode only), allow-list match.
@@ -313,7 +318,7 @@ Precedence: **environment variables** override `config/default.yaml`.
 | `VIEW_KEY_FINGERPRINT_SALT` | from yaml | Salt for view-key fingerprints |
 | `RATE_LIMIT_PER_MIN` | `60` | Tool calls allowed per minute across all tools in one server process, 1 to 10000. Calls over it get `RATE_LIMITED` |
 | `AUDIT_FALLBACK_PATH` | `audit-fallback.jsonl` next to `AUDIT_DIR` | Where an audit row goes when the main log cannot be written |
-| `SEND_QUEUE_WAIT_MS` | `10000` | How long a send waits for another send from the same wallet, up to `600000`, before `BUSY` |
+| `SEND_QUEUE_WAIT_MS` | `10000` | How long a send waits for this wallet, up to `600000`, before `BUSY`; live mode applies a `20000` ms minimum to outwait a bounded read |
 | `HEALTH_MAX_LAG_BLOCKS` | `10` | Testnet mode: how far the wallet may trail the chain tip and still send, 0 to 10000 |
 | `HEALTH_SYNC_TIMEOUT_MS` | `90000` | Testnet mode: the longest the pre-send wallet sync may run, 0 to 600000. `0` skips it |
 | `STATUS_SYNC_TIMEOUT_MS` | `90000` | Testnet mode: the longest the wallet sync before `zcash_payment_status` and startup recovery may run, 0 to 600000. `0` skips it |
@@ -342,7 +347,7 @@ The viewing key itself is **never** written or returned, only a short fingerprin
 
 ## Security model
 
-[docs/RELIABILITY_DESIGN.md](docs/RELIABILITY_DESIGN.md) explains how one request leads to at most one send, and [docs/V12_CHECKLIST.md](docs/V12_CHECKLIST.md) lists every review note with its status and test. [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md) covers where keys live, what the server can and cannot do, the trust boundaries, threats and mitigations, and what is out of scope. Read it before pointing this at a funded wallet. The short version: the cap is per call only, so many small payments can still drain the wallet, and the audit log is not tamper-evident.
+[docs/RELIABILITY_DESIGN.md](docs/RELIABILITY_DESIGN.md) explains how one request leads to at most one send, and [docs/V12_CHECKLIST.md](docs/V12_CHECKLIST.md) lists every review note with its status and test. [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md) covers where keys live, what the server can and cannot do, the trust boundaries, threats and mitigations, and what is out of scope. Read it before pointing this at a funded wallet. The short version: enable the required-control profile for cumulative principal and fee limits and two-person approval. Audit logs are not independently tamper-evident; preserve verified snapshots and externally retained digests.
 
 ## Layout
 
@@ -359,7 +364,7 @@ tests/        happy path + rejections
 
 ## Testnet mode
 
-What it does: with `CHAIN_MODE=testnet` the server checks cap, allow-list, and address network first, writes the audit row, and only then calls `zingo-cli quicksend` against a public testnet lightwalletd (default `https://testnet.zec.rocks:443`). Mainnet addresses (`u1`, `zs1`, `t1`) are rejected; testnet ones (`utest`, `ztestsapling`, `tm`) are accepted. `CHAIN_MODE=live` alone is refused.
+What it does: with `CHAIN_MODE=testnet` the server checks cap, allow-list, and address network first, writes the audit row, and only then uses `zingo-cli send` and `calculate`, durably stages the transaction, then calls exact-txid `transmit` against a public testnet lightwalletd (default `https://testnet.zec.rocks:443`). Mainnet addresses (`u1`, `zs1`, `t1`) are rejected; testnet ones (`utest`, `ztestsapling`, `tm`) are accepted. `CHAIN_MODE=live` alone is refused.
 
 Setup:
 
@@ -395,8 +400,8 @@ Optional variables:
 
 - `ZINGO_BIN`: path to `zingo-cli`.
 - `ZINGO_DATA_DIR`: the wallet directory. It must be an absolute path. The default is `.zshield-testnet/wallet` in the home directory the OS reports, not `$HOME`, and the server will not start if that cannot be found.
-- `LIGHTWALLETD_URL`: the testnet server. A URL with a user, password, query string, or fragment is refused at startup, because `zingo-cli` takes the server only on its command line, where other local users can read it. Set `ZSHIELD_ALLOW_URL_CREDENTIALS=1` to accept that risk. The server then hides those parts in every response, error, and audit row, but not from the process list.
-- `ZINGO_READ_TIMEOUT_MS` (default `120000`, 1 to 600000): stops a read-only call that takes too long.
+- `LIGHTWALLETD_URL`: the testnet server. A URL with a user, password, non-root path, query string, or fragment is refused at startup, because `zingo-cli` takes the server only on its command line, where other local users can read it. Set `ZSHIELD_ALLOW_URL_CREDENTIALS=1` to accept that risk. The server then hides those parts in every response, error, and audit row, but not from the process list.
+- `ZINGO_READ_TIMEOUT_MS` (default `120000`, 1 to 600000): per-command timeout outside MCP read calls. MCP reads additionally share a 10-second total work deadline, plus process termination grace; ordinary history keeps its stricter 2-second limit.
 - `ZINGO_HEALTH_TIMEOUT_MS` (default `30000`, 1 to 300000): stops each pre-send health check step after the sync.
 
 The read-only tools never wait for the wallet. When a send or sync holds it, `zcash_balance` and `zcash_receive_address` read the wallet file offline, as last synced, instead of starting a sync that would race the send. `zcash_history` always reads offline and takes no payment lock.
@@ -426,9 +431,9 @@ One real shielded 0.001 TAZ payment through `zcash_pay`, plus a blocked over-cap
 - ✅ Read-only balance, receive address, and history tools
 - ✅ Stable rejection codes
 - ✅ Idempotency keys (required for live payments), an OS-level wallet lock, a two-stage send with the txid recorded before broadcast, one send at a time per wallet, pre-send health check, startup recovery, and `zcash_payment_status`
-- ❌ Daily or rolling spend limits (per call only for now)
+- ❌ Daily or rolling resets (a durable lifetime principal and fee allowance is available)
 - ✅ Audit fingerprint from the wallet's real viewing key (UFVK)
-- ❌ Mainnet (refused by design)
+- ✅ Mainnet configuration with mandatory controls and network-bound wallets/approvals
 - ❌ Custody of user spend keys
 
 ## License
@@ -452,7 +457,8 @@ and fallback have independent capacity. Each append reserves a durable maximum-r
 slot before writing, so retries and failed writes conservatively consume capacity.
 Reservations are exclusive across processes and survive restarts. Existing logs are
 charged conservatively to both pools on first use. The configured bounds cover JSONL
-bytes; bounded reservation files also consume filesystem metadata/inodes. Payment
+bytes; reservations use one fixed counter inode per pool, serialized with OS flock.
+Legacy slot files remain charged and are not deleted during upgrade. Payment
 state is never pruned. Replays and rejected calls use diagnostic capacity; a send must
 obtain protected capacity before it creates its intent. At exhaustion new sends fail
 closed, while recorded outcomes and idempotency bindings remain available. Capacity
@@ -506,3 +512,57 @@ for opens. A different uid cannot control any accepted component. Retargeting an
 or replacing a pinned ancestor fails closed. This includes the independent fallback,
 allow-list, state, and audit-quota namespaces. Trusted root/owner aliases remain supported;
 root or service-uid compromise is outside this local-user boundary.
+
+
+### Phase 1 follow-up review
+
+Signed transaction IDs and transmit authorization are recorded separately. New live
+calls cannot transmit before the authorization event is durable. Recovery can therefore
+settle a crash before authorization as `not_sent`, even if a signed txid exists. A final
+fence failure or authenticated wallet-wrapper `BUSY` refusal also proves no transmit
+started and releases the interlock. A crash after authorization is recovered by resuming the same verified signed txid,
+not by declaring it unsent. Legacy records, chain absence, and a wallet's `calculated`
+label alone do not prove non-payment. Recovery never builds a replacement payment.
+
+All MCP wallet reads and status work share one 10-second deadline across their CLI
+commands and sync, with a 500 ms sync-save grace and at most 5 seconds of CLI kill
+grace. Live payment admission waits at least 20 seconds to cover this work and lock
+handoff. The lock is released only after the read completes or its child exits; a
+Promise timeout never unlocks a still-running wallet process. Queued payments retain
+priority over later readers. Startup maintenance recovery retains its separate budget.
+
+Non-root lightwalletd URL paths are treated as potentially secret, require HTTPS and
+explicit credential opt-in, and are hidden from diagnostics. Each non-empty decoded
+path segment must satisfy the same 8-character minimum as other credentials; use a
+credential-free root endpoint when this restriction does not fit the provider route.
+Opting in still exposes the URL in zingo-cli process arguments.
+
+Audit reservations use two counter files per destination. Their file lengths count
+charged rows, with `flock`, truncation and fsync performed before an append is allowed.
+Failed or interrupted reservations can overcharge but cannot silently reclaim capacity.
+Concurrent processes share the counters. Existing slot reservations continue to count;
+no automatic cleanup, counter reset, or financial-state deletion is performed.
+
+
+### Resuming the original signed payment
+
+An ordinary repeated `zcash_pay` call still returns its stored outcome without sending.
+For an older unresolved two-step call, use the same amount, recipient, memo and
+idempotency key with `resume: true`. An unknown key cannot start a payment in resume
+mode. The binding and txid owner, original wallet fingerprint, exact outputs, current
+allow-list and spending cap must agree. Financial audit evidence must be durable
+before the adapter runs only `transmit <original-txid>`; it never runs `send` or
+`calculate` during recovery. Concurrent resumers share the payment lock. A failure of
+this retry is not proof that the first attempt was never sent.
+
+Startup recovery resumes only calls with a durable transmit-authorization event. This
+closes the server crash between that event and starting transmit. Its sync, identity
+reads and possible resume share the recovery deadline. Status queries never resume.
+A missing signed transaction, failed/expired wallet transaction, revoked policy,
+unavailable wallet or network, and unverified evidence still fail closed. In
+particular, the pinned Zingo refuses to transmit a transaction already marked failed;
+recovery cannot manufacture a safe replacement from that observation.
+
+Audit reservation counters require Perl with `flock` and `IO::Handle::sync`, including
+for mock-mode audit writes. Without it, durable audit writes fail closed. Live mode
+continues to require a POSIX platform; mock mode on Windows needs a compatible Perl.

@@ -42,24 +42,21 @@ function stageOkTransmitFails(transmitError: Error) {
 afterEach(() => mock.restoreAll());
 
 describe("state invariants", { timeout: 180_000 }, () => {
-  it("F-41 staged_busy_is_unresolved: a staged payment whose transmit never started is not recorded as not_sent", async () => {
+  it("F-41 staged_busy_is_not_sent: wrapper refusal proves transmit never started", async () => {
     const config = liveConfig();
     const chain = stageOkTransmitFails(new WalletBusyError("Another zingo-cli process is using this wallet. Nothing was started.", "busy"));
     const input = { idempotency_key: "inv-5a", amount_zec: "0.001", recipient: UTEST };
     const r = await executePay(input, { config, chain });
     const body = JSON.parse(r.text);
     const store = storeFor(config, chain);
-    const callId = body.call_id as string;
-    const rec = store.readCall(callId);
-    assert.ok(rec?.stagedTxid === STAGED || JSON.stringify(rec).includes(STAGED), `the staged txid should be on record: ${JSON.stringify(rec)}`);
-    assert.notEqual(
-      rec?.state,
-      "not_sent",
-      `a signed transaction exists (staged txid ${STAGED}) and may still be transmitted, but the call is recorded as ${rec?.state} (response code ${r.code}, status ${body.status})`
-    );
-    assert.ok(store.pendingCalls().includes(callId), "the call must stay in pendingCalls() so recovery re-examines the txid");
+    const rec = store.readCall(body.call_id);
+    assert.equal(rec?.stagedTxid, STAGED);
+    assert.equal(rec?.state, "not_sent");
+    assert.ok(!store.pendingCalls().includes(body.call_id));
+    assert.equal(store.unresolvedSend(), undefined);
     const replay = JSON.parse((await executePay(input, { config, chain })).text);
-    assert.notEqual(replay.code, "BUSY", `replaying the key must not say the payment was not sent: ${JSON.stringify(replay).slice(0, 300)}`);
+    assert.equal(replay.call_id, body.call_id);
+    assert.equal(replay.code, "BUSY");
   });
 
   for (const [dirName, label] of [

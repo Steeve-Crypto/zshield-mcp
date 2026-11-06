@@ -1,3 +1,7 @@
+import { approvalKeys } from "./payments/approval.js";
+import { parseZecToZats } from "./policy/amount.js";
+import { statfsSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { assertFingerprintSalt } from "./config.js";
 import { resolveWalletDir } from "./chain/live.js";
 import { assertWalletPrivate } from "./chain/perms.js";
@@ -58,11 +62,12 @@ export function checkRecordPaths(config: Config, stateDir: string, platform: str
  * has no wallet to check.
  */
 export function startupChecks(config: Config, platform: string = process.platform, deps: StartupDeps = {}): string[] {
+  assertFinancialProfile(config, platform);
   assertFingerprintSalt(config);
   if (config.chainMode !== "live") {
     return checkRecordPaths(config, deps.stateDir ?? stateDirFor(config), platform);
   }
-  if (config.chainNetwork !== "testnet") {
+  if (config.chainNetwork !== "testnet" && config.chainNetwork !== "mainnet") {
     throw new Error("zshield-mcp: live mode requires CHAIN_MODE=testnet. Mainnet is refused.");
   }
   if (platform === "win32") {
@@ -102,4 +107,25 @@ export function runStartup(config: Config, platform: string = process.platform, 
 export function restrictUmask(config: Config, platform: string = process.platform): number | undefined {
   if (config.chainMode !== "live" || platform === "win32") return undefined;
   return process.umask(0o077);
+}
+
+
+/** This is an enforced control profile, not an assertion of mainnet readiness. */
+export function assertFinancialProfile(config: Config, platform: string = process.platform): void {
+  if (config.chainNetwork === "mainnet") {
+    if (!config.mainnetEnabled) throw new Error("Mainnet requires explicit MAINNET_ENABLED=1; testnet remains available.");
+    if (!config.lightwalletd || !/^[a-f0-9]{8}$/.test(config.expectedConsensusBranch ?? "")) throw new Error("Mainnet requires explicit LIGHTWALLETD_URL and EXPECTED_CONSENSUS_BRANCH.");
+    if (new URL(config.lightwalletd).protocol !== "https:") throw new Error("Mainnet requires an HTTPS lightwalletd endpoint.");
+  }
+  if (!config.requireFinancialControls && config.chainNetwork !== "mainnet") return;
+  if (platform !== "linux" || config.chainMode !== "live" || !["testnet", "mainnet"].includes(config.chainNetwork ?? "")) throw new Error("Financial controls profile requires Linux live deployment.");
+  if (!config.totalSpendingCapZec) throw new Error("Financial controls require TOTAL_SPENDING_CAP_ZEC.");
+  parseZecToZats(config.totalSpendingCapZec);
+  if (approvalKeys(config).threshold < 2) throw new Error("Financial controls require at least two distinct approval authorities.");
+  if (!config.zingoBin || !isAbsolute(config.zingoBin) || !/^[a-f0-9]{64}$/.test(config.zingoBinarySha256 ?? "")) throw new Error("Financial controls require an absolute ZINGO_BIN and approved ZINGO_BINARY_SHA256.");
+  if (!config.zingoDataDir) throw new Error("Financial controls require an explicit wallet directory.");
+  // Refuse network filesystems, tmpfs and unqualified container overlays. Local fsync
+  // and flock behavior still require deployment drills on the actual storage stack.
+  const supported = new Set([0xef53, 0x58465342, 0x9123683e]); // ext4, XFS, Btrfs
+  if (!supported.has(statfsSync(config.zingoDataDir).type)) throw new Error("Financial controls require a local ext4, XFS or Btrfs wallet volume; validate its durability before release.");
 }
