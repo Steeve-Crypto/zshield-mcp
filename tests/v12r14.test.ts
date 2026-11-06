@@ -79,7 +79,7 @@ describe("V12 run 14 regressions", () => {
     assert.equal(mayHaveBroadcast(store.readCall("orig-call")!), false);
     assert.equal(store.unresolvedSend("new"), undefined);
     // ...and therefore it must never be transmitted later.
-    const res = await executePay({ ...input, resume: true }, { config, chain, store });
+    const res = await executePay({ ...input, resume: true }, { config, chain });
     assert.equal(JSON.parse(res.text).transmission_attempted, false, res.text);
     assert.equal(sent.count, 0);
     assert.equal(store.readCall("orig-call")!.events.some((e) => e.transmit_authorized), false);
@@ -88,7 +88,7 @@ describe("V12 run 14 regressions", () => {
   it("F-86 explicit resume honors the wallet-wide unresolved-send interlock", async () => {
     const { config, chain, store, sent } = staged(true);
     addLegacyUnknown(store);
-    const res = await executePay({ ...input, resume: true }, { config, chain, store });
+    const res = await executePay({ ...input, resume: true }, { config, chain });
     const body = JSON.parse(res.text);
     assert.equal(body.transmission_attempted, false, res.text);
     assert.match(body.resume_note, /legacy/);
@@ -110,9 +110,52 @@ describe("V12 run 14 regressions", () => {
 
   it("F-86 resume still works once no other send is unresolved", async () => {
     const { config, chain, store, sent } = staged(true);
-    const res = await executePay({ ...input, resume: true }, { config, chain, store });
+    const res = await executePay({ ...input, resume: true }, { config, chain });
     assert.equal(JSON.parse(res.text).transmission_attempted, true, res.text);
     assert.equal(sent.count, 1);
   });
 
+});
+
+describe("run fourteen stale and trust-boundary checks", () => {
+  it("F-59 durable fee mismatch never charges payment audit capacity", async () => {
+    const { config, chain, store, sent } = staged(true);
+    config.totalSpendingCapZec = "0.001";
+    store.appendEvent({ ts: now(), call_id: "orig-call", state: "pending", calculated_fee_zats: "100", by: "send" });
+    const original = chain.getTransaction!.bind(chain);
+    chain.getTransaction = async (...args) => (await original(...args)).map(e => ({ ...e, feeZats: 200n }));
+    const count = () => {
+      const file = config.auditDir + ".budget/payment.counter";
+      return fs.existsSync(file) ? fs.statSync(file).size : 0;
+    };
+    const before = count();
+    for (let n = 0; n < 10; n++) {
+      const out = await executePay({ ...input, resume: true }, { config, chain });
+      assert.equal(JSON.parse(out.text).transmission_attempted, false);
+    }
+    assert.equal(sent.count, 0);
+    assert.equal(count(), before);
+  });
+  it("F-41 a tracked staged not_sent call cannot be revived by explicit resume", async () => {
+    const { config, chain, store, sent } = staged(false);
+    store.advance({ ts: now(), call_id: "orig-call", state: "not_sent", code: "BUSY", by: "send" });
+    await executePay({ ...input, resume: true }, { config, chain });
+    assert.equal(sent.count, 0);
+    assert.equal(store.readCall("orig-call")!.state, "not_sent");
+  });
+});
+
+describe("resume refusal durability", () => {
+  it("F-75 refused resume hides unaudited decision but preserves original uncertainty", async () => {
+    const { config, chain, store, sent } = staged(false);
+    freezeAuditWrites();
+    try {
+      const result = await executePay({ ...input, resume: true }, { config, chain });
+      assert.equal(result.code, "AUDIT_WRITE_FAILED", result.text);
+      const body = JSON.parse(result.text);
+      assert.equal(body.original_unresolved, true);
+      assert.equal(body.resume_note, undefined);
+      assert.equal(sent.count, 0);
+    } finally { unfreezeAuditWrites(); }
+  });
 });
