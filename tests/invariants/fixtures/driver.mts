@@ -75,8 +75,9 @@ if (op === "pay" || op === "resume") {
   if (process.env.CRASH_AFTER_AUTHORIZE === "1") {
     const original = chain.pay.bind(chain);
     chain.pay = (req) => {
-      const authorize = req.beforeTransmit;
-      req.beforeTransmit = () => { authorize?.(); process.kill(process.pid, "SIGKILL"); };
+      // Authorization is durable in afterLock (once the backend flock is held). Crash there.
+      const prior = req.afterLock;
+      req.afterLock = () => { prior?.(); process.kill(process.pid, "SIGKILL"); };
       return original(req);
     };
   }
