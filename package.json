@@ -17,7 +17,8 @@
     "demo:mock": "tsx scripts/demo-mock.ts",
     "test:testnet": "node scripts/verify-testnet.mjs",
     "operator": "tsx scripts/operator.ts",
-    "test:coverage": "node scripts/run-tests.mjs --experimental-test-coverage"
+    "test:coverage": "node scripts/run-tests.mjs --experimental-test-coverage",
+    "audit:payments": "tsx scripts/audit-payments.ts"
   },
   "engines": {
     "node": ">=20"

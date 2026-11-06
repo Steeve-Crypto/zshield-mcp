@@ -6,7 +6,7 @@ import { assertFingerprintSalt } from "./config.js";
 import { resolveWalletDir } from "./chain/live.js";
 import { assertWalletPrivate } from "./chain/perms.js";
 import type { Config } from "./types.js";
-import { fallbackAuditPath } from "./audit/log.js";
+import { fallbackAuditPath, prepareAuditReservations } from "./audit/log.js";
 import { assertSafeAncestors, checkPrivateFile, ensurePrivateDir } from "./fsafe.js";
 import { pinDir } from "./chain/pin.js";
 import { assertAllowlistFileSafe } from "./policy/allowlist.js";
@@ -98,6 +98,7 @@ export function startupChecks(config: Config, platform: string = process.platfor
  */
 export function runStartup(config: Config, platform: string = process.platform, deps: StartupDeps = {}): string[] {
   const warnings = startupChecks(config, platform, deps);
+  warnings.push(...prepareAuditReservations(config));
   restrictUmask(config, platform);
   return warnings;
 }

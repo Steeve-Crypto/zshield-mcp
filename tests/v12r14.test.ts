@@ -4,6 +4,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, mock } from "node:test";
+import { paymentReservationUsage } from "../src/audit/reservation.ts";
+import { fallbackAuditPath } from "../src/audit/log.ts";
 import { AUDIT_SLOT_BYTES, reserveAudit } from "../src/audit/budget.ts";
 import { operationalHealth } from "../src/operations/health.ts";
 import { MockChainAdapter } from "../src/chain/mock.ts";
@@ -124,10 +126,8 @@ describe("run fourteen stale and trust-boundary checks", () => {
     store.appendEvent({ ts: now(), call_id: "orig-call", state: "pending", calculated_fee_zats: "100", by: "send" });
     const original = chain.getTransaction!.bind(chain);
     chain.getTransaction = async (...args) => (await original(...args)).map(e => ({ ...e, feeZats: 200n }));
-    const count = () => {
-      const file = config.auditDir + ".budget/payment.counter";
-      return fs.existsSync(file) ? fs.statSync(file).size : 0;
-    };
+    const count = () => paymentReservationUsage(join(config.auditDir, "2000-01-01.jsonl"), true)
+      + paymentReservationUsage(fallbackAuditPath(config.auditDir, config.auditFallbackPath), false);
     const before = count();
     for (let n = 0; n < 10; n++) {
       const out = await executePay({ ...input, resume: true }, { config, chain });

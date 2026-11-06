@@ -19,6 +19,7 @@ export function tempConfig(overrides: Partial<Config> = {}): Config {
   chmodSync(allowPath, 0o600);
   return {
     spendingCapZec: 0.1,
+    auditMaxBytes: 128 * 8193, // Real test reservations stay small; production default is unchanged.
     allowlistPath: allowPath,
     chainMode: "mock",
     auditDir: join(root, "audits"),

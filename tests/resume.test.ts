@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { join } from "node:path";
 import { describe, it, mock } from "node:test";
+import { paymentReservationUsage } from "../src/audit/reservation.ts";
 import { fingerprintViewKey } from "../src/audit/log.ts";
 import { storeFor, paymentParamsHash } from "../src/payments/store.ts";
 import { recoverPendingPayments } from "../src/payments/recovery.ts";
@@ -176,11 +177,11 @@ describe("exact transaction recovery", () => {
     const w = setup(); w.config.auditMaxBytes = 2 * 8193;
     w.entry({ verified: false });
     for (let i = 0; i < 20; i++) assert.equal((await executePay({ ...input, resume: true }, w)).ok, false);
-    assert.equal(fs.existsSync(join(`${w.config.auditDir}.budget`, "payment.counter")), false);
+    assert.equal(paymentReservationUsage(join(w.config.auditDir, "2000-01-01.jsonl"), true), 0);
     w.entry({ verified: true });
     assert.equal((await executePay({ ...input, resume: true }, w)).ok, true);
     assert.equal(w.attempts(), 1);
-    assert.equal(fs.statSync(join(`${w.config.auditDir}.budget`, "payment.counter")).size, 2);
+    assert.equal(paymentReservationUsage(join(w.config.auditDir, "2000-01-01.jsonl"), true), 2);
   });
   it("audit exhaustion prevents any resume, without erasing the pending call", async () => {
     const w = setup(); w.config.auditMaxBytes = 8193;
