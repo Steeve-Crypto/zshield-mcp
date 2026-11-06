@@ -1,0 +1,21 @@
+This session is deliberately offline (--offline): network-requiring commands are unavailable, and nothing touches the network. The only exit is to relaunch without --offline.
+Launching save task...
+[
+    confirmed_ironwood_balance: 12_370_000
+    unconfirmed_ironwood_balance: 0
+    total_ironwood_balance: 12_370_000
+
+    confirmed_orchard_balance: 0
+    unconfirmed_orchard_balance: 0
+    total_orchard_balance: 0
+
+    confirmed_sapling_balance: 0
+    unconfirmed_sapling_balance: 0
+    total_sapling_balance: 0
+
+    confirmed_transparent_balance: 0
+    unconfirmed_transparent_balance: 0
+    total_transparent_balance: 0
+]
+Save task shutdown successfully.
+Zingo CLI quit successfully.

@@ -5,3 +5,4 @@ audits/*.jsonl
 !audits/.gitkeep
 *.log
 .DS_Store
+.zshield-state/
