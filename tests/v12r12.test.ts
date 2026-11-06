@@ -201,13 +201,14 @@ describe("V12 run 12 regressions", () => {
     assert.match(src, /original_call_id:\s*originalCallId/);
   });
 
-  it("F-75 payment refusals use the financial audit pool", () => {
+  it("F-75 payment refusals use the fail-closed refusal audit pool", () => {
     const root = mkdtempSync(join(tmpdir(), "v12r12-fin-"));
     const fallback = join(root, "fallback.jsonl");
     const config = {
       auditDir: join(root, "audits"),
       auditFallbackPath: fallback,
-      auditMaxBytes: AUDIT_SLOT_BYTES,
+      auditMaxBytes: AUDIT_SLOT_BYTES * 100,
+      auditRefusalMaxBytes: AUDIT_SLOT_BYTES,
       auditDiagnosticMaxBytes: AUDIT_SLOT_BYTES * 100,
     } as Config;
     mkdirSync(config.auditDir, { mode: 0o700 });
@@ -217,8 +218,9 @@ describe("V12 run 12 regressions", () => {
       status: "rejected" as const, view_key_fingerprint: null, code: "NOT_ALLOWLISTED", error: "no",
     };
     assert.equal(writeAuditRow(config, row).durable, true);
-    // Exhaust the fallback financial pool too so the refusal cannot soft-succeed there.
-    reserveAudit(fallback, true, { auditMaxBytes: AUDIT_SLOT_BYTES }, false);
+    // Exhaust the fallback refusal pool too so the refusal cannot soft-succeed there. Refusals
+    // fail closed in their own pool, never the diagnostic one (F-75) nor the payment one (F-59).
+    reserveAudit(fallback, "refusal", { auditRefusalMaxBytes: AUDIT_SLOT_BYTES }, false);
     const second = writeAuditRow(config, { ...row, call_id: "c2" });
     assert.equal(second.durable, false, second.warning);
   });

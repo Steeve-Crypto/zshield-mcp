@@ -15,6 +15,7 @@ import type { WalletLock } from "./lock.js";
 
 /** Never constructs a new transaction. An ambiguous retry remains the SAME signed tx. */
 export const RESUME_TIMEOUT_MS = 30_000;
+class ResumeAuditError extends Error {}
 export interface ResumeResult { row: RecoveryAuditEntry; attempted: boolean }
 
 export function hasTransmitAuthorization(record: CallRecord): boolean {
@@ -86,11 +87,7 @@ export async function resumeOriginal(
     // consume protected capacity, and can be repeated safely.
     reserveSpending(config, store, lock, record.callId, amount, paymentParamsHash(intent), intent.idempotency_key!);
     reserveFee(config, store, lock, record.callId, originalFee, paymentParamsHash(intent), intent.idempotency_key!);
-    // Record financial evidence BEFORE a possible network mutation.
-    const audit = writeAuditRow(config, { ...base, status: "unknown", note: "Resuming only the originally signed transaction by exact txid; no replacement transaction authorized." });
-    if (!audit.durable) return unknown("Audit evidence could not be persisted; no resume attempted.");
     lock.assertHeld();
-    attempted = true;
     await chain.resumeSigned(txid, { fence: () => {
       lock.assertHeld();
       assertPaymentsEnabled(store);
@@ -98,6 +95,12 @@ export async function resumeOriginal(
       assertRecipientAllowed(intent.recipient, loadAllowlist(config.allowlistPath));
       reserveFee(config, store, lock, record.callId, originalFee, paymentParamsHash(intent), intent.idempotency_key!);
       reserveSpending(config, store, lock, record.callId, amount, paymentParamsHash(intent), intent.idempotency_key!);
+      // Financial evidence is charged only here, after every gate of THIS attempt passed and
+      // with the backend lock held, immediately before the network mutation. A refusal at any
+      // earlier point consumes no protected audit capacity and can be repeated safely (F-59).
+      const audit = writeAuditRow(config, { ...base, status: "unknown", note: "Resuming only the originally signed transaction by exact txid; no replacement transaction authorized." });
+      if (!audit.durable) throw new ResumeAuditError("Audit evidence could not be persisted; no resume attempted.");
+      attempted = true;
       // Authorize only once the backend lock is held and the fence checks pass (F-53/F-73).
       if (!hasTransmitAuthorization(record)) store.authorizeTransmit(record.callId, new Date().toISOString());
     }, timeoutMs: RESUME_TIMEOUT_MS });
@@ -105,6 +108,7 @@ export async function resumeOriginal(
   } catch (e) {
     // Policy refusals of THIS attempt are exact and must not look like a benign replay.
     if (e instanceof PolicyError) throw e;
+    if (e instanceof ResumeAuditError) return unknown(e.message);
     // Even a proven refusal of THIS retry says nothing about the FIRST attempt.
     return unknown("The original transaction remains unresolved after the resume attempt. Retry the same key with resume=true, or check payment_status. Never substitute a new payment key.");
   }

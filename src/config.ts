@@ -125,6 +125,7 @@ export function loadConfig(cwd = process.cwd()): Config {
     auditFallbackPath: fallbackPath === undefined ? undefined : resolve(cwd, fallbackPath),
     auditMaxBytes: parseAuditBudget(process.env.AUDIT_MAX_BYTES ?? DEFAULT_AUDIT_MAX_BYTES),
     auditDiagnosticMaxBytes: parseAuditBudget(process.env.AUDIT_DIAGNOSTIC_MAX_BYTES ?? DEFAULT_AUDIT_MAX_BYTES),
+    auditRefusalMaxBytes: parseAuditBudget(process.env.AUDIT_REFUSAL_MAX_BYTES ?? process.env.AUDIT_DIAGNOSTIC_MAX_BYTES ?? DEFAULT_AUDIT_MAX_BYTES),
     viewKeyFingerprintSalt: envOr(
       "VIEW_KEY_FINGERPRINT_SALT",
       fromFile.view_key_fingerprint_salt ?? "dev-only-change-me",

@@ -394,8 +394,8 @@ async function resumePay(input: PayInput, deps: PayDeps, store: PaymentStore, ca
     }
     // A refused/unverifiable resume is diagnostic traffic, not a financial
     // mutation. Its replay row below must not consume protected financial capacity.
-    const written = resumed.attempted || resumed.row.status !== "unknown"
-      ? writeAuditRow(deps.config, resumed.row) : { warning: undefined };
+    // A resume that never reached the transmit fence is refusal evidence in its own pool.
+    const written = writeAuditRow(deps.config, resumed.attempted ? resumed.row : { ...resumed.row, refusal: true } as typeof resumed.row);
     const result = replay(input, deps, callId, binding.call_id, after);
     return { ...result, text: JSON.stringify({ ...JSON.parse(result.text), transmission_attempted: resumed.attempted, resume_note: resumed.row.note,
       audit_warning: [result.auditWarning, written.warning, stateWarning].filter(Boolean).join(" ") || undefined }, null, 2) };
@@ -495,6 +495,7 @@ function refuseKey(
     status,
     code,
     error: message,
+    refusal: true as const,
     // Only a hash of an invalid key, so an oversized one stays out of the log.
     idempotency_key: code === "INVALID_IDEMPOTENCY_KEY" ? undefined : input.idempotency_key,
   });
@@ -740,7 +741,7 @@ async function runPay(
         const stuck = store.unresolvedSend(callId);
         if (stuck) {
           policyPassed = false;
-          fail("error", "UNRESOLVED_PAYMENT", `An earlier payment from this wallet (call ${stuck.callId}, ${stuck.txid ? `transaction ${stuck.txid}` : "legacy expiry observation"}) is not resolved. It may have been broadcast. Check it with zcash_payment_status. Nothing was sent.`);
+          fail("error", "UNRESOLVED_PAYMENT", `An earlier payment from this wallet (call ${stuck.callId}, ${stuck.txid ? `transaction ${stuck.txid}` : "no recorded transaction id"}) is not resolved. It may have been broadcast. Check it with zcash_payment_status. Nothing was sent.`);
         }
       } catch (e) {
         policyPassed = false;

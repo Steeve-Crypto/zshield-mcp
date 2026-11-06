@@ -157,15 +157,31 @@ export function foldEvents(callId: string, intent: CallIntent | undefined, event
     blockHeight = withTx.find((e) => e.block_height !== undefined)?.block_height;
   }
   const stagedTxid = events.find((e) => e.staged_txid)?.staged_txid;
-  // Upgrade interpretation (F-76): a send-path not_sent after staging+authorize is ambiguous.
-  // Recovery may later prove not_sent when the wallet still shows calculated (F-53).
-  if (top?.state === "not_sent" && stagedTxid && events.some((e) => e.transmit_authorized)) {
+  // Upgrade interpretation (F-76): a send-path not_sent after staging is ambiguous unless this
+  // call used the tracked protocol and was never authorized to transmit. Older records carry
+  // no authorization marker, so their transmit may have raced the error that wrote not_sent.
+  if (top?.state === "not_sent" && stagedTxid && (!intent?.transmit_tracked || events.some((e) => e.transmit_authorized))) {
     const notSent = events.filter((e) => e.state === "not_sent");
     if (notSent.length > 0 && notSent.every((e) => e.by === "send")) {
       top = { ...top, state: "unknown", note: top.note ?? "Staged transmit-authorized not_sent is ambiguous." };
     }
   }
   return { callId, intent, state: top?.state ?? "pending", top, txid, blockHeight, stagedTxid, events };
+}
+
+/**
+ * Whether an unsettled call could have put a transaction on the network. Only local protocol
+ * proof says no: a tracked call never authorized to transmit, or a two-step call that never
+ * staged a transaction. A still-pending call with no recorded outcome counts as possible only
+ * once something beyond its intent was written, so a brand-new intent is not a send.
+ */
+export function mayHaveBroadcast(r: CallRecord): boolean {
+  if (r.txid || r.stagedTxid) {
+    return !(r.intent?.transmit_tracked && !r.txid && !r.events.some((e) => e.transmit_authorized));
+  }
+  if (r.intent?.two_step || r.intent?.transmit_tracked) return false;
+  // Legacy one-step call without a txid: an unknown outcome may be a broadcast whose id was lost.
+  return r.state === "unknown";
 }
 
 /** Whether `next` moves a call in `current` state forward. */
@@ -208,8 +224,9 @@ export class PaymentStore {
       if (callId.startsWith(".tmp-")) continue;
       const record = this.readCall(callId);
       if (!record) continue;
-      // Upgrade path (F-76): ambiguous staged+authorized payments must stay pending.
-      if (record.stagedTxid && record.events.some((e) => e.transmit_authorized) && !isSettled(record.state)) {
+      // Upgrade path (F-76): every unsettled record that may have broadcast stays pending, including
+      // older staged calls whose send-path not_sent now folds to unknown.
+      if (!isSettled(record.state) && mayHaveBroadcast(record)) {
         this.markPending(callId);
         continue;
       }
@@ -322,7 +339,9 @@ export class PaymentStore {
     for (const callId of this.pendingCalls()) {
       if (callId === exceptCallId) continue;
       const r = this.readCall(callId);
-      if (r && !isSettled(r.state) && ((r.stagedTxid ?? r.txid) || (this.requireOsLock && r.state === "expired"))) return { callId, txid: r.stagedTxid ?? r.txid };
+      // Any unsettled call that is not proven never to have transmitted blocks new sends, including
+      // legacy one-step unknowns with no recorded txid (F-80).
+      if (r && !isSettled(r.state) && (mayHaveBroadcast(r) || (this.requireOsLock && r.state === "expired"))) return { callId, txid: r.stagedTxid ?? r.txid };
     }
     return undefined;
   }
