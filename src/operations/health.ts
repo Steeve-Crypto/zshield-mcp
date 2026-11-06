@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { join } from "node:path";
 import { readPrivate, checkPrivateFile } from "../fsafe.js";
 import { fallbackAuditPath } from "../audit/log.js";
+import { paymentReservationUsage } from "../audit/reservation.js";
 import { AUDIT_SLOT_BYTES, DEFAULT_AUDIT_MAX_BYTES } from "../audit/budget.js";
 import { parseZecToZats } from "../policy/amount.js";
 import type { Config } from "../types.js";
@@ -41,6 +42,7 @@ export function operationalHealth(config: Config, store: PaymentStore) {
     const file=join(directory,pool+".counter");checkPrivateFile(file);
     let count=names.filter(n=>new RegExp(`^${pool}-[0-9]+$`).test(n)).length;
     try{count+=fs.statSync(file).size;}catch(e){if((e as NodeJS.ErrnoException).code!=="ENOENT")throw e;}
+    if(pool==="payment") count+=paymentReservationUsage(daily?join(root,"2000-01-01.jsonl"):root,daily);
     const limit=(pool==="payment"?config.auditMaxBytes:pool==="refusal"?config.auditRefusalMaxBytes??config.auditDiagnosticMaxBytes:config.auditDiagnosticMaxBytes)??DEFAULT_AUDIT_MAX_BYTES;
     const reserved=baseline+count*AUDIT_SLOT_BYTES;
     return [pool,{reserved_bytes:reserved,limit_bytes:limit,remaining_bytes:Math.max(0,Math.floor((limit-baseline)/AUDIT_SLOT_BYTES)-count)*AUDIT_SLOT_BYTES}];
