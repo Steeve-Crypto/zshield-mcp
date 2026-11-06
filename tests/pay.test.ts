@@ -25,6 +25,7 @@ function tempConfig(overrides: Partial<Config> = {}): Config {
   );
   return {
     spendingCapZec: 0.1,
+    auditMaxBytes: 128 * 8193, // Bounded real test allocation; production default stays 64 MiB.
     allowlistPath: allowPath,
     chainMode: "mock",
     auditDir: join(root, "audits"),
