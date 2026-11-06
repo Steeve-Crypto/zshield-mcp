@@ -19,17 +19,17 @@ describe("binding durability", () => {
     });
     const input = { amount_zec: "0.001", recipient: ALLOWED, idempotency_key: "durable" };
     try {
-      const result = await executePay(input, { config, chain, store });
+      const result = await executePay(input, { config, chain });
       assert.equal(result.code, "STATE_WRITE_FAILED", result.text);
       assert.equal(pay.mock.callCount(), 0);
       const binding = store.readKey("durable")!;
       assert.ok(binding, "publication must not be rolled back unsafely");
       assert.equal(store.bindingRetryable(binding), true);
     } finally { injected.mock.restore(); }
-    const retried = await executePay(input, { config, chain, store });
+    const retried = await executePay(input, { config, chain });
     assert.equal(retried.ok, true, retried.text);
     assert.equal(pay.mock.callCount(), 1);
-    assert.equal((await executePay(input, { config, chain, store })).ok, true);
+    assert.equal((await executePay(input, { config, chain })).ok, true);
     assert.equal(pay.mock.callCount(), 1);
   });
 });
