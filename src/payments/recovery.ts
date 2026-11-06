@@ -362,17 +362,13 @@ export async function recoverPendingPayments(
   opts: RecoveryOptions = {}
 ): Promise<RecoveryAuditEntry[]> {
   let store: PaymentStore;
-  let todo: string[];
   try {
     store = storeFor(config, chain);
-    todo = store.pendingCalls();
   } catch {
     return [];
   }
-  if (todo.length === 0) return [];
-  // A bounded wait per attempt, with the in-process queue released in between, so a long
-  // send in another process neither stalls this server's own payments nor lets recovery
-  // wait without end.
+  // Take the lock BEFORE reading the worklist. An empty pre-lock snapshot would miss
+  // outbox items created while this server was already accepting traffic.
   let lock: WalletLock | undefined;
   const attempts = Math.max(1, opts.lockAttempts ?? RECOVERY_LOCK_ATTEMPTS);
   for (let i = 0; i < attempts && !lock; i++) {
@@ -385,6 +381,9 @@ export async function recoverPendingPayments(
   }
   if (!lock) return [];
   try {
+    // Worklist is captured under the lock so concurrent staging is visible.
+    const todo = store.pendingCalls();
+    if (todo.length === 0) return [];
     return await withOperationBudget(opts.budgetMs ?? RECOVERY_BUDGET_MS, () => recoverLocked(config, chain, store, lock!, todo, opts));
   } catch {
     return [];

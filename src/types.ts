@@ -203,6 +203,8 @@ export interface PaymentRequest {
   stage?: (txid: string) => void;
   /** Durably authorize transmit after staging and the final fence. Throws before broadcast. */
   beforeTransmit?: () => void;
+  /** Re-check policy after the backend wallet lock is held, immediately before transmit. */
+  afterLock?: () => void;
   /** Reserve the exact calculated fee before any transmission. */
   authorizeFee?: (feeZats: bigint) => void;
 }
