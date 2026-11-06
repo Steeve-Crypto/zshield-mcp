@@ -24,7 +24,7 @@ function openPrivate(file: string, flags: number): number {
 function header(fd: number): number {
   const st = fs.fstatSync(fd), buf = Buffer.alloc(JOURNAL_HEADER_BYTES);
   if (fs.readSync(fd, buf, 0, buf.length, 0) !== buf.length) failure("Incomplete payment audit reservation.");
-  const match = buf.toString("ascii").match(/^ZSHIELD_PAYMENT_AUDIT_V1 ([1-9][0-9]*)\n\0*$/);
+  const match = buf.toString("latin1").match(/^ZSHIELD_PAYMENT_AUDIT_V1 ([1-9][0-9]*)\n\0*$/);
   const slots = match ? Number(match[1]) : 0;
   if (!Number.isSafeInteger(slots) || slots < 1 || slots > Math.floor(1073741824 / AUDIT_SLOT_BYTES) ||
       st.size !== JOURNAL_HEADER_BYTES + slots * JOURNAL_SLOT_BYTES || st.blocks * 512 < st.size) {
@@ -128,9 +128,9 @@ export function readPaymentEvidence(path: string): { rows: object[]; incomplete:
       if (fs.readSync(fd, buf, 0, buf.length, JOURNAL_HEADER_BYTES + i * JOURNAL_SLOT_BYTES) !== buf.length) failure("Short payment audit slot.");
       if (buf[0] === 0 && buf.every(x => x === 0)) continue;
       if (buf[0] === 73) { incomplete++; continue; }
-      if (buf[0] !== 67 || !/^[0-9a-f]{8}$/.test(buf.toString("ascii", 1, 9))) failure("Corrupt payment audit slot.");
-      const len = parseInt(buf.toString("ascii", 1, 9), 16), data = buf.subarray(73, 73 + len);
-      if (len > MAX_AUDIT_ROW_BYTES || createHash("sha256").update(data).digest("hex") !== buf.toString("ascii", 9, 73)) failure("Corrupt payment audit checksum.");
+      if (buf[0] !== 67 || !/^[0-9a-f]{8}$/.test(buf.toString("latin1", 1, 9))) failure("Corrupt payment audit slot.");
+      const len = parseInt(buf.toString("latin1", 1, 9), 16), data = buf.subarray(73, 73 + len);
+      if (len > MAX_AUDIT_ROW_BYTES || createHash("sha256").update(data).digest("hex") !== buf.toString("latin1", 9, 73)) failure("Corrupt payment audit checksum.");
       rows.push(JSON.parse(data.toString("utf8")) as object);
     }
     return { rows, incomplete, capacity };
