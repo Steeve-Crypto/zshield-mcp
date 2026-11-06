@@ -83,3 +83,11 @@ See [production scorecard](docs/PRODUCTION_READINESS.md), [journal contract](doc
 - `/workspace/zshield-node22-release.log`: final CI-matching rerun and coverage after test-resource controls.
 
 All-files coverage includes test fixtures and temporary fake CLI programs. Do not present it as source-only or native-network coverage.
+
+## CI timeout follow-up
+
+The first PR CI run, 42255228965, exposed a test scheduling defect: the monolithic resume sweep exceeded its 300-second timeout on the coverage-instrumented GitHub runner, even though all 49 crash points finished seconds later. Its full coverage step took 6 minutes 39 seconds. Local timing alone had not established runner margin.
+
+The sweep now probes the current durable-point count and executes every point in sequential subtests of at most eight points, each with a 120-second timeout. Every point retains a fresh isolated world and the original txid, accepted-send count, calculation count and process-overlap assertions. A final count assertion additionally requires every probed point to pass. No points, assertions or coverage instrumentation were removed. The existing CI job remains bounded at 20 minutes.
+
+Full Node 22.23.4 `npm run test:coverage` passed 632/632 tests across 143 suites, zero failures, cancellations or skipped cases. The additional seven tests are the seven crash batches, not reduced coverage. All 49 resume points passed. Resume sweep duration was 146.24 seconds; batches took 2.63 to 25.68 seconds against their 120-second limits. Full command wall time was 3 minutes 40.43 seconds, with test-runner duration 213.91 seconds. Typecheck, build, npm audit and diff checks also passed. All-files coverage remained 97.85% lines, 90.48% branches and 94.19% functions. The complete log is `/workspace/zshield-ci-timeout-coverage.log`. Native-wallet and deployment qualification limits are unchanged.
