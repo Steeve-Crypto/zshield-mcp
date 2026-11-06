@@ -627,15 +627,19 @@ export class LiveChainAdapter implements ChainAdapter {
     const input = transmitCommand(txid);
     if (!opts || typeof opts.fence !== "function" || !Number.isSafeInteger(opts.timeoutMs) || opts.timeoutMs <= 0) throw new Error("Invalid resume authorization.");
     this.invalidateScans();
+    let fenced = false;
     try {
       if (this.network === "mainnet") { await this.getViewingKey(); await this.checkHealth({ sync: false }); }
       this.assertPinned();
       const sent = await this.exec([...this.baseArgs(), "--nosync"], {
         input, timeoutMs: Math.min(opts.timeoutMs, SEND_TIMEOUT_MS), lockWaitMs: SEND_LOCK_WAIT_MS,
-        afterLock: () => { opts.fence(); },
+        afterLock: () => { opts.fence(); fenced = true; },
       });
       if (!transmitted(sent, txid)) throw new Error("The wallet did not acknowledge the exact original transaction.");
     } catch (e) {
+      // Before the fence completed nothing was transmitted: keep the exact refusal so the caller
+      // can tell a policy or audit refusal from an ambiguous transmit.
+      if (!fenced) throw e;
       throw new SendOutcomeUnknownError(e instanceof Error ? e.message : String(e), txid);
     } finally {
       this.invalidateScans();
