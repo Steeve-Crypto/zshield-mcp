@@ -1,3 +1,5 @@
+import { hasTransmitAuthorization, resumeOriginal } from "./resume.js";
+import { withOperationBudget } from "../chain/read-budget.js";
 import { findTransaction } from "../chain/types.js";
 import type { ChainAdapter } from "../chain/types.js";
 import { writeAuditRow } from "../audit/log.js";
@@ -11,7 +13,7 @@ import type { SyncResult } from "../chain/sync.js";
 
 /**
  * Mock mode only (no chain to ask): how long after its intent a send that never showed
- * up counts as not sent. Live mode needs proof by block height instead.
+ * up counts as not sent. Live mode never treats chain absence as non-payment.
  */
 export const RECOVERY_EXPIRY_MS = 2 * 60 * 60_000;
 /**
@@ -22,16 +24,14 @@ export const RECOVERY_EXPIRY_MS = 2 * 60 * 60_000;
  */
 export const TX_EXPIRY_BLOCKS = 120;
 /**
- * Extra blocks past expiry before a missing send counts as proven not sent. The
+ * Historical diagnostic margin, never proof of live non-payment. The
  * transaction is built when zingo-cli runs, up to SEND_TIMEOUT_MS (15 minutes, 36 blocks
  * of 25 seconds) after the tip was recorded, so its expiry can sit that far above the
  * recorded one. A finite margin is not chain finality.
  */
 export const EXPIRY_MARGIN_BLOCKS = 60;
 /**
- * A live "not sent" proof also needs this much time since the call started, whatever the
- * heights say, so a wrong height alone can never make it. Blocks come every 25 to 75
- * seconds: 1 + 120 + 60 of them is at most about 75 minutes at 25 seconds.
+ * Historical diagnostic age floor; no finite elapsed time proves live non-payment.
  */
 export const LIVE_PROOF_MIN_AGE_MS = RECOVERY_EXPIRY_MS;
 
@@ -139,6 +139,9 @@ export async function reconcile(record: CallRecord, chain: ChainAdapter, opts: R
   // transmit until its staged txid has been durably recorded.
   if (opts.live && intent.two_step && !record.stagedTxid && !record.txid) {
     return { ...base, status: "not_sent", note: "No transaction was durably staged for this two-step call, so its send path could not transmit. Nothing was sent." };
+  }
+  if (opts.live && intent.transmit_tracked && !record.txid && !record.events.some((e) => e.transmit_authorized)) {
+    return { ...base, status: "not_sent", note: "Transmit was never durably authorized for this call. Nothing was sent." };
   }
   if (record.stagedTxid ?? record.txid) return reconcileStaged(base, record, (record.stagedTxid ?? record.txid)!, intent, chain, opts, now, startedAt);
   const target = { amountZats: BigInt(intent.amount_zats), recipient: intent.recipient, memo: intent.memo, notBeforeHeight: intent.wallet_height ?? intent.chain_tip };
@@ -280,7 +283,7 @@ async function reconcileStaged(
     return { ...base, status: "unknown", txid, possible_sends: candidate("listed twice"), note: "The wallet listing shows this call's transaction id more than once, which a real wallet never does. Check by hand. Do not pay again." };
   }
   const e = entries[0];
-  if (e && e.verified === false) {
+  if (e && (e.verified === false || (opts.live && e.verified !== true))) {
     return { ...base, status: "unknown", txid, possible_sends: candidate(e.status), note: "This call's transaction id is listed, but the wallet's machine-readable output does not agree with the listing. Check by hand. Do not pay again." };
   }
   if (e && e.status === "failed") {
@@ -288,13 +291,16 @@ async function reconcileStaged(
   }
   if (e && e.status === "confirmed") {
     const note = (e.outgoing ?? []).find((n) => (n.recipient === intent.recipient || n.unifiedAddress === intent.recipient) && n.valueZats === BigInt(intent.amount_zats ?? "-1") && n.memo === (intent.memo ?? ""));
-    if (e.outgoing && e.outgoing.length > 0 && !note) {
+    if (e.outgoing && (e.outgoing.length !== 1 || !note)) {
       return { ...base, status: "unknown", txid, possible_sends: candidate(e.status), note: "This call's transaction id is mined, but its listed outputs differ from the call. Check by hand. Do not pay again." };
     }
     return { ...base, status: "confirmed", txid, block_height: e.blockHeight, confidence: "high", note: "Mined. This is the transaction signed for this call before it was transmitted." };
   }
-  if (e && e.status !== "calculated") {
+  if (e && (e.status === "transmitted" || e.status === "mempool")) {
     return { ...base, status: "broadcast", txid, confidence: "high", note: `Transmitted; the wallet reports it as ${e.status}. Do not pay again.` };
+  }
+  if (e && e.status !== "calculated") {
+    return { ...base, status: "unknown", txid, note: "The wallet reports an unrecognized transaction state. No transmission or settlement can be inferred. Do not pay again." };
   }
   // Absent, or built and never transmitted as far as this wallet knows: the same proof as
   // for any call that has no sent transaction.
@@ -347,7 +353,8 @@ export interface RecoveryOptions {
  * On startup: reconcile up to RECOVERY_MAX_CALLS calls with a pending marker (the process stopped mid-send,
  * or the outcome was unknown). Holds the wallet lock while it runs, so no send overlaps
  * it, and re-reads each call fresh before deciding, so a call another process settled is
- * skipped. Writes one recovery audit row per call it decides. Never resends. Never throws.
+ * skipped. Writes recovery evidence per decision. May resume only an authorized, exact signed
+ * transaction; never constructs a replacement. Never throws.
  */
 export async function recoverPendingPayments(
   config: Config,
@@ -378,7 +385,7 @@ export async function recoverPendingPayments(
   }
   if (!lock) return [];
   try {
-    return await recoverLocked(config, chain, store, lock, todo, opts);
+    return await withOperationBudget(opts.budgetMs ?? RECOVERY_BUDGET_MS, () => recoverLocked(config, chain, store, lock!, todo, opts));
   } catch {
     return [];
   } finally {
@@ -394,6 +401,7 @@ async function recoverLocked(
   todo: string[],
   opts: RecoveryOptions
 ): Promise<RecoveryAuditEntry[]> {
+  const started = Date.now();
   // Sync first, bounded, then read history offline so no read starts a sync of its own.
   const sync = await boundedSync(chain, RECOVERY_SYNC_MAX_MS);
   const evidence = chainEvidence(chain, sync, opts.maxLagBlocks ?? config.healthMaxLagBlocks ?? 10, () => store.readTipMark());
@@ -402,7 +410,6 @@ async function recoverLocked(
   const once = onceHistory(chain);
   const rows: RecoveryAuditEntry[] = [];
   const budgetMs = opts.budgetMs ?? RECOVERY_BUDGET_MS;
-  const started = Date.now();
   for (const callId of todo.slice(0, opts.maxCalls ?? RECOVERY_MAX_CALLS)) {
     // Let timers run between calls.
     await new Promise<void>((r) => setImmediate(r));
@@ -417,7 +424,7 @@ async function recoverLocked(
       store.clearPending(callId);
       continue;
     }
-    const row = await reconcile(record, once, {
+    let row = await reconcile(record, once, {
       now: opts.now,
       offline: sync !== undefined,
       evidence,
@@ -425,6 +432,11 @@ async function recoverLocked(
       live: chain.checkHealth !== undefined,
       rivals: countRivals(store, record),
     });
+    // Continue a durable outbox item, never rebuild a transaction or guess non-payment.
+    // Status/read paths never call this. Legacy calls need an explicit resume request.
+    if (row.status === "unknown" && record.stagedTxid && hasTransmitAuthorization(record) && chain.resumeSigned) {
+      row = (await resumeOriginal(config, chain, store, lock, record)).row;
+    }
     const before = store.readCall(callId);
     const after = recordReconcile(store, row, "recovery");
     // One audit row per decision that moved the call or changed its candidates, so repeated runs stay quiet.

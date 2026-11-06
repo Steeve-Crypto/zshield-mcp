@@ -33,14 +33,16 @@ export function describePolicy(config: Config) {
 
   const live = config.chainMode === "live";
   return {
-    mode: live ? "testnet" : "mock",
+    mode: live ? config.chainNetwork : "mock",
     chain_adapter: live ? "zingo-cli" : "mock",
-    mainnet: "refused",
+    mainnet: config.chainNetwork === "mainnet" && config.mainnetEnabled ? "enabled" : "refused",
     limits: {
       per_call_cap_zec: cap?.zec ?? null,
       per_call_cap_zats: cap?.zats ?? null,
       cap_error: capError,
       daily_or_rolling_cap: "none",
+      cumulative_spending_cap_zec: config.totalSpendingCapZec ?? null,
+      cumulative_refunds: "none; failed and uncertain reservations remain charged",
       amount_unit: "integer zatoshis, 1 ZEC = 100000000",
       max_decimals: MAX_DECIMALS,
       tool_calls_per_min: config.rateLimitPerMin ?? RATE_LIMIT_DEFAULT_PER_MIN,
@@ -58,6 +60,7 @@ export function describePolicy(config: Config) {
       pending_row_before_send: true,
       rate_limited_calls: "not audited one by one; counted in one summary row per minute",
     },
+    approvals: { configured: !!config.approvalPublicKeys, required_signers: config.approvalPublicKeys ? config.approvalThreshold ?? 1 : 0 },
     tools: {
       payment: [...PAYMENT_TOOLS],
       read_only: [...READ_ONLY_TOOLS],

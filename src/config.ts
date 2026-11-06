@@ -1,3 +1,4 @@
+import { approvalKeys } from "./payments/approval.js";
 import { DEFAULT_AUDIT_MAX_BYTES, parseAuditBudget } from "./audit/budget.js";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
@@ -24,13 +25,13 @@ function parseMaxLag(value: unknown): number {
   return n;
 }
 
-const KNOWN_MODES = ["mock", "live", "testnet"];
+const KNOWN_MODES = ["mock", "live", "testnet", "mainnet"];
 
 /** Shortest secret part allowed in a credentialed server URL, so redaction can find it safely. */
 export const MIN_URL_SECRET_LENGTH = 8;
 
 /**
- * LIGHTWALLETD_URL must be an http or https URL. Credentials in it (a user, a password, a
+ * LIGHTWALLETD_URL must be an http or https URL. Credentials in it (a user, a password, a path, a
  * query string, or a fragment) are refused, because zingo-cli only takes the server on
  * its command line, where other local users can read it. ZSHIELD_ALLOW_URL_CREDENTIALS=1
  * accepts them anyway; each secret part must then be at least 8 characters. Messages
@@ -38,6 +39,11 @@ export const MIN_URL_SECRET_LENGTH = 8;
  */
 export function checkServerUrl(url: string | undefined, env: NodeJS.ProcessEnv = process.env): string | undefined {
   if (url === undefined || url.trim() === "") return undefined;
+  // WHATWG URL parsing erases dot segments and treats backslashes as slashes.
+  // Refuse ambiguous spellings before they can conceal a path token in argv.
+  if (!/^https?:\/\//i.test(url) || /[\\\s]/.test(url)) throw new Error("LIGHTWALLETD_URL must use an unambiguous http:// or https:// URL.");
+  const rawPath = url.match(/^https?:\/\/[^/?#]*([^?#]*)/i)?.[1] ?? "";
+  if (rawPath.split("/").some((part) => /^(?:\.|%2e){1,2}$/i.test(part))) throw new Error("LIGHTWALLETD_URL path must not contain dot segments.");
   let u: URL;
   try {
     u = new URL(url);
@@ -49,10 +55,13 @@ export function checkServerUrl(url: string | undefined, env: NodeJS.ProcessEnv =
   if (u.protocol !== "https:") throw new Error("Credential-bearing LIGHTWALLETD_URL requires https://.");
   if (env.ZSHIELD_ALLOW_URL_CREDENTIALS !== "1") {
     throw new Error(
-      "LIGHTWALLETD_URL carries credentials (a user, password, query string, or fragment). zingo-cli takes the server only on its command line, where other local users can read it. Use a URL without credentials, or set ZSHIELD_ALLOW_URL_CREDENTIALS=1 to accept that risk."
+      "LIGHTWALLETD_URL carries credentials (a user, password, path, query string, or fragment). zingo-cli takes the server only on its command line, where other local users can read it. Use a URL without credentials, or set ZSHIELD_ALLOW_URL_CREDENTIALS=1 to accept that risk."
     );
   }
-  const parts = [u.username, u.password, u.hash.slice(1), ...[...u.searchParams.values()]].filter((p) => p !== "");
+  const pathParts = u.pathname.split("/").filter(Boolean);
+  // Every non-root path is potentially a bearer credential. Short routing segments
+  // cannot be registered safely, so path-bearing endpoints must use long segments.
+  const parts = [u.username, u.password, ...pathParts.map((p) => decodeURIComponent(p)), u.hash.slice(1), ...[...u.searchParams.values()]].filter((p) => p !== "");
   if (parts.some((p) => p.length < MIN_URL_SECRET_LENGTH)) {
     throw new Error(`Each credential in LIGHTWALLETD_URL must be at least ${MIN_URL_SECRET_LENGTH} characters so it can be redacted.`);
   }
@@ -60,6 +69,7 @@ export function checkServerUrl(url: string | undefined, env: NodeJS.ProcessEnv =
 }
 
 export function loadConfig(cwd = process.cwd()): Config {
+  if (process.env.FINANCIAL_CONTROLS_REQUIRED !== undefined && !["0", "1"].includes(process.env.FINANCIAL_CONTROLS_REQUIRED)) throw new Error("FINANCIAL_CONTROLS_REQUIRED must be 0 or 1");
   // Every timeout has a range; an out-of-range value stops the server here.
   validateTimeouts(process.env);
   const yamlPath = resolve(cwd, "config/default.yaml");
@@ -82,9 +92,11 @@ export function loadConfig(cwd = process.cwd()): Config {
   const rawMode = envOr("CHAIN_MODE", fromFile.chain_mode ?? "mock", (v) => v).trim().toLowerCase();
   if (!KNOWN_MODES.includes(rawMode)) {
     throw new Error(
-      `Unknown CHAIN_MODE "${rawMode}". Expected one of: ${KNOWN_MODES.join(", ")}. Mainnet is not supported.`
+      `Unknown CHAIN_MODE "${rawMode}". Expected one of: ${KNOWN_MODES.join(", ")}.`
     );
   }
+  if (rawMode === "mainnet" && process.env.MAINNET_ENABLED !== "1") throw new Error("Mainnet requires explicit MAINNET_ENABLED=1; testnet remains available.");
+  if (rawMode === "mainnet" && !process.env.ZINGO_DATA_DIR) throw new Error("Mainnet requires explicit ZINGO_DATA_DIR.");
   const chainMode: ChainMode = rawMode === "mock" ? "mock" : "live";
   // Kept as given (env values stay strings) and validated as whole zatoshis, never rounded.
   const spendingCapZec = envOr<number | string>("SPENDING_CAP_ZEC", fromFile.spending_cap_zec ?? 0.1, (v) => v);
@@ -100,6 +112,10 @@ export function loadConfig(cwd = process.cwd()): Config {
 
   const config: Config = {
     spendingCapZec,
+    totalSpendingCapZec: process.env.TOTAL_SPENDING_CAP_ZEC,
+    approvalPublicKeys: process.env.APPROVAL_PUBLIC_KEYS_JSON ? JSON.parse(process.env.APPROVAL_PUBLIC_KEYS_JSON) : undefined,
+    approvalThreshold: process.env.APPROVAL_THRESHOLD ? Number(process.env.APPROVAL_THRESHOLD) : undefined,
+    approvalDir: process.env.APPROVAL_DIR ? resolve(cwd, process.env.APPROVAL_DIR) : undefined,
     allowlistPath: resolve(
       cwd,
       envOr("ALLOWLIST_PATH", fromFile.allowlist_path ?? "./allowlists/recipients.example.json", (v) => v)
@@ -114,8 +130,12 @@ export function loadConfig(cwd = process.cwd()): Config {
       fromFile.view_key_fingerprint_salt ?? "dev-only-change-me",
       (v) => v
     ),
-    chainNetwork: rawMode === "testnet" ? "testnet" : undefined,
+    chainNetwork: rawMode === "testnet" || rawMode === "mainnet" ? rawMode : undefined,
+    mainnetEnabled: process.env.MAINNET_ENABLED === "1",
+    expectedConsensusBranch: process.env.EXPECTED_CONSENSUS_BRANCH,
     zingoBin: process.env.ZINGO_BIN,
+    zingoBinarySha256: process.env.ZINGO_BINARY_SHA256,
+    requireFinancialControls: rawMode === "mainnet" || process.env.FINANCIAL_CONTROLS_REQUIRED === "1",
     // Live mode needs an absolute wallet path; loading fails here rather than fall back to a relative one.
     zingoDataDir: chainMode === "live" ? resolveWalletDir(process.env.ZINGO_DATA_DIR) : process.env.ZINGO_DATA_DIR,
     lightwalletd: checkServerUrl(process.env.LIGHTWALLETD_URL),
@@ -129,6 +149,8 @@ export function loadConfig(cwd = process.cwd()): Config {
       envOr<number | string>("RATE_LIMIT_PER_MIN", fromFile.rate_limit_per_min ?? RATE_LIMIT_DEFAULT_PER_MIN, (v) => v)
     ),
   };
+  if (config.totalSpendingCapZec !== undefined) parseZecToZats(config.totalSpendingCapZec, "TOTAL_SPENDING_CAP_ZEC");
+  if (config.approvalPublicKeys || config.approvalDir || config.approvalThreshold !== undefined) approvalKeys(config);
   assertFingerprintSalt(config);
   return config;
 }

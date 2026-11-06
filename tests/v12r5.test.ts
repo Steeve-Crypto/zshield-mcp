@@ -381,7 +381,7 @@ describe("F-23: failed sends", () => {
     let history: TxSummary[] = [];
     const { chain, counts } = liveChain({ history: () => history });
     const asTx = (status: string, extra: Partial<TxSummary> = {}) =>
-      ({ txid: tx(77), time: new Date().toISOString(), status, kind: "sent", valueZats: 10000n, outgoing: [{ recipient: R, valueZats: 10000n, memo: "" }], ...extra }) as TxSummary;
+      ({ verified: true, txid: tx(77), time: new Date().toISOString(), status, kind: "sent", valueZats: 10000n, outgoing: [{ recipient: R, valueZats: 10000n, memo: "" }], ...extra }) as TxSummary;
     return { config, chain, counts, setHistory: (h: TxSummary[]) => (history = h), asTx };
   }
   const pay = (config: Config, chain: ChainAdapter) => executePay({ amount_zec: "0.0001", recipient: R, idempotency_key: key }, { config, chain });
