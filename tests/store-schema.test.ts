@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { MockChainAdapter } from "../src/chain/mock.ts";
-import { storeFor } from "../src/payments/store.ts";
+import { storeFor, resetPaymentStores } from "../src/payments/store.ts";
 import { executePay } from "../src/tools/pay.ts";
 import { tempConfig, ALLOWED } from "./helpers.ts";
 function setup() {
@@ -44,4 +44,11 @@ describe("persisted payment schema",()=>{
     const out=await executePay({amount_zec:"0.001",recipient:ALLOWED,idempotency_key:"new"},{config,chain});
     assert.equal(out.ok,false);assert.equal(sends,0);
   });
+});
+
+it("restart cannot route a corrupt store into a fresh fallback directory", () => {
+  const {config,chain,dir}=setup();
+  fs.writeFileSync(join(dir,"intent.json"),"bad JSON");
+  resetPaymentStores();
+  assert.throws(()=>storeFor(config,chain),/persisted payment/);
 });
