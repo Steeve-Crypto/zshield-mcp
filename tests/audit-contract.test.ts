@@ -14,7 +14,9 @@ import { storeFor, paymentParamsHash, mayHaveBroadcast } from "../src/payments/s
 import { executePay } from "../src/tools/pay.ts";
 import type { ChainAdapter } from "../src/chain/types.ts";
 import type { Config, TxSummary } from "../src/types.ts";
-import { tempConfig } from "./helpers.ts";
+import { paymentReservationUsage } from "../src/audit/reservation.ts";
+import { fallbackAuditPath } from "../src/audit/log.ts";
+import { ALLOWED, tempConfig } from "./helpers.ts";
 
 const R = "utest1" + "r".repeat(100);
 
@@ -42,5 +44,22 @@ describe("audit decision contract", () => {
     assert.equal(result.code, "AUDIT_WRITE_FAILED");
     assert.doesNotMatch(JSON.stringify(result), /INVALID_IDEMPOTENCY_KEY|refused_code/);
     assert.equal(result.audit.code, "AUDIT_WRITE_FAILED");
+  });
+});
+
+describe("preauthorization audit isolation", () => {
+  it("repeated pre-intent infrastructure refusals cannot charge protected payment slots", async () => {
+    const config = tempConfig({ auditMaxBytes: 4 * AUDIT_SLOT_BYTES });
+    const chain = new MockChainAdapter();
+    const fault = mock.method(chain, "getViewingKey", async () => { throw new Error("backend temporarily unavailable"); });
+    try {
+      for (let n = 0; n < 6; n++) {
+        const result = await executePay({ amount_zec: "0.001", recipient: ALLOWED, idempotency_key: "unbound" }, { config, chain });
+        assert.equal(result.ok, false);
+      }
+      assert.equal(paymentReservationUsage(join(config.auditDir, "2000-01-01.jsonl"), true)
+        + paymentReservationUsage(fallbackAuditPath(config.auditDir), false), 0);
+    } finally { fault.mock.restore(); }
+    assert.equal((await executePay({ amount_zec: "0.001", recipient: ALLOWED, idempotency_key: "healthy" }, { config, chain })).ok, true);
   });
 });
