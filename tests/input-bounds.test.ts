@@ -21,6 +21,7 @@ function tempConfig(): Config {
   writeFileSync(allowlistPath, JSON.stringify({ recipients: [{ address: ALLOWED }] }));
   return {
     spendingCapZec: 0.1,
+    auditMaxBytes: 128 * 8193, // Bounded real test allocation; production default stays 64 MiB.
     allowlistPath,
     chainMode: "mock",
     auditDir: join(root, "audits"),
@@ -167,7 +168,7 @@ describe("audit row size", () => {
 
   it("appendAuditEntry never writes a line over the limit", () => {
     const dir = mkdtempSync(join(tmpdir(), "zshield-rowcap-"));
-    const file = appendAuditEntry(dir, { ...base, error: "e".repeat(100_000), recipient: "u1" + "r".repeat(100_000) });
+    const file = appendAuditEntry(dir, { ...base, error: "e".repeat(100_000), recipient: "u1" + "r".repeat(100_000) }, { auditMaxBytes: 4 * 8193 });
     const line = readFileSync(file, "utf8").trim();
     assert.ok(bytes(line) <= MAX_AUDIT_ROW_BYTES);
     assert.ok(JSON.parse(line).recipient_sha256);

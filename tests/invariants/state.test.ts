@@ -220,7 +220,7 @@ describe("state invariants", { timeout: 180_000 }, () => {
     });
 
     for (const c of cases) {
-      it(`I12 ${c.name}: nothing bound, or intent plus an unresolved state`, async () => {
+      it(`I12 ${c.name}: binding is unresolved or backed by retryable no-send proof`, async () => {
         const config = tempConfig({ spendingCapZec: 1 });
         resetPaymentStores();
         const chain = createChain(config);
@@ -234,7 +234,13 @@ describe("state invariants", { timeout: 180_000 }, () => {
         if (bound) {
           const rec = store.readCall(bound.call_id);
           assert.ok(rec?.intent, `key is bound to call ${bound.call_id} but the call has no intent (first: ${first.code})`);
-          assert.notEqual(rec?.state, "not_sent", `key is bound but its call was settled as not_sent after ${first.code}; the key can never be used again`);
+          if (rec?.state === "not_sent") {
+            // A published-but-unsynced binding must stop the send, not pretend fsync
+            // succeeded. It is safe only with the explicit, durable failed-bind proof.
+            assert.equal(store.bindingRetryable(bound), true, "settled binding lacks retryable no-send proof");
+            assert.equal(rec.top?.note, "key_binding_failed");
+            assert.equal(rec.stagedTxid ?? rec.txid, undefined);
+          }
         }
         const retry = JSON.parse((await executePay(input, { config, chain })).text);
         assert.ok(retry.ok || retry.status === "unknown" || retry.status === "pending", `after the fault cleared, retrying gave ${retry.code}/${retry.status}: ${String(retry.message).slice(0, 160)}`);
