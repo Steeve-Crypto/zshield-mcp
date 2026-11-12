@@ -6,7 +6,7 @@ This document describes what zshield-mcp protects, what it trusts, and where it 
 
 zshield-mcp lets an AI agent ask for shielded ZEC payments without ever holding a key. The agent can only call MCP tools. The server checks every payment against a per-call cap, an allow-list, and the network, writes an audit row, and only then asks `zingo-cli` to send. The default is a mock chain that moves nothing. Mainnet requires explicit opt-in and mandatory financial controls; live operations bind the wallet, recipient and approval to the configured network.
 
-It is a policy gate for a single local operator. It is not a custody system, it does not authenticate anyone, and it does not limit total spending over time.
+It is a policy gate for a single local operator. It is not a custody system, it does not authenticate anyone, and it does not provide a rolling daily allowance. A durable cumulative principal and fee allowance and signed approvals are available, and required by the mainnet financial profile.
 
 ## Where keys live
 
@@ -18,7 +18,7 @@ It is a policy gate for a single local operator. It is not a custody system, it 
 
 Limits today:
 
-- Testnet mode refuses to start on Windows, where POSIX modes and the `flock` wrapper do not apply. Mock mode still runs there, but its state files have no ACL protection: use it for tests and demos only.
+- Reserved payment evidence requires qualified Linux ext4 or XFS storage. Windows, macOS and CoW/compressed live journal configurations are not qualified for this audit-backed service. The mock algorithm is not a substitute for a qualified financial deployment.
 - zshield-mcp does not encrypt the wallet file. In testnet mode it refuses to start if the wallet directory gives any access to group or other users. It wants `700` on the directory, and the error prints the `chmod` that fixes it. It refuses rather than warns because a warning on stderr is easy to miss when an MCP client starts the server. A file inside a private directory with a mode looser than `600` only gets a warning: other users cannot reach it, and `zingo-cli` rewrites the wallet file with the current umask on every save, so a hard refusal would trip after any manual `zingo-cli` run. The server sets umask `077` in testnet mode so its own `zingo-cli` runs keep the file at `600`. Root and the server's own OS user can still read the file, and the check runs only at startup.
 - The server process runs as the same OS user as the wallet. A bug or compromise in the server process, its npm dependencies, or `zingo-cli` can reach the keys. Nothing in this design isolates them.
 
@@ -28,7 +28,7 @@ Limits today:
 - Read the wallet's balance, current unified address, and recent transactions through `zcash_balance`, `zcash_receive_address`, and `zcash_history`, and the state of an earlier payment through `zcash_payment_status`.
 - Read the allow-list file on every `zcash_pay` call and every read of `zshield://policy`.
 - Append rows to JSONL files in `AUDIT_DIR`.
-- Run `zingo-cli` as a child process with a fixed argument list. It uses `execFile`, so no shell parses the arguments. For a send, argv holds only the chain, server, and data directory. The recipient, amount, and memo go to `zingo-cli`'s prompt over stdin as one `quicksend` line in its JSON form, so they never show up in the process list.
+- Run `zingo-cli` as a child process with a fixed argument list. It uses `execFile`, so no shell parses the arguments. For a send, argv holds only the chain, server, and data directory. The recipient, amount, and memo go to `zingo-cli`'s prompt over stdin as a `send` line followed by `calculate`, then a separate exact-txid `transmit` invocation, so they never show up in the process list.
 
 ## What the server cannot do
 
@@ -38,7 +38,7 @@ Limits today:
 - Change its own policy. No tool writes the allow-list, the cap, the mode, or the audit settings.
 - Export the seed or a viewing key to the agent. No code path calls `zingo-cli recovery_info`. `export_ufvk` runs only to compute the audit fingerprint, and the key stays in memory.
 - Run arbitrary `zingo-cli` commands on behalf of the agent. The server uses a fixed set of commands: `quicksend`, `balance`, `spendable_balance`, `addresses`, `transactions`, `export_ufvk`, and for the pre-send check `info` and `height`.
-- Send twice for one `idempotency_key`, or send anything during startup recovery or `zcash_payment_status`.
+- Construct a replacement transaction for a bound `idempotency_key`, or transmit during `zcash_payment_status`. Startup recovery may retransmit the same authorized, verified staged transaction by exact txid. See the current release blockers in [the run 14 response](../V12-RUN14-RESPONSE.md).
 
 ## Network isolation
 
@@ -63,9 +63,9 @@ agent and model  ->  MCP client  ->  zshield-mcp  ->  zingo-cli + wallet file  -
 
 ## Audit log
 
-- Every tool call that reaches the server's handler and is within the rate limit writes at least one JSONL row. Calls over the rate limit are counted in one summary row per minute instead. A call whose arguments have the wrong JSON type, such as a boolean `amount_zec`, or a recipient, memo, or amount string over its size limit, is refused by the MCP SDK's schema check before the handler runs, so it gets an error but no audit row. This is on purpose: those calls never reach policy or the chain, and writing them down would give a hostile caller a cheap way to grow the log. A payment that passes policy writes a `pending` row before the send and a result row after it, linked by `call_id`. If the `pending` row cannot be written, nothing is sent and the call fails with `AUDIT_WRITE_FAILED`.
-- Rows are synced to disk (`fsync` on the file, and on the directory for a new file) before the server continues, so a crash or power cut after the send cannot lose the `pending` row. A failed write is retried, then sent to a fallback file, then to stderr. Only a `pending` row that reaches neither file blocks the send.
-- If the result row cannot be written after a send, the tool still returns the txid with an `audit_warning`. Throwing there would hide a real payment and invite a retry that pays twice. The `pending` row remains as the record.
+- In-limit handler calls attempt a bounded traffic row or reserved payment record. Financial evidence is committed in physically allocated journals; JSONL payment rows are best-effort compatibility mirrors. Calls over the rate limit are counted in one summary row per minute instead. A call whose arguments have the wrong JSON type, such as a boolean `amount_zec`, or a recipient, memo, or amount string over its size limit, is refused by the MCP SDK's schema check before the handler runs, so it gets an error but no audit row. This is on purpose: those calls never reach policy or the chain, and writing them down would give a hostile caller a cheap way to grow the log. A payment that passes policy commits a reserved `pending` record before the send and attempts a result record afterward, linked by `call_id`. If neither reserved destination can commit the pending record, nothing is sent and the call fails with `AUDIT_WRITE_FAILED`. Non-durable refusals expose only a generic audit error.
+- Payment segments are allocated and fsynced before exclusive publication; fixed-slot writes use flock and fsynced incomplete/committed markers. Refusal/diagnostic logs cannot consume those extents. Primary and fallback have independent reservations. A failed JSONL mirror does not negate committed payment evidence. Host power-loss behavior remains a deployment qualification gate.
+- If result evidence or a compatibility mirror cannot be written after a send, the tool still returns the txid with an `audit_warning`. Throwing there would hide a real payment and invite a retry that pays twice. The initial committed record and payment-store identity remain.
 - Rejected and failed calls record a stable `code`, such as `CAP_EXCEEDED` or `NOT_ALLOWLISTED`.
 - Read-only tool rows hold no balances, addresses, or transaction details.
 - The audit log is the human trail, not the source of truth. Idempotency, status, and recovery read the payment store in the wallet directory (`.zshield-state`), so editing or forging an audit row changes no payment state. Audit logs are never imported: they stay on disk as a compliance trail and nothing reads them back.
@@ -97,7 +97,7 @@ What it does not give: it is not a signature. Anyone who knows the UFVK and the 
 |--------|------------|--------------|
 | Prompt injection makes the agent pay an attacker | Recipient must be on the allow-list, an exact string match | An attacker can still steer payments to any allow-listed address |
 | Agent pays too much in one go | Hard per-call cap, compared in integer zatoshis | None for a single call |
-| Agent drains the wallet with many small payments | The tool call rate limit slows this down, but it is not a spending limit | There is no daily or rolling cap and no human approval step. At the default rate limit an agent can still make up to 60 payments a minute. Total loss is bounded only by the wallet balance. Fund the wallet with only what you can lose |
+| Agent drains the wallet with many small payments | The tool call rate limit and optional cumulative principal-plus-fee allowance constrain payments; signed approval gates are required on mainnet | There is no automatic daily or rolling reset. Testnet does not require the full financial profile by default. Fund test wallets with only what you can lose |
 | Concurrent calls race each other | One send at a time per wallet. A second send waits up to `SEND_QUEUE_WAIT_MS`, then gets `BUSY`. The lock is one OS `flock` on `.zshield-state/send.flock`, held by the paying process for the whole send by a small `perl` holder child that dies with its parent, so the kernel releases it on any death and nothing else ever takes it, not even from a frozen holder. Sends, syncs, reads, and recovery all take it. The holder is checked before the build, between build and transmit, and when `zingo-cli` starts, and the send stops if it is gone. Two wallet holders never overlap, whatever the payment keys: every `zingo-cli` process also goes through a `perl` wrapper that takes an exclusive `flock` on `.zshield-state/zingo.flock`, inherited by `zingo-cli` itself, so a `zingo-cli` left by a killed server is waited for. Each `idempotency_key` is bound by an exclusive hard link before the send, so two calls with one key cannot both send | Concurrent calls can each pass the per-call cap. There is no shared budget. The OS lock needs `perl` and a POSIX platform (live mode refuses to run without them, including on Windows), a local filesystem where `flock` works, and does not stop an operator starting `zingo-cli` by hand on the same wallet. A frozen payer that is still alive keeps the lock and other payers get `BUSY` until it finishes or dies. Over a network file system the store relies on `O_EXCL` and `link` being atomic `zcash_history` runs offline, one call per wallet at a time (`BUSY`), holds the wallet lock only while it reads (`BUSY` while a send holds it), and its commands share one deadline. Overlapping history reads share a scan, with at most two at once. |
 | A partial sync reports funds as gone | Before the funds check and before `zcash_payment_status`, a bounded sync runs through `zingo-cli`'s prompt and quits cleanly, so the wallet file is saved. Reads after it are offline, so they cannot start a second partial sync. Low funds after an unfinished sync are `WALLET_NOT_SYNCED`. Read tools never wait for the lock; while a send holds it they return `BUSY` | A slow server can make each sync use its full timeout. `zcash_payment_status` then answers with `stale: true` |
 | Float rounding slips past the cap | Amounts parsed as decimal strings into integer zatoshis; more than 8 decimals is rejected, not rounded | None known |
@@ -257,3 +257,5 @@ Limits: the checks run at startup and before sends, not continuously. A swap in 
 - Local path hardening: `src/fsafe.ts` (`assertSafeAncestors`), `src/policy/allowlist.ts`, `src/chain/pin.ts`
 - Startup enforcement of network controls and wallet privacy: `src/config.ts`, `src/startup.ts`, `src/chain/perms.ts`, `src/index.ts`
 - Stable codes: `src/errors.ts`
+
+Persisted payment records now use strict schemas. Malformed JSON, unknown fields, unknown store versions or states, incorrect types, mismatched call identities and over-limit event histories fail closed. Restart does not silently replace corrupt state with a fresh fallback directory. Unknown legacy shapes require reviewed offline migration, never deleting identities.

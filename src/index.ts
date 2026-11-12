@@ -27,7 +27,8 @@ async function main() {
   await server.connect(transport);
   log(`zshield-mcp listening (stdio) cap=${config.spendingCapZec} ZEC mode=${config.chainMode}`);
   // Sends interrupted by a crash or kill: reconcile against wallet history in the
-  // background and write a recovery row for each. Never resends.
+  // background and write a recovery row for each. Authorized staged transactions may
+  // resume by exact txid; recovery never constructs replacement transactions.
   const reportRecovery = (rows: Awaited<ReturnType<typeof recoverPendingPayments>>) => {
     for (const r of rows) log(`zshield-mcp recovery: call ${r.call_id} ${r.status}${r.txid ? ` ${r.txid}` : ""}`);
   };

@@ -45,6 +45,7 @@ function proc(w: World, name: string, args: string[], env: Record<string, string
       ZINGO_BIN: ZINGO,
       ZINGO_DATA_DIR: w.wallet,
       AUDIT_DIR: "./audits",
+      AUDIT_MAX_BYTES: "1048704",
       ALLOWLIST_PATH: "./allow.json",
       VIEW_KEY_FINGERPRINT_SALT: "race",
       SEND_QUEUE_WAIT_MS: "8000",
