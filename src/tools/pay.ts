@@ -396,6 +396,9 @@ async function resumePay(input: PayInput, deps: PayDeps, store: PaymentStore, ca
     // mutation. Its replay row below must not consume protected financial capacity.
     // A resume that never reached the transmit fence is refusal evidence in its own pool.
     const written = writeAuditRow(deps.config, resumed.attempted ? resumed.row : { ...resumed.row, refusal: true } as typeof resumed.row);
+    if (!resumed.attempted && !written.durable) {
+      return unauditedRefusal(input, deps.config, callId, binding.call_id, written.warning);
+    }
     const result = replay(input, deps, callId, binding.call_id, after);
     return { ...result, text: JSON.stringify({ ...JSON.parse(result.text), transmission_attempted: resumed.attempted, resume_note: resumed.row.note,
       audit_warning: [result.auditWarning, written.warning, stateWarning].filter(Boolean).join(" ") || undefined }, null, 2) };
@@ -482,6 +485,19 @@ function finish(config: Config, row: AuditEntry): { audit: AuditEntry; auditWarn
   return { audit, auditWarning: written.warning };
 }
 
+/** No unaudited policy decision may escape a refusal-storage failure. */
+function unauditedRefusal(input: PayInput, config: Config, callId: string, originalCallId?: string, warning?: string): PayResult {
+  const message = originalCallId
+    ? "Audit evidence could not be persisted. The original payment may remain unresolved. Check payment_status; do not substitute a new key."
+    : "Audit evidence could not be persisted; payment not sent.";
+  const audit = boundAuditEntry({ ...baseRow(input, config, callId), status: "error" as const,
+    code: "AUDIT_WRITE_FAILED" as const, error: message });
+  rememberRefusal(callId, { code: "AUDIT_WRITE_FAILED", error: message });
+  return { ok: false, code: "AUDIT_WRITE_FAILED", audit, auditWarning: warning,
+    text: JSON.stringify({ ok: false, status: "error", code: "AUDIT_WRITE_FAILED", message,
+      error: message, call_id: callId, original_call_id: originalCallId, original_unresolved: originalCallId ? true : undefined, audit, audit_warning: warning }) };
+}
+
 function refuseKey(
   input: PayInput,
   deps: PayDeps,
@@ -503,19 +519,7 @@ function refuseKey(
   // Rejected payment activity must leave durable evidence; soft-succeeding after the
   // diagnostic pools are exhausted would hide probing (F-75).
   if (!written.durable && status !== "unknown") {
-    const failMsg = `Audit evidence for this refusal could not be persisted (${written.warning ?? "not durable"}). Nothing was sent.`;
-    rememberRefusal(callId, { code: "AUDIT_WRITE_FAILED", error: failMsg, idempotency_key: input.idempotency_key });
-    return {
-      ok: false,
-      code: "AUDIT_WRITE_FAILED",
-      text: JSON.stringify(
-        { ok: false, status: "error", code: "AUDIT_WRITE_FAILED", message: failMsg, error: failMsg, call_id: callId, refused_code: code, audit: row, audit_warning: written.warning },
-        null,
-        2
-      ),
-      audit: row,
-      auditWarning: written.warning,
-    };
+    return unauditedRefusal(input, deps.config, callId, undefined, written.warning);
   }
   if (status !== "unknown") rememberRefusal(callId, { code, error: message, idempotency_key: code === "INVALID_IDEMPOTENCY_KEY" ? undefined : input.idempotency_key });
   return {
@@ -736,10 +740,11 @@ async function runPay(
     // Live mode: a signed payment that is not settled may already be on the network, and its
     // notes are spoken for. No new send leaves this wallet until it is resolved (mined, or
     // proven never sent) by recovery or zcash_payment_status.
-    if (policyPassed && amountZats !== undefined && lock && config.chainMode === "live") {
+    // Validate pending record integrity in every mode; only live mode enforces the network interlock.
+    if (policyPassed && amountZats !== undefined && lock) {
       try {
         const stuck = store.unresolvedSend(callId);
-        if (stuck) {
+        if (stuck && config.chainMode === "live") {
           policyPassed = false;
           fail("error", "UNRESOLVED_PAYMENT", `An earlier payment from this wallet (call ${stuck.callId}, ${stuck.txid ? `transaction ${stuck.txid}` : "no recorded transaction id"}) is not resolved. It may have been broadcast. Check it with zcash_payment_status. Nothing was sent.`);
         }
@@ -1046,6 +1051,9 @@ async function runPay(
     final = writeAuditRow(config, audit);
   } finally {
     await lock?.release();
+  }
+  if (!wroteIntent && status !== "ok" && !final.durable) {
+    return unauditedRefusal(input, config, callId, undefined, final.warning);
   }
   if (!wroteIntent && status !== "ok") rememberRefusal(callId, { code, error, amount_zats: amountZats?.toString(), idempotency_key: keyFields.idempotency_key });
   if (final.warning) warnings.push(final.warning);
