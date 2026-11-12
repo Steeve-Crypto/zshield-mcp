@@ -1,4 +1,5 @@
-import { reserveAudit, type AuditBudget, type AuditPool } from "./budget.js";
+import { appendPaymentEvidence, ensurePaymentReservation } from "./reservation.js";
+import { paymentSlotAllowance, reserveAudit, type AuditBudget, type AuditPool } from "./budget.js";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { appendPrivate, ensurePrivateDir } from "../fsafe.js";
@@ -97,9 +98,43 @@ export function appendAuditEntry(
   const day = entry.ts.slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error("Invalid audit date.");
   const file = join(auditDir, `${day}.jsonl`);
-  reserveAudit(file, auditPool(entry), budget, true);
-  appendDurable(file, `${JSON.stringify(boundAuditEntry(entry))}\n`);
+  return appendReserved(file, entry, budget, true);
+}
+
+/** The JSONL file is a compatibility/traffic sink. Payment durability is the reserved journal. */
+function appendReserved(file: string, entry: AuditRow, budget: AuditBudget, daily: boolean): string {
+  const journal = ensurePaymentReservation(file, budget, daily);
+  const pool = auditPool(entry);
+  const bounded = boundAuditEntry(entry);
+  if (pool === "payment") {
+    appendPaymentEvidence(journal, bounded, paymentSlotAllowance(file, budget, daily));
+    // Mirrors can fail when traffic has filled unreserved space. Never discard durable
+    // payment evidence because a compatibility append needs another filesystem block.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try { appendDurable(file, `${JSON.stringify(bounded)}\n`); return file; } catch { /* journal remains durable */ }
+    }
+    return journal;
+  }
+  reserveAudit(file, pool, budget, daily);
+  appendDurable(file, `${JSON.stringify(bounded)}\n`);
   return file;
+}
+
+/** Reserve both sinks before any caller-controlled traffic can consume their free disk. */
+export function prepareAuditReservations(target: { auditDir: string; auditFallbackPath?: string } & AuditBudget): string[] {
+  const warnings: string[] = [];
+  const sinks = [{ file: join(target.auditDir, "2000-01-01.jsonl"), daily: true },
+    { file: fallbackAuditPath(target.auditDir, target.auditFallbackPath), daily: false }];
+  let ready = 0;
+  for (const sink of sinks) {
+    try {
+      ensureDurableDir(dirname(sink.file));
+      ensurePaymentReservation(sink.file, target, sink.daily);
+      ready++;
+    } catch (e) { warnings.push(`Payment audit reservation unavailable (${msg(e)}).`); }
+  }
+  if (ready === 0) throw Object.assign(new Error("No physically reserved payment audit destination is available."), { code: "AUDIT_RESERVATION_FAILED" });
+  return warnings;
 }
 
 /** Where rows go when the main audit directory cannot be written: AUDIT_FALLBACK_PATH, else beside the audit dir. */
@@ -129,7 +164,11 @@ function auditPool(row: AuditRow): AuditPool {
   // and cannot fall into the diagnostic pool where exhaustion drops evidence (F-75).
   if (row.tool === "zcash_pay") {
     if (row.status === "replayed") return "diagnostic";
-    return row.status === "rejected" || (row as { refusal?: boolean }).refusal ? "refusal" : "payment";
+    // Infrastructure/busy errors before an operation exists are refusals of THIS attempt,
+    // not payment mutations. Keep legacy unknown/tx-bearing evidence protected.
+    const preauthorizationError = row.status === "error" && !row.operation_id && !row.mock_txid
+      && !row.possible_txids?.length && !row.possible_sends?.length;
+    return row.status === "rejected" || preauthorizationError || (row as { refusal?: boolean }).refusal ? "refusal" : "payment";
   }
   if (row.tool === "zcash_pay_recovery") return (row as { refusal?: boolean }).refusal ? "refusal" : "payment";
   return "diagnostic";
@@ -141,7 +180,7 @@ type StderrWrite = (line: string) => void;
 /** Why a write failed, without the absolute path a filesystem error message carries. */
 function msg(e: unknown): string {
   const code = (e as NodeJS.ErrnoException)?.code;
-  return typeof code === "string" && ["EACCES", "EPERM", "ENOENT", "ENOTDIR", "ENOSPC", "EIO", "EDQUOT", "ELOOP", "AUDIT_CAPACITY"].includes(code) ? code : "storage failure";
+  return typeof code === "string" && ["EACCES", "EPERM", "ENOENT", "ENOTDIR", "ENOSPC", "EIO", "EDQUOT", "ELOOP", "AUDIT_CAPACITY", "AUDIT_RESERVATION_FAILED"].includes(code) ? code : "storage failure";
 }
 
 /**
@@ -161,10 +200,15 @@ export function writeAuditRow(
   if (auditFreezeDepth > 0) {
     return { durable: false, warning: "Audit writes are frozen during maintenance snapshot; row was not written." };
   }
+  // Both reservations are attempted first. A failed destination remains unavailable;
+  // a healthy fallback retains its own independent, physically allocated evidence slots.
+  try { prepareAuditReservations(target); } catch { /* per-sink errors below preserve fallback reporting */ }
   let mainError = "";
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      return { durable: true, file: appendAuditEntry(auditDir, entry, target) };
+      const file = appendAuditEntry(auditDir, entry, target);
+      return { durable: true, file, warning: file.endsWith("payment-evidence.bin")
+        ? "Payment evidence persisted in reserved journal; compatibility JSONL mirror could not be written." : undefined };
     } catch (e) {
       mainError = msg(e);
     }
@@ -173,12 +217,11 @@ export function writeAuditRow(
   const fallback = fallbackAuditPath(auditDir, target.auditFallbackPath);
   try {
     ensureDurableDir(dirname(fallback));
-    reserveAudit(fallback, auditPool(entry), target, false);
-    appendDurable(fallback, line);
+    const persisted = appendReserved(fallback, entry, target, false);
     return {
       durable: true,
-      file: fallback,
-      warning: `Audit row could not be written to the audit dir (${mainError}); it was written to the fallback file.`,
+      file: persisted,
+      warning: `Audit row could not be written to the audit dir (${mainError}); it was written to the fallback file${persisted.endsWith("payment-evidence.bin") ? " reserved journal (JSONL mirror unavailable)" : ""}.`,
     };
   } catch (e) {
     try {

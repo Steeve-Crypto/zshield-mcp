@@ -111,13 +111,16 @@ describe("October 31 root causes", () => {
       return realSync(fd);
     });
     const input = { amount_zec: "0.001", recipient: ALLOWED, idempotency_key: "failed-bind" };
-    // Publication is visible; rolling back would race other readers, so the bind sticks.
+    // Keep publication, but fail closed until a durable no-send proof allows retry.
     const first = await executePay(input, { config, chain });
     assert.ok(store.readKey(input.idempotency_key), "published key must remain after dir fsync failure");
+    assert.equal(first.code, "STATE_WRITE_FAILED");
+    assert.equal(store.bindingRetryable(store.readKey(input.idempotency_key)!), true);
     armed = false;
     assert.equal((await executePay({ ...input, amount_zec: "0.002" }, { config, chain })).code, "IDEMPOTENCY_CONFLICT");
     const replay = JSON.parse((await executePay(input, { config, chain })).text);
-    assert.equal(replay.call_id, JSON.parse(first.text).call_id);
+    assert.notEqual(replay.call_id, JSON.parse(first.text).call_id);
+    assert.equal(replay.ok, true);
   });
 
   it("F-42 policy floods leave payment and status allowances available", async () => {

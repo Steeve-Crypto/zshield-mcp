@@ -34,15 +34,8 @@ export function parseAuditBudget(value: unknown): number {
   return n;
 }
 
-/**
- * Charge a durable reservation BEFORE appending. A crash or failed write consumes
- * capacity conservatively. OS flock serializes fixed-inode counters; there is no lease,
- * stale-lock deletion, or log/state pruning. Legacy slot files remain charged. Budget directories
- * live beside the sink, not among JSONL files. Never reset while any writer is running.
- */
-export function reserveAudit(file: string, poolOrFinancial: AuditPool | boolean, budget: AuditBudget, daily: boolean): void {
-  // A boolean means the original two-pool call: true is payment, false is diagnostic.
-  const pool: AuditPool = poolOrFinancial === true ? "payment" : poolOrFinancial === false ? "diagnostic" : poolOrFinancial;
+/** Canonical physical sink identity, shared by counters and reserved evidence. */
+export function auditBudgetDirectory(file: string, daily: boolean): string {
   // Quota identity follows the physical sink so symlink aliases share one counter (F-55).
   let abs = file;
   try { abs = safeRecordPath(file); } catch {
@@ -53,7 +46,14 @@ export function reserveAudit(file: string, poolOrFinancial: AuditPool | boolean,
   }
   try { abs = fs.realpathSync(abs); } catch { /* leaf may not exist yet; pinned parent still shared */ }
   const root = daily ? dirname(abs) : abs;
-  const dir = `${root}.budget`;
+  return `${root}.budget`;
+}
+
+/** Snapshot legacy sink bytes once. New journal rows never consume these migration counters. */
+export function initializeAuditBudget(file: string, daily: boolean): { dir: string; bytes: number } {
+  const dir = auditBudgetDirectory(file, daily);
+  const root = dir.slice(0, -".budget".length);
+  const abs = root;
   ensurePrivateDir(dir);
   const baselineFile = join(dir, "baseline.json");
   let baseline = readPrivate(baselineFile, 1024);
@@ -80,6 +80,30 @@ export function reserveAudit(file: string, poolOrFinancial: AuditPool | boolean,
   }
   const bytes = JSON.parse(baseline ?? "null")?.bytes;
   if (!Number.isSafeInteger(bytes) || bytes < 0) throw new Error("Invalid audit capacity record.");
+  return { dir, bytes };
+}
+
+/** Legacy charges remain protected during upgrade; never run old and new writers together. */
+export function paymentSlotAllowance(file: string, budget: AuditBudget, daily: boolean): number {
+  const { dir, bytes } = initializeAuditBudget(file, daily);
+  const ledger = join(dir, "payment.counter");
+  checkPrivateFile(ledger);
+  const legacy = fs.readdirSync(dir).filter(n => /^payment-[0-9]+$/.test(n)).length;
+  let charged = 0;
+  try { charged = fs.statSync(ledger).size; } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
+  return Math.max(0, Math.floor((parseAuditBudget(budget.auditMaxBytes ?? DEFAULT_AUDIT_MAX_BYTES) - bytes) / AUDIT_SLOT_BYTES) - legacy - charged);
+}
+
+/**
+ * Charge a durable reservation BEFORE appending. A crash or failed write consumes
+ * capacity conservatively. OS flock serializes fixed-inode counters; there is no lease,
+ * stale-lock deletion, or log/state pruning. Legacy slot files remain charged. Budget directories
+ * live beside the sink, not among JSONL files. Never reset while any writer is running.
+ */
+export function reserveAudit(file: string, poolOrFinancial: AuditPool | boolean, budget: AuditBudget, daily: boolean): void {
+  // A boolean means the original two-pool call: true is payment, false is diagnostic.
+  const pool: AuditPool = poolOrFinancial === true ? "payment" : poolOrFinancial === false ? "diagnostic" : poolOrFinancial;
+  const { dir, bytes } = initializeAuditBudget(file, daily);
   const max = parseAuditBudget(
     (pool === "payment" ? budget.auditMaxBytes : pool === "refusal" ? budget.auditRefusalMaxBytes ?? budget.auditDiagnosticMaxBytes : budget.auditDiagnosticMaxBytes) ?? DEFAULT_AUDIT_MAX_BYTES,
   );
