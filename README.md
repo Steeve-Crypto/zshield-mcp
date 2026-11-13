@@ -422,7 +422,7 @@ To use another zingolib revision, build it and run `npm test`, then a testnet pa
 
 `CHAIN_MODE=zkool` sends real testnet payments through a running [zkool_graphql](https://github.com/hhanh00/zkool2) server instead of zingo-cli. zkool ships release binaries, so there is nothing to compile. Every policy check, the audit log, idempotency keys, the payment store and recovery work exactly as in testnet mode.
 
-A send is staged the same way: `prepareSend` builds the transaction and `signTx` signs it, with nothing broadcast; zkool's `txid` query reads the id of the signed bytes; zshield records that txid durably; only then does `broadcastTx` post exactly those bytes. A failure before the broadcast is "not sent". A failure during it is `SEND_UNCONFIRMED` with the staged txid, and the wallet takes no new payment until recovery or `zcash_payment_status` sees that txid mined. The signed bytes stay in memory only, so a staged payment cannot be resumed after a crash; it stays unresolved until the wallet shows its txid. The `txid` query needs a zkool release that has it; an older server is refused before anything is signed.
+A send is staged the same way: `prepareSend` builds the transaction and `signTx` signs it, with nothing broadcast; zkool's `txid` query reads the id of the signed bytes; zshield records that txid durably; only then does `broadcastTx` post exactly those bytes. A failure before the broadcast is "not sent". A failure during it is `SEND_UNCONFIRMED` with the staged txid, and the wallet takes no new payment until recovery or `zcash_payment_status` sees that txid mined. The signed bytes stay in memory only, so a staged payment cannot be resumed after a crash; it stays unresolved until the wallet shows its txid. The `txid` query is not in any zkool release yet (6.37.0 is the latest); it is proposed upstream in [zkool2#1641](https://github.com/hhanh00/zkool2/issues/1641), and commit [e14911b](https://github.com/adilhusain01/zkool2/commit/e14911b6865bb9ca55bc032b48e365c836987fb9) adds it to zkool 6.37.0. A server without it is refused after `signTx` and before anything is broadcast, so nothing is sent.
 
 Every caller value travels in GraphQL variables, never in the query text. Before signing, the planned transaction must have an output of exactly the requested amount. zkool lists outputs under each receiver's own address, not the unified address that was paid, so history entries from zkool carry no outgoing notes and a staged call is settled by its txid alone.
 
@@ -437,7 +437,7 @@ VIEW_KEY_FINGERPRINT_SALT=$(openssl rand -hex 32) ALLOWLIST_PATH=./allowlists/te
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `ZKOOL_URL` | `http://127.0.0.1:8000` | The zkool_graphql server. Plain `http` only to this machine; no user, password, query string or fragment |
+| `ZKOOL_URL` | `http://127.0.0.1:8000` | The zkool_graphql server, on this machine only (`127.0.0.1`, `localhost` or `[::1]`), since zshield sends it no credentials; no user, password, query string or fragment |
 | `ZKOOL_ACCOUNT` | none, required | The zkool account id to pay from, a positive integer |
 | `ZKOOL_STATE_DIR` | none, required | Absolute folder for the payment store. It must exist and be private; every server paying from this account must use the same one |
 
