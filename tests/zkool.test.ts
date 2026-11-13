@@ -26,9 +26,10 @@ import { tempConfig, withEnv } from "./helpers.ts";
 // 4. Amounts are whole zatoshis end to end, never rounded, and the planned transaction must
 //    carry an output of exactly the requested amount before anything is signed.
 // 5. Testnet only: a mainnet database or mainnet recipient is refused before any build.
-// 6. ZKOOL_ACCOUNT is a positive i32; ZKOOL_URL carries no credentials and uses plain http
-//    only to this machine; ZKOOL_STATE_DIR is required so every server on the account
-//    shares one payment store.
+// 6. ZKOOL_ACCOUNT is a positive i32; ZKOOL_URL carries no credentials and points at this
+//    machine only, over http or https: zshield sends no auth, so a remote zkool would have to
+//    run unauthenticated, and then anyone who can reach it can spend. ZKOOL_STATE_DIR is
+//    required so every server on the account shares one payment store.
 
 const ADDR = "utest1" + "a".repeat(100);
 const OWN = "utest1" + "o".repeat(100);
@@ -278,14 +279,15 @@ describe("CHAIN_MODE=zkool config", () => {
     });
   });
 
-  it("refuses a bad account, a remote plain-http URL, credentials, or no state dir", () => {
+  it("refuses a bad account, a remote URL, credentials, or no state dir", () => {
     const cwd = mkdtempSync(join(tmpdir(), "zshield-cfg-"));
     for (const account of [undefined, "0", "-1", "1.5", "abc", "2147483648"]) {
       env({ ...good, ZKOOL_ACCOUNT: account }, () => assert.throws(() => loadConfig(cwd), /ZKOOL_ACCOUNT/, String(account)));
     }
     env({ ...good, ZKOOL_URL: "http://10.0.0.5:8000" }, () => assert.throws(() => loadConfig(cwd), /this machine/));
     env({ ...good, ZKOOL_URL: "https://user:pass@zkool.example" }, () => assert.throws(() => loadConfig(cwd), /credentials/));
-    env({ ...good, ZKOOL_URL: "https://zkool.example" }, () => assert.equal(loadConfig(cwd).zkoolUrl, "https://zkool.example"));
+    env({ ...good, ZKOOL_URL: "https://zkool.example" }, () => assert.throws(() => loadConfig(cwd), /this machine/));
+    env({ ...good, ZKOOL_URL: "https://localhost:8443" }, () => assert.equal(loadConfig(cwd).zkoolUrl, "https://localhost:8443"));
     env({ ...good, ZKOOL_STATE_DIR: undefined }, () => assert.throws(() => loadConfig(cwd), /ZKOOL_STATE_DIR/));
     env({ ...good, ZKOOL_STATE_DIR: "relative/dir" }, () => assert.throws(() => loadConfig(cwd), /ZKOOL_STATE_DIR/));
     env({ ...good, FINANCIAL_CONTROLS_REQUIRED: "1" }, () => assert.throws(() => loadConfig(cwd), /zingo-cli backend only/));
