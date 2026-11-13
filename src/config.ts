@@ -50,8 +50,10 @@ export function parseZkoolUrl(raw: string | undefined): string {
   }
   if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("ZKOOL_URL must start with http:// or https://.");
   if (u.username || u.password || u.search || u.hash) throw new Error("ZKOOL_URL must not carry credentials, a query string or a fragment.");
+  // zshield sends zkool no credentials, so a reachable remote zkool would have to run
+  // unauthenticated, and anyone who can reach it could spend. Only this machine, until JWT.
   const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname);
-  if (u.protocol === "http:" && !loopback) throw new Error("ZKOOL_URL over plain http must point at this machine (127.0.0.1, localhost or [::1]).");
+  if (!loopback) throw new Error("ZKOOL_URL must point at this machine (127.0.0.1, localhost or [::1]): zshield sends zkool no credentials yet.");
   return url;
 }
 
