@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { MockChainAdapter } from "./chain/mock.js";
 import { executePaymentStatus, paymentStatusInputSchema } from "./tools/status.js";
 import { LiveChainAdapter } from "./chain/live.js";
+import { ZkoolChainAdapter } from "./chain/zkool.js";
 import type { ChainAdapter } from "./chain/types.js";
 import { assertFingerprintSalt, checkServerUrl, loadConfig } from "./config.js";
 import { executePay, payInputSchema } from "./tools/pay.js";
@@ -41,6 +42,9 @@ export function createChain(config: Config): ChainAdapter {
   const privacy = createRedactor();
   return privacy.run(() => {
     registerRedactions(config);
+    if (config.chainMode === "live" && config.chainBackend === "zkool") {
+      return new ZkoolChainAdapter({ network: config.chainNetwork, url: config.zkoolUrl, account: config.zkoolAccount, stateDir: config.zkoolStateDir });
+    }
     return config.chainMode === "live"
       ? new LiveChainAdapter({
           network: config.chainNetwork,
@@ -65,6 +69,7 @@ export function registerRedactions(config: Config, chain?: ChainAdapter): void {
   registerRedaction(fallbackAuditPath(config.auditDir, config.auditFallbackPath), "[audit fallback]");
   registerRedaction(config.allowlistPath, "[allowlist]");
   registerRedaction(config.zingoDataDir, "[wallet dir]");
+  registerRedaction(config.zkoolStateDir, "[wallet dir]");
   if (config.zingoDataDir) {
     try {
       registerRedaction(realpathSync(config.zingoDataDir), "[wallet dir]");

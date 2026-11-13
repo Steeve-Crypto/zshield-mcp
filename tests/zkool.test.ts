@@ -1,9 +1,18 @@
 import assert from "node:assert/strict";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import { describe, it } from "node:test";
 import { createGraphqlRunner, formatZec, ZkoolChainAdapter, zecToZats, type GraphqlRunner } from "../src/chain/zkool.ts";
 import { SendOutcomeUnknownError } from "../src/chain/outcome.ts";
+import { loadConfig } from "../src/config.ts";
+import { createChain } from "../src/server.ts";
+import { startupChecks, stateDirFor } from "../src/startup.ts";
+import { storeFor } from "../src/payments/store.ts";
+import { recoverPendingPayments } from "../src/payments/recovery.ts";
+import { executePay } from "../src/tools/pay.ts";
 import type { PaymentRequest } from "../src/types.ts";
-import { withEnv } from "./helpers.ts";
+import { tempConfig, withEnv } from "./helpers.ts";
 
 // Requirements for CHAIN_MODE=zkool, a testnet backend on a zkool_graphql server:
 // 1. Every caller value (recipient, amount, memo) travels in GraphQL variables, never in
@@ -17,6 +26,9 @@ import { withEnv } from "./helpers.ts";
 // 4. Amounts are whole zatoshis end to end, never rounded, and the planned transaction must
 //    carry an output of exactly the requested amount before anything is signed.
 // 5. Testnet only: a mainnet database or mainnet recipient is refused before any build.
+// 6. ZKOOL_ACCOUNT is a positive i32; ZKOOL_URL carries no credentials and uses plain http
+//    only to this machine; ZKOOL_STATE_DIR is required so every server on the account
+//    shares one payment store.
 
 const ADDR = "utest1" + "a".repeat(100);
 const OWN = "utest1" + "o".repeat(100);
@@ -233,5 +245,110 @@ describe("zkool GraphQL runner", () => {
     await assert.rejects(down("http://x", "query { a }", {}, 5000), /502/);
     const refused = createGraphqlRunner((async () => new Response(JSON.stringify({ errors: [{ message: "No Signing Key" }] }), { status: 200 })) as typeof fetch);
     await assert.rejects(refused("http://x", "query { a }", {}, 5000), /No Signing Key/);
+  });
+});
+
+describe("CHAIN_MODE=zkool config", () => {
+  const env = (vars: Record<string, string | undefined>, fn: () => void) => {
+    const keys = ["CHAIN_MODE", "ZKOOL_URL", "ZKOOL_ACCOUNT", "ZKOOL_STATE_DIR", "VIEW_KEY_FINGERPRINT_SALT", "FINANCIAL_CONTROLS_REQUIRED"];
+    const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+    for (const k of keys) delete process.env[k];
+    Object.assign(process.env, Object.fromEntries(Object.entries(vars).filter(([, v]) => v !== undefined)));
+    try {
+      fn();
+    } finally {
+      for (const k of keys) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      }
+    }
+  };
+  const dir = mkdtempSync(join(tmpdir(), "zshield-zkool-cfg-"));
+  const good = { CHAIN_MODE: "zkool", ZKOOL_ACCOUNT: "2", ZKOOL_STATE_DIR: dir, VIEW_KEY_FINGERPRINT_SALT: "independent-test-deployment" };
+
+  it("maps zkool to a live testnet chain on the zkool adapter", () => {
+    env(good, () => {
+      const c = loadConfig(mkdtempSync(join(tmpdir(), "zshield-cfg-")));
+      assert.equal(c.chainMode, "live");
+      assert.equal(c.chainNetwork, "testnet");
+      assert.equal(c.chainBackend, "zkool");
+      assert.equal(c.zkoolAccount, 2);
+      assert.equal(c.zkoolUrl, "http://127.0.0.1:8000");
+      assert.ok(createChain(c) instanceof ZkoolChainAdapter);
+    });
+  });
+
+  it("refuses a bad account, a remote plain-http URL, credentials, or no state dir", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "zshield-cfg-"));
+    for (const account of [undefined, "0", "-1", "1.5", "abc", "2147483648"]) {
+      env({ ...good, ZKOOL_ACCOUNT: account }, () => assert.throws(() => loadConfig(cwd), /ZKOOL_ACCOUNT/, String(account)));
+    }
+    env({ ...good, ZKOOL_URL: "http://10.0.0.5:8000" }, () => assert.throws(() => loadConfig(cwd), /this machine/));
+    env({ ...good, ZKOOL_URL: "https://user:pass@zkool.example" }, () => assert.throws(() => loadConfig(cwd), /credentials/));
+    env({ ...good, ZKOOL_URL: "https://zkool.example" }, () => assert.equal(loadConfig(cwd).zkoolUrl, "https://zkool.example"));
+    env({ ...good, ZKOOL_STATE_DIR: undefined }, () => assert.throws(() => loadConfig(cwd), /ZKOOL_STATE_DIR/));
+    env({ ...good, ZKOOL_STATE_DIR: "relative/dir" }, () => assert.throws(() => loadConfig(cwd), /ZKOOL_STATE_DIR/));
+    env({ ...good, FINANCIAL_CONTROLS_REQUIRED: "1" }, () => assert.throws(() => loadConfig(cwd), /zingo-cli backend only/));
+  });
+});
+
+describe("zcash_pay through the zkool adapter", () => {
+  function setup(fakeOpts: FakeOptions = {}) {
+    const config = tempConfig({ chainMode: "live", chainNetwork: "testnet" });
+    writeFileSync(config.allowlistPath, JSON.stringify({ recipients: [{ address: ADDR }] }));
+    chmodSync(config.allowlistPath, 0o600);
+    const state = mkdtempSync(join(tmpdir(), "zshield-zkool-state-"));
+    const fake = fakeZkool(fakeOpts);
+    const chain = new ZkoolChainAdapter({ network: "testnet", account: 3, stateDir: state, runner: fake.runner });
+    return { config, chain, fake, state, store: storeFor(config, chain) };
+  }
+  const input = { amount_zec: "0.0005", recipient: ADDR, memo: "IRON-0000000a", idempotency_key: "zk-1" };
+
+  it("pays, with the txid on disk before the broadcast", async () => {
+    let stagedAtBroadcast: string | undefined;
+    const s = setup({ onBroadcast: () => { stagedAtBroadcast = s.store.readCall(s.store.readKey("zk-1")!.call_id)?.stagedTxid; } });
+    const r = await withEnv("HEALTH_SYNC_TIMEOUT_MS", "1000", () => executePay(input, { config: s.config, chain: s.chain }));
+    assert.equal(r.audit.status, "ok", r.text);
+    assert.equal(stagedAtBroadcast, TXID);
+    const prepare = s.fake.calls.find((c) => c.op === "prepareSend")!;
+    assert.deepEqual(prepare.variables.payment, { recipients: [{ address: ADDR, amount: "0.00050000", memo: input.memo }], confirmations: 1 });
+  });
+
+  it("leaves a failed broadcast unresolved, then recovery confirms it by txid once mined", async () => {
+    const s = setup({ broadcast: "throws" });
+    const r = await withEnv("HEALTH_SYNC_TIMEOUT_MS", "1000", () => executePay(input, { config: s.config, chain: s.chain }));
+    assert.equal(r.audit.status, "unknown", r.text);
+    // A second payment is held back while the first may be on the network.
+    const again = await withEnv("HEALTH_SYNC_TIMEOUT_MS", "1000", () => executePay({ ...input, idempotency_key: "zk-2" }, { config: s.config, chain: s.chain }));
+    assert.equal(again.code, "UNRESOLVED_PAYMENT", again.text);
+    const mined = new ZkoolChainAdapter({
+      network: "testnet",
+      account: 3,
+      stateDir: s.state,
+      runner: fakeZkool({ history: [{ txid: TXID, height: 1001, value: "-0.00060000", fee: "0.00010000" }] }).runner,
+    });
+    const rows = await withEnv("HEALTH_SYNC_TIMEOUT_MS", "1000", () => recoverPendingPayments(s.config, mined));
+    assert.equal(rows.find((row) => row.txid === TXID)?.status, "confirmed", JSON.stringify(rows));
+  });
+});
+
+describe("CHAIN_MODE=zkool startup", () => {
+  const zkoolConfig = (stateDir: string) => tempConfig({ chainMode: "live", chainNetwork: "testnet", chainBackend: "zkool", zkoolAccount: 1, zkoolStateDir: stateDir, viewKeyFingerprintSalt: "independent-test-deployment" });
+
+  it("keeps the payment store inside ZKOOL_STATE_DIR", () => {
+    const dir = mkdtempSync(join(tmpdir(), "zshield-zkool-home-"));
+    assert.ok(stateDirFor(zkoolConfig(dir)).includes(basename(dir)));
+  });
+
+  it("refuses a state dir that does not exist or that other users can open", { skip: process.platform === "win32" }, () => {
+    const parent = mkdtempSync(join(tmpdir(), "zshield-zkool-home-"));
+    assert.throws(() => startupChecks(zkoolConfig(join(parent, "missing")), "linux"), /ZKOOL_STATE_DIR does not exist/);
+    const open = join(parent, "open");
+    mkdirSync(open);
+    chmodSync(open, 0o755);
+    assert.throws(() => startupChecks(zkoolConfig(open), "linux"));
+    const tight = join(parent, "tight");
+    mkdirSync(tight, { mode: 0o700 });
+    assert.ok(Array.isArray(startupChecks(zkoolConfig(tight), "linux")));
   });
 });
