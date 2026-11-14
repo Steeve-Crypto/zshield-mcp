@@ -313,7 +313,7 @@ Precedence: **environment variables** override `config/default.yaml`.
 |----------|---------|---------|
 | `SPENDING_CAP_ZEC` | `0.1` | Hard max ZEC **per tool call**, positive with at most 8 decimals |
 | `ALLOWLIST_PATH` | `./allowlists/recipients.example.json` | JSON allow-list |
-| `CHAIN_MODE` | `mock` | `mock`, `testnet` (zingo-cli) or `zkool` (a zkool_graphql server, see [zkool mode](#zkool-mode)); any other live value exits |
+| `CHAIN_MODE` | `mock` | `mock`, `testnet` (zingo-cli), `zkool` (a zkool_graphql server, see [zkool mode](#zkool-mode)) or `ironclad` (an Ironclad FROST group wallet, see [Ironclad mode](#ironclad-mode)); any other live value exits |
 | `AUDIT_DIR` | `./audits` | JSONL audit directory |
 | `VIEW_KEY_FINGERPRINT_SALT` | from yaml | Salt for view-key fingerprints |
 | `RATE_LIMIT_PER_MIN` | `60` | Tool calls allowed per minute across all tools in one server process, 1 to 10000. Calls over it get `RATE_LIMITED` |
@@ -442,6 +442,49 @@ VIEW_KEY_FINGERPRINT_SALT=$(openssl rand -hex 32) ALLOWLIST_PATH=./allowlists/te
 | `ZKOOL_STATE_DIR` | none, required | Absolute folder for the payment store. It must exist and be private; every server paying from this account must use the same one |
 
 Mainnet is refused, and so is `FINANCIAL_CONTROLS_REQUIRED=1`, whose checks cover the zingo-cli backend only.
+
+## Ironclad mode
+
+`CHAIN_MODE=ironclad` pays from an [Ironclad](https://github.com/adilhusain01/ironclad) wallet: a 2-of-3 FROST group key on the Ironwood pool. zshield holds one share. The owner's policy co-signer, a separate process with its own key share, holds another and adds its signature only to a payment its own policy allows (recipient allow-list, per-payment cap, daily budget, fee ceiling, expiry). The third share stays offline with the owner. zshield's cap and allow-list still apply first, so a payment has to pass both: a bug or a prompt that gets past zshield still cannot produce a signature the co-signer refuses.
+
+A send is staged as in the other live modes:
+
+1. `zcash-devtool pczt create` builds the payment and `pczt prove` proves it.
+2. `ironclad-cosigner inspect --json` runs the co-signer's own PCZT checks on this side. The result must contain exactly one payment of exactly the requested zatoshis, plus a fee, and that fee is what zshield's fee allowance is charged.
+3. `ironclad-cosigner coordinate` runs the signing round with the co-signer through the session folder it watches. When its policy refuses, the call ends as not sent, with the co-signer's reason, and the refusal is in the co-signer's ledger.
+4. `zcash-devtool pczt extract` gives the signed transaction's txid, with nothing broadcast. Signing cannot change the txid (ZIP 244).
+5. zshield records the txid durably, then `pczt send` broadcasts that same signed PCZT, and its answer must name the recorded txid.
+
+A failure before the broadcast means "not sent". A failure during it is `SEND_UNCONFIRMED` with the staged txid, and the wallet takes no new payment until recovery or `zcash_payment_status` sees that txid mined. The signed PCZT lives in a private temporary folder that is removed when the call ends, so a staged payment cannot be resumed after a crash. It stays unresolved until the wallet shows its txid.
+
+Every caller value is passed as its own argument to a program started without a shell. Three limits to know:
+
+- The memo is passed on the `pczt create` command line, so other users of the same machine can read it in `ps` while the build runs. Run zshield under its own user on a machine you don't share.
+- The co-signer reports each payment under its single-receiver address, so zshield does not compare the recipient as a string. The co-signer's allow-list judges the recipient, and zshield checks the amount.
+- zcash-devtool prints memos in a debug format, so history entries from this mode carry no outgoing notes, and a staged call is settled by its txid alone.
+
+It needs zcash-devtool from October 2026 or later (Ironwood), with the group wallet imported from its viewing key (exactly one account, a `uviewtest1` key), and an `ironclad-cosigner` build that has `inspect --json`. Every child runs with `TERM=dumb`, because zcash-devtool fails with "Resource temporarily unavailable" when it finds no terminal, and an MCP client gives it none.
+
+```bash
+# the owner's co-signer, share 2, watching the session folder (see the Ironclad README)
+(cd /var/ironclad/frost && ironclad-cosigner cosign-daemon --as 2 --dir session --policy policy.json --ledger ledger.jsonl)
+# zshield, holding share 1
+CHAIN_MODE=ironclad IRONCLAD_DEVTOOL=/opt/ironclad/zcash-devtool IRONCLAD_WALLET_DIR=/var/ironclad/group \
+IRONCLAD_COSIGNER=/opt/ironclad/ironclad-cosigner IRONCLAD_FROST_DIR=/var/ironclad/frost IRONCLAD_SESSION_DIR=/var/ironclad/frost/session \
+VIEW_KEY_FINGERPRINT_SALT=$(openssl rand -hex 32) ALLOWLIST_PATH=./allowlists/testnet.json npm start
+```
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `IRONCLAD_DEVTOOL` | none, required | Absolute path of the zcash-devtool binary |
+| `IRONCLAD_WALLET_DIR` | none, required | Absolute path of the devtool wallet folder for the group (viewing key only). It must be private; the payment store lives beside it |
+| `IRONCLAD_COSIGNER` | none, required | Absolute path of the ironclad-cosigner binary |
+| `IRONCLAD_FROST_DIR` | none, required | Absolute path of the folder holding zshield's key share. It must be private |
+| `IRONCLAD_SESSION_DIR` | none, required | Absolute path of the session folder the co-signer daemon watches |
+| `IRONCLAD_SHARE` | `1` | The share number zshield signs as, a positive integer |
+| `IRONCLAD_CONNECTION` | `tor` | zcash-devtool's connection for sync and broadcast: `tor`, `direct` or `socks5://host:port` |
+
+Mainnet is refused, and so is `FINANCIAL_CONTROLS_REQUIRED=1`. The co-signer's host and zshield's host together hold two shares, which is the threshold, so in production run the co-signer on a different machine.
 
 ## Proof: live testnet payment
 
