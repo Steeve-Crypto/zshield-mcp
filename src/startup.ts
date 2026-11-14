@@ -19,6 +19,7 @@ export interface StartupDeps {
 
 /** The payment store folder the server will use for this config. */
 export function stateDirFor(config: Config): string {
+  if (config.chainMode === "live" && config.chainBackend === "zkool") return walletStateDir(config.zkoolStateDir!);
   if (config.chainMode === "live") return walletStateDir(resolveWalletDir(config.zingoDataDir));
   return resolveStateDir(config, { stateDir: config.zingoDataDir ? walletStateDir(config.zingoDataDir) : undefined });
 }
@@ -73,6 +74,7 @@ export function startupChecks(config: Config, platform: string = process.platfor
   if (platform === "win32") {
     throw new Error("zshield-mcp: testnet mode is not supported on Windows. Use mock mode there, or run testnet mode on Linux or macOS.");
   }
+  if (config.chainBackend === "zkool") return zkoolStartupChecks(config, platform, deps);
   const dataDir = resolveWalletDir(config.zingoDataDir);
   // The wallet must already exist: a missing path could be planted before it is created.
   if (!existsSync(dataDir)) {
@@ -84,6 +86,28 @@ export function startupChecks(config: Config, platform: string = process.platfor
   assertCoherentWalletFilesystem(pin.path, platform);
   const stateDir = deps.stateDir ?? walletStateDir(pin.path);
   // Audit durability and capacity flocks need the same local filesystem guarantees (F-77).
+  for (const p of [config.auditDir, fallbackAuditPath(config.auditDir, config.auditFallbackPath), stateDir]) {
+    assertCoherentRecordFilesystem(p, platform);
+  }
+  const warnings = assertWalletPrivate(pin.path, platform);
+  warnings.push(...checkRecordPaths(config, stateDir, platform));
+  return warnings;
+}
+
+/**
+ * zkool mode: the wallet lives in the zkool_graphql server, so there is no wallet directory
+ * to pin here. The payment store folder must already exist (a missing one could be planted
+ * first), sit on a filesystem whose locks and fsync hold, and be private like the audit dir.
+ */
+function zkoolStartupChecks(config: Config, platform: string, deps: StartupDeps): string[] {
+  if (config.chainNetwork !== "testnet") throw new Error("zshield-mcp: CHAIN_MODE=zkool is testnet only.");
+  const base = config.zkoolStateDir;
+  if (!base || !existsSync(base)) {
+    throw new Error("zshield-mcp: ZKOOL_STATE_DIR does not exist. Create it (mode 700), then start the server.");
+  }
+  const pin = pinDir(base);
+  assertSafeAncestors(pin.path);
+  const stateDir = deps.stateDir ?? walletStateDir(pin.path);
   for (const p of [config.auditDir, fallbackAuditPath(config.auditDir, config.auditFallbackPath), stateDir]) {
     assertCoherentRecordFilesystem(p, platform);
   }
