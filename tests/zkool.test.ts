@@ -21,8 +21,10 @@ import { tempConfig, withEnv } from "./helpers.ts";
 //    nothing broadcast, its txid is recorded durably through req.stage, and only then are
 //    exactly those signed bytes broadcast. A failure before the broadcast sends nothing;
 //    a failure during it is an unknown outcome carrying the staged txid.
-// 3. A zkool server that cannot report the signed transaction's txid before broadcast is
-//    refused: the payment is not sent rather than sent unstaged.
+// 3. The txid comes from decodePczt on the prepared transaction (zkool2 #1647): under
+//    ZIP 244 a txid commits to effects only, so signing cannot change it. A zkool that
+//    cannot give it (6.37.0 and older, or a null txid) is refused before anything is
+//    signed: the payment is not sent rather than sent unstaged.
 // 4. Amounts are whole zatoshis end to end, never rounded, and the planned transaction must
 //    carry an output of exactly the requested amount before anything is signed.
 // 5. Testnet only: a mainnet database or mainnet recipient is refused before any build.
@@ -40,8 +42,8 @@ const SIGNED = "cd".repeat(60);
 
 interface FakeOptions {
   ownAddress?: string;
-  noTxidQuery?: boolean;
-  txidAnswer?: unknown;
+  /** "old": a zkool before #1647, whose UnsignedTx has no txid field. */
+  pcztTxid?: "old" | unknown;
   plannedValue?: string;
   broadcast?: "ok" | "throws" | "other";
   onBroadcast?: () => void;
@@ -72,14 +74,12 @@ function fakeZkool(opts: FakeOptions = {}) {
         return { prepareSend: PCZT };
       case "decodePczt": {
         const asked = (variables.pczt === PCZT && (calls.find((c) => c.op === "prepareSend")?.variables.payment as { recipients: { amount: string }[] }).recipients[0].amount) || "0";
-        return { decodePczt: { fee: "0.00010000", recipients: [{ value: opts.plannedValue ?? asked }, { value: "0.50000000" }] } };
+        if (opts.pcztTxid === "old") throw new Error('zkool_graphql: Unknown field "txid" on type "UnsignedTx"');
+        const txid = "pcztTxid" in opts ? opts.pcztTxid : variables.pczt === PCZT ? TXID : "ff".repeat(32);
+        return { decodePczt: { fee: "0.00010000", txid, recipients: [{ value: opts.plannedValue ?? asked }, { value: "0.50000000" }] } };
       }
       case "signTx":
         return { signTx: SIGNED };
-      case "txid":
-        if (opts.noTxidQuery) throw new Error('zkool_graphql: Unknown field "txid" on type "Query"');
-        if ("txidAnswer" in opts) return { txid: opts.txidAnswer };
-        return { txid: variables.txBytes === SIGNED ? TXID : "ff".repeat(32) };
       case "broadcastTx":
         opts.onBroadcast?.();
         if (opts.broadcast === "throws") throw new Error("The operation was aborted due to timeout");
@@ -113,7 +113,8 @@ describe("zkool adapter: staged send", () => {
     assert.deepEqual(order, [`stage ${TXID}`, "fee 10000", "beforeTransmit", "afterLock", "broadcast"]);
     const broadcast = fake.calls.find((c) => c.op === "broadcastTx")!;
     assert.deepEqual(broadcast.variables, { txBytes: SIGNED, account: 3 });
-    assert.ok(fake.ops().indexOf("signTx") < fake.ops().indexOf("txid"));
+    assert.ok(fake.calls.find((c) => c.op === "decodePczt")!.query.includes("txid"));
+    assert.ok(fake.ops().indexOf("decodePczt") < fake.ops().indexOf("signTx"));
   });
 
   it("keeps the recipient, amount and memo out of the query text", async () => {
@@ -141,21 +142,21 @@ describe("zkool adapter: staged send", () => {
     assert.ok(!fake.ops().includes("broadcastTx"));
   });
 
-  it("refuses a zkool without the txid query, before any broadcast", async () => {
-    const fake = fakeZkool({ noTxidQuery: true });
+  it("refuses a zkool whose decodePczt has no txid, before signing", async () => {
+    const fake = fakeZkool({ pcztTxid: "old" });
     let staged = false;
     await assert.rejects(adapter(fake).pay({ amountZats: 5000n, recipient: ADDR, stage: () => { staged = true; } }), /txid/);
     assert.equal(staged, false);
-    assert.ok(!fake.ops().includes("broadcastTx"));
+    assert.ok(!fake.ops().includes("signTx") && !fake.ops().includes("broadcastTx"));
   });
 
-  it("refuses a txid answer that is not a transaction id, before any broadcast", async () => {
-    for (const txidAnswer of [null, "", "xyz", "c0".repeat(31), 42]) {
-      const fake = fakeZkool({ txidAnswer });
+  it("refuses a decodePczt txid that is not a transaction id, before signing", async () => {
+    for (const pcztTxid of [null, undefined, "", "xyz", "c0".repeat(31), 42]) {
+      const fake = fakeZkool({ pcztTxid });
       let staged = false;
-      await assert.rejects(adapter(fake).pay({ amountZats: 5000n, recipient: ADDR, stage: () => { staged = true; } }), /txid/, String(txidAnswer));
+      await assert.rejects(adapter(fake).pay({ amountZats: 5000n, recipient: ADDR, stage: () => { staged = true; } }), /txid/, String(pcztTxid));
       assert.equal(staged, false);
-      assert.ok(!fake.ops().includes("broadcastTx"));
+      assert.ok(!fake.ops().includes("signTx") && !fake.ops().includes("broadcastTx"), String(pcztTxid));
     }
   });
 
