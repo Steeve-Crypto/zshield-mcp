@@ -486,7 +486,7 @@ VIEW_KEY_FINGERPRINT_SALT=$(openssl rand -hex 32) ALLOWLIST_PATH=./allowlists/te
 
 Mainnet is refused, and so is `FINANCIAL_CONTROLS_REQUIRED=1`. The co-signer's host and zshield's host together hold two shares, which is the threshold, so in production run the co-signer on a different machine.
 
-Live testnet run on 14 Nov 2026, through the MCP server over stdio, against the Ironclad co-signer whose policy caps one payment at 0.2 TAZ:
+Live testnet run on 14 Nov 2026 (write-up: https://ironclad.adilhusain.dev/zshield.html), through the MCP server over stdio, against the Ironclad co-signer whose policy caps one payment at 0.2 TAZ:
 
 - Approved: 0.001 TAZ to the Ironclad counter, co-signed and mined in block 4,618,918, tx [3202e8ce9d3f…](https://ironclad.adilhusain.dev/tx/3202e8ce9d3f0e5008716b8f9a84e69f936f955751493ebb3494f5659dab2b87) (`3202e8ce9d3f0e5008716b8f9a84e69f936f955751493ebb3494f5659dab2b87`).
 - Refused: 0.21 TAZ to the same counter with zshield's own cap raised to 0.25. zshield's checks passed, and the co-signer refused to sign: "21000000 zat to Ironclad counter (Bitrefill fulfilment, testnet) is above the per-payment cap of 20000000 zat". `zcash_pay` returned `CHAIN_ERROR` with "Nothing was sent.", and the co-signer's hash-chained ledger has the refusal at 2026-11-14T09:20:59Z.
