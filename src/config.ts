@@ -1,7 +1,7 @@
 import { approvalKeys } from "./payments/approval.js";
 import { DEFAULT_AUDIT_MAX_BYTES, parseAuditBudget } from "./audit/budget.js";
 import { readFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { parseZecToZats } from "./policy/amount.js";
 import { resolveWalletDir, validateTimeouts } from "./chain/live.js";
@@ -25,7 +25,45 @@ function parseMaxLag(value: unknown): number {
   return n;
 }
 
-const KNOWN_MODES = ["mock", "live", "testnet", "mainnet"];
+const KNOWN_MODES = ["mock", "live", "testnet", "mainnet", "zkool"];
+
+/** ZKOOL_ACCOUNT is zkool_graphql's account id: a positive i32, written as plain digits. */
+export function parseZkoolAccount(raw: string | undefined): number {
+  const account = raw !== undefined && /^[0-9]{1,10}$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN;
+  if (!Number.isInteger(account) || account < 1 || account > 2 ** 31 - 1) {
+    throw new Error("CHAIN_MODE=zkool needs ZKOOL_ACCOUNT, the zkool_graphql account id to pay from (a positive integer).");
+  }
+  return account;
+}
+
+/**
+ * ZKOOL_URL: an http or https URL with no credentials. Plain http only to this machine, since
+ * zkool_graphql run unauthenticated hands its seeds to anyone who can reach it.
+ */
+export function parseZkoolUrl(raw: string | undefined): string {
+  const url = raw === undefined || raw.trim() === "" ? "http://127.0.0.1:8000" : raw.trim();
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    throw new Error("ZKOOL_URL is not a valid URL.");
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("ZKOOL_URL must start with http:// or https://.");
+  if (u.username || u.password || u.search || u.hash) throw new Error("ZKOOL_URL must not carry credentials, a query string or a fragment.");
+  // zshield sends zkool no credentials, so a reachable remote zkool would have to run
+  // unauthenticated, and anyone who can reach it could spend. Only this machine, until JWT.
+  const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname);
+  if (!loopback) throw new Error("ZKOOL_URL must point at this machine (127.0.0.1, localhost or [::1]): zshield sends zkool no credentials yet.");
+  return url;
+}
+
+/** ZKOOL_STATE_DIR: where the payment store for this zkool account lives. Absolute, and required. */
+export function parseZkoolStateDir(raw: string | undefined): string {
+  if (!raw || !isAbsolute(raw)) {
+    throw new Error("CHAIN_MODE=zkool needs ZKOOL_STATE_DIR, an absolute folder for the payment store, shared by every server paying from this account.");
+  }
+  return raw;
+}
 
 /** Shortest secret part allowed in a credentialed server URL, so redaction can find it safely. */
 export const MIN_URL_SECRET_LENGTH = 8;
@@ -98,6 +136,10 @@ export function loadConfig(cwd = process.cwd()): Config {
   if (rawMode === "mainnet" && process.env.MAINNET_ENABLED !== "1") throw new Error("Mainnet requires explicit MAINNET_ENABLED=1; testnet remains available.");
   if (rawMode === "mainnet" && !process.env.ZINGO_DATA_DIR) throw new Error("Mainnet requires explicit ZINGO_DATA_DIR.");
   const chainMode: ChainMode = rawMode === "mock" ? "mock" : "live";
+  const zkool = rawMode === "zkool";
+  if (zkool && process.env.FINANCIAL_CONTROLS_REQUIRED === "1") {
+    throw new Error("FINANCIAL_CONTROLS_REQUIRED=1 covers the zingo-cli backend only; it is not available with CHAIN_MODE=zkool.");
+  }
   // Kept as given (env values stay strings) and validated as whole zatoshis, never rounded.
   const spendingCapZec = envOr<number | string>("SPENDING_CAP_ZEC", fromFile.spending_cap_zec ?? 0.1, (v) => v);
   try {
@@ -131,14 +173,17 @@ export function loadConfig(cwd = process.cwd()): Config {
       fromFile.view_key_fingerprint_salt ?? "dev-only-change-me",
       (v) => v
     ),
-    chainNetwork: rawMode === "testnet" || rawMode === "mainnet" ? rawMode : undefined,
+    chainNetwork: rawMode === "testnet" || rawMode === "mainnet" ? rawMode : zkool ? "testnet" : undefined,
+    ...(zkool
+      ? { chainBackend: "zkool" as const, zkoolUrl: parseZkoolUrl(process.env.ZKOOL_URL), zkoolAccount: parseZkoolAccount(process.env.ZKOOL_ACCOUNT), zkoolStateDir: parseZkoolStateDir(process.env.ZKOOL_STATE_DIR) }
+      : {}),
     mainnetEnabled: process.env.MAINNET_ENABLED === "1",
     expectedConsensusBranch: process.env.EXPECTED_CONSENSUS_BRANCH,
     zingoBin: process.env.ZINGO_BIN,
     zingoBinarySha256: process.env.ZINGO_BINARY_SHA256,
     requireFinancialControls: rawMode === "mainnet" || process.env.FINANCIAL_CONTROLS_REQUIRED === "1",
     // Live mode needs an absolute wallet path; loading fails here rather than fall back to a relative one.
-    zingoDataDir: chainMode === "live" ? resolveWalletDir(process.env.ZINGO_DATA_DIR) : process.env.ZINGO_DATA_DIR,
+    zingoDataDir: zkool ? undefined : chainMode === "live" ? resolveWalletDir(process.env.ZINGO_DATA_DIR) : process.env.ZINGO_DATA_DIR,
     lightwalletd: checkServerUrl(process.env.LIGHTWALLETD_URL),
     healthMaxLagBlocks: parseMaxLag(
       envOr<number | string>("HEALTH_MAX_LAG_BLOCKS", fromFile.health_max_lag_blocks ?? HEALTH_MAX_LAG_DEFAULT, (v) => v)
