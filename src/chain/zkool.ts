@@ -52,9 +52,10 @@ export interface ZkoolOptions {
  * Testnet adapter backed by zkool_graphql (https://github.com/hhanh00/zkool2), the wallet
  * server with a release binary and no Rust build. One zkool account is one wallet.
  *
- * A send is staged like the zingo adapter's: `prepareSend` builds the transaction and
- * `signTx` signs it, with nothing broadcast; `txid` reads the id of the signed bytes, which
- * `req.stage` records durably; only then does `broadcastTx` post exactly those bytes. Any
+ * A send is staged like the zingo adapter's: `prepareSend` builds the transaction,
+ * `decodePczt` gives its txid (zkool2 #1647; under ZIP 244 signing cannot change it), and
+ * `signTx` signs it, with nothing broadcast; `req.stage` records the txid durably; only then
+ * does `broadcastTx` post exactly those bytes, and its answer must be that txid. Any
  * failure before the broadcast is a clean "not sent". The signed bytes live only in this
  * process, so a crash after staging cannot be resumed: the call stays unresolved until the
  * wallet shows the txid mined, which recovery and zcash_payment_status read by txid.
@@ -240,7 +241,7 @@ export class ZkoolChainAdapter implements ChainAdapter {
       confirmations: 1,
     };
 
-    // Step one, nothing broadcast: build, check, sign, and read the txid. Every failure
+    // Step one, nothing broadcast: build, read the txid, check, sign. Every failure
     // here is a clean "not sent".
     req.fence?.();
     const prepared = await this.call<{ prepareSend?: string }>(
@@ -249,11 +250,17 @@ export class ZkoolChainAdapter implements ChainAdapter {
       STAGE_TIMEOUT_MS
     );
     const pczt = hexOrThrow(prepared?.prepareSend, "prepareSend");
-    const decoded = await this.call<{ decodePczt?: { fee?: unknown; recipients?: { value?: unknown }[] } }>(
-      "query($pczt: String!) { decodePczt(pczt: $pczt) { fee recipients { value } } }",
+    const decoded = await this.call<{ decodePczt?: { fee?: unknown; txid?: unknown; recipients?: { value?: unknown }[] } }>(
+      "query($pczt: String!) { decodePczt(pczt: $pczt) { fee txid recipients { value } } }",
       { pczt },
       STAGE_TIMEOUT_MS
     );
+    // A txid commits to the transaction's effects only (ZIP 244), and the prepared PCZT's
+    // effects are final, so this is the id the signed bytes will have.
+    const txid = typeof decoded?.decodePczt?.txid === "string" ? decoded.decodePczt.txid.toLowerCase() : "";
+    if (!TXID.test(txid)) {
+      throw new Error("zkool_graphql did not give the prepared transaction's txid (decodePczt needs zkool2 #1647, after 6.37.0). Nothing was signed or sent.");
+    }
     const feeZats = zecToZats(decoded?.decodePczt?.fee, "fee");
     if (feeZats <= 0n) throw new Error("zkool_graphql planned a transaction with no fee");
     // zkool lists each output under its single-receiver address, so the recipient cannot be
@@ -266,11 +273,6 @@ export class ZkoolChainAdapter implements ChainAdapter {
       STAGE_TIMEOUT_MS
     );
     const txBytes = hexOrThrow(signed?.signTx, "signTx");
-    const id = await this.call<{ txid?: string }>("query($txBytes: String!) { txid(txBytes: $txBytes) }", { txBytes }, STAGE_TIMEOUT_MS);
-    const txid = typeof id?.txid === "string" ? id.txid.toLowerCase() : "";
-    if (!TXID.test(txid)) {
-      throw new Error("zkool_graphql did not return the signed transaction's id (its `txid` query needs a zkool with that query). Nothing was sent.");
-    }
 
     // Record the txid durably; if that fails, nothing is broadcast.
     req.stage?.(txid);
