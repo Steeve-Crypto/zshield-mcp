@@ -313,7 +313,7 @@ Precedence: **environment variables** override `config/default.yaml`.
 |----------|---------|---------|
 | `SPENDING_CAP_ZEC` | `0.1` | Hard max ZEC **per tool call**, positive with at most 8 decimals |
 | `ALLOWLIST_PATH` | `./allowlists/recipients.example.json` | JSON allow-list |
-| `CHAIN_MODE` | `mock` | `mock` or `testnet` (any other live value exits) |
+| `CHAIN_MODE` | `mock` | `mock`, `testnet` (zingo-cli) or `zkool` (a zkool_graphql server, see [zkool mode](#zkool-mode)); any other live value exits |
 | `AUDIT_DIR` | `./audits` | JSONL audit directory |
 | `VIEW_KEY_FINGERPRINT_SALT` | from yaml | Salt for view-key fingerprints |
 | `RATE_LIMIT_PER_MIN` | `60` | Tool calls allowed per minute across all tools in one server process, 1 to 10000. Calls over it get `RATE_LIMITED` |
@@ -417,6 +417,31 @@ npm run demo:testnet
 The demo creates a second fresh testnet wallet as the recipient, writes a one-entry allow-list for it, and sends 0.001 TAZ through `executePay`, the same policy path the `zcash_pay` tool uses. It uses the idempotency key in `DEMO_KEY`, or a fresh `demo-<time>` key, since live payments need one. It prints the txid and a link on https://blockexplorer.one/zcash/testnet. A confirmed txid proves the full path works end to end: policy checks, audit write, and a real shielded transaction on the Zcash testnet.
 
 To use another zingolib revision, build it and run `npm test`, then a testnet payment, before trusting its output: the server parses `transactions`, `notes all`, `coins all`, `messages`, `info`, `height`, `export_ufvk`, and the `send`, `calculate` and `transmit` replies, and treats anything it cannot parse as unknown, never as sent or not sent. `perl` must be on the `PATH`.
+
+## zkool mode
+
+`CHAIN_MODE=zkool` sends real testnet payments through a running [zkool_graphql](https://github.com/hhanh00/zkool2) server instead of zingo-cli. zkool ships release binaries; the first one this mode can use is the release after 6.37.0 (see below). Every policy check, the audit log, idempotency keys, the payment store and recovery work exactly as in testnet mode.
+
+A send is staged the same way: `prepareSend` builds the transaction; `decodePczt` gives its txid, which signing cannot change because a txid commits to the transaction's effects only (ZIP 244); `signTx` signs it, with nothing broadcast; zshield records the txid durably; only then does `broadcastTx` post exactly those bytes, and its answer must be the recorded txid. A failure before the broadcast is "not sent". A failure during it is `SEND_UNCONFIRMED` with the staged txid, and the wallet takes no new payment until recovery or `zcash_payment_status` sees that txid mined. The signed bytes stay in memory only, so a staged payment cannot be resumed after a crash; it stays unresolved until the wallet shows its txid. The txid from `decodePczt` arrived in zkool2 with [#1647](https://github.com/hhanh00/zkool2/pull/1647) (commit [7e2a6e7](https://github.com/hhanh00/zkool2/commit/7e2a6e758b7cf5ef1f617c9cc98542854df5f567)), after release 6.37.0, so until the next release zkool has to be built from `main`. An older server is refused before anything is signed, so nothing is sent.
+
+Every caller value travels in GraphQL variables, never in the query text. Before signing, the planned transaction must have an output of exactly the requested amount. zkool lists outputs under each receiver's own address, not the unified address that was paid, so history entries from zkool carry no outgoing notes and a staged call is settled by its txid alone.
+
+```bash
+# zkool_graphql on a testnet database, on this machine only: unauthenticated, its API hands out the seed
+./zkool_graphql -d wallet.db -p 8000 -l https://testnet.zec.rocks:443 -C 1 --allow-unauthenticated --allow-unencrypted-database
+# create and fund an account once, then:
+mkdir -m 700 ~/.zshield-zkool
+CHAIN_MODE=zkool ZKOOL_URL=http://127.0.0.1:8000 ZKOOL_ACCOUNT=1 ZKOOL_STATE_DIR=$HOME/.zshield-zkool \
+VIEW_KEY_FINGERPRINT_SALT=$(openssl rand -hex 32) ALLOWLIST_PATH=./allowlists/testnet.json npm start
+```
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `ZKOOL_URL` | `http://127.0.0.1:8000` | The zkool_graphql server, on this machine only (`127.0.0.1`, `localhost` or `[::1]`), since zshield sends it no credentials; no user, password, query string or fragment |
+| `ZKOOL_ACCOUNT` | none, required | The zkool account id to pay from, a positive integer |
+| `ZKOOL_STATE_DIR` | none, required | Absolute folder for the payment store. It must exist and be private; every server paying from this account must use the same one |
+
+Mainnet is refused, and so is `FINANCIAL_CONTROLS_REQUIRED=1`, whose checks cover the zingo-cli backend only.
 
 ## Proof: live testnet payment
 

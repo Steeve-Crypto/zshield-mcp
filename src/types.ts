@@ -22,6 +22,12 @@ export interface Config {
   auditDir: string;
   viewKeyFingerprintSalt: string;
   chainNetwork?: string;
+  /** Which wallet a live chain talks to: zingo-cli (default) or a zkool_graphql server. */
+  chainBackend?: "zingo" | "zkool";
+  /** zkool backend: the server, the account id to pay from, and the payment store folder. */
+  zkoolUrl?: string;
+  zkoolAccount?: number;
+  zkoolStateDir?: string;
   mainnetEnabled?: boolean;
   expectedConsensusBranch?: string;
   zingoBin?: string;
