@@ -20,6 +20,7 @@ export interface StartupDeps {
 /** The payment store folder the server will use for this config. */
 export function stateDirFor(config: Config): string {
   if (config.chainMode === "live" && config.chainBackend === "zkool") return walletStateDir(config.zkoolStateDir!);
+  if (config.chainMode === "live" && config.chainBackend === "ironclad") return walletStateDir(resolveWalletDir(config.ironclad!.walletDir));
   if (config.chainMode === "live") return walletStateDir(resolveWalletDir(config.zingoDataDir));
   return resolveStateDir(config, { stateDir: config.zingoDataDir ? walletStateDir(config.zingoDataDir) : undefined });
 }
@@ -75,6 +76,7 @@ export function startupChecks(config: Config, platform: string = process.platfor
     throw new Error("zshield-mcp: testnet mode is not supported on Windows. Use mock mode there, or run testnet mode on Linux or macOS.");
   }
   if (config.chainBackend === "zkool") return zkoolStartupChecks(config, platform, deps);
+  if (config.chainBackend === "ironclad") return ironcladStartupChecks(config, platform, deps);
   const dataDir = resolveWalletDir(config.zingoDataDir);
   // The wallet must already exist: a missing path could be planted before it is created.
   if (!existsSync(dataDir)) {
@@ -112,6 +114,34 @@ function zkoolStartupChecks(config: Config, platform: string, deps: StartupDeps)
     assertCoherentRecordFilesystem(p, platform);
   }
   const warnings = assertWalletPrivate(pin.path, platform);
+  warnings.push(...checkRecordPaths(config, stateDir, platform));
+  return warnings;
+}
+
+/**
+ * Ironclad mode: the group wallet is a devtool wallet folder, checked like zingo's (it must
+ * exist, its real path is pinned, it must be private), with the payment store beside it.
+ * The co-signer data folder holds this agent's key share, so it must be private too, and
+ * both programs must exist.
+ */
+function ironcladStartupChecks(config: Config, platform: string, deps: StartupDeps): string[] {
+  if (config.chainNetwork !== "testnet") throw new Error("zshield-mcp: CHAIN_MODE=ironclad is testnet only.");
+  const ic = config.ironclad;
+  if (!ic) throw new Error("zshield-mcp: CHAIN_MODE=ironclad has no IRONCLAD_* settings.");
+  for (const [name, path] of [["IRONCLAD_DEVTOOL", ic.devtool], ["IRONCLAD_COSIGNER", ic.cosigner], ["IRONCLAD_SESSION_DIR", ic.sessionDir]] as const) {
+    if (!existsSync(path)) throw new Error(`zshield-mcp: ${name} does not exist.`);
+  }
+  const warnings: string[] = [];
+  for (const [name, dir] of [["IRONCLAD_WALLET_DIR", ic.walletDir], ["IRONCLAD_FROST_DIR", ic.frostDir]] as const) {
+    if (!existsSync(dir)) throw new Error(`zshield-mcp: ${name} does not exist.`);
+    const pin = pinDir(dir);
+    assertSafeAncestors(pin.path);
+    warnings.push(...assertWalletPrivate(pin.path, platform));
+  }
+  const stateDir = deps.stateDir ?? walletStateDir(pinDir(ic.walletDir).path);
+  for (const p of [config.auditDir, fallbackAuditPath(config.auditDir, config.auditFallbackPath), stateDir]) {
+    assertCoherentRecordFilesystem(p, platform);
+  }
   warnings.push(...checkRecordPaths(config, stateDir, platform));
   return warnings;
 }
