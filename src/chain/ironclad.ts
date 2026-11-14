@@ -25,6 +25,15 @@ export type ToolRunner = (cmd: string, args: string[], opts: { cwd?: string; inp
 /** The longest memo a Zcash note carries, in UTF-8 bytes. */
 const MAX_MEMO_BYTES = 512;
 const TXID = /^[0-9a-f]{64}$/;
+/**
+ * How long the signing round waits for the co-signer. A running daemon answers within seconds;
+ * coordinate itself would wait an hour, so an offline co-signer is a refusal after this.
+ */
+export const COSIGN_TIMEOUT_MS = 120_000;
+
+/** A program stopped because it ran out of time. */
+class ToolTimeoutError extends Error {}
+
 /** Kept from a failing program's stderr for the error message. */
 const STDERR_KEEP = 4_000;
 
@@ -131,6 +140,7 @@ export class IroncladChainAdapter implements ChainAdapter {
     } catch (e) {
       throw new Error(redact(`${cmd.split("/").pop()} did not start: ${e instanceof Error ? e.message : String(e)}`));
     }
+    if (r.status === null) throw new ToolTimeoutError(redact(`${cmd.split("/").pop()} ${args[0] ?? ""} was stopped (timeout)`));
     if (r.status !== 0) {
       const what = r.status === null ? "was stopped (timeout)" : `exited ${r.status}`;
       throw new Error(redact(`${cmd.split("/").pop()} ${args[0] ?? ""} ${args[1] ?? ""} ${what}: ${lastLines(r.stderr)}`.replace(/\s+/g, " ").trim()));
@@ -316,10 +326,13 @@ export class IroncladChainAdapter implements ChainAdapter {
         await this.run(
           this.opts.cosigner,
           ["coordinate", "--as", this.opts.share, "--dir", this.opts.sessionDir, "--pczt", proven, "--out", signed],
-          STAGE_TIMEOUT_MS,
+          COSIGN_TIMEOUT_MS,
           { cwd: this.opts.frostDir }
         );
       } catch (e) {
+        if (e instanceof ToolTimeoutError) {
+          throw new Error(`the Ironclad co-signer did not answer within ${COSIGN_TIMEOUT_MS / 1000} s (is its daemon running?). Nothing was sent.`);
+        }
         const msg = e instanceof Error ? e.message : String(e);
         const refusal = /refused to sign: (.*)$/.exec(msg)?.[1];
         if (refusal) throw new Error(`the Ironclad co-signer refused to sign (${refusal.slice(0, 300)}). Nothing was sent.`);
