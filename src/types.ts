@@ -22,8 +22,22 @@ export interface Config {
   auditDir: string;
   viewKeyFingerprintSalt: string;
   chainNetwork?: string;
-  /** Which wallet a live chain talks to: zingo-cli (default) or a zkool_graphql server. */
-  chainBackend?: "zingo" | "zkool";
+  /** Which wallet a live chain talks to: zingo-cli (default), a zkool_graphql server, or an Ironclad FROST group. */
+  chainBackend?: "zingo" | "zkool" | "ironclad";
+  /**
+   * Ironclad backend: zcash-devtool and its group wallet, the co-signer binary, its data
+   * folder (this agent's share), the session folder the co-signer daemon watches, this
+   * agent's member number and devtool's connection mode.
+   */
+  ironclad?: {
+    devtool: string;
+    walletDir: string;
+    cosigner: string;
+    frostDir: string;
+    sessionDir: string;
+    share: string;
+    connection: string;
+  };
   /** zkool backend: the server, the account id to pay from, and the payment store folder. */
   zkoolUrl?: string;
   zkoolAccount?: number;

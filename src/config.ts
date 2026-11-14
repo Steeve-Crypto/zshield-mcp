@@ -25,7 +25,31 @@ function parseMaxLag(value: unknown): number {
   return n;
 }
 
-const KNOWN_MODES = ["mock", "live", "testnet", "mainnet", "zkool"];
+const KNOWN_MODES = ["mock", "live", "testnet", "mainnet", "zkool", "ironclad"];
+
+/** Every path CHAIN_MODE=ironclad takes must be absolute: a relative one would follow the working folder. */
+function ironcladPath(name: string): string {
+  const raw = process.env[name];
+  if (!raw || !isAbsolute(raw)) throw new Error(`CHAIN_MODE=ironclad needs ${name}, an absolute path.`);
+  return raw;
+}
+
+/** CHAIN_MODE=ironclad's settings, from IRONCLAD_* variables. */
+export function parseIronclad(env: NodeJS.ProcessEnv = process.env): NonNullable<Config["ironclad"]> {
+  const share = (env.IRONCLAD_SHARE ?? "1").trim();
+  if (!/^[1-9][0-9]{0,4}$/.test(share)) throw new Error("IRONCLAD_SHARE must be this agent's member number in the group (a positive integer).");
+  const connection = (env.IRONCLAD_CONNECTION ?? "tor").trim();
+  if (!/^(tor|direct|socks5:\/\/\S+)$/.test(connection)) throw new Error("IRONCLAD_CONNECTION must be tor, direct or socks5://host:port.");
+  return {
+    devtool: ironcladPath("IRONCLAD_DEVTOOL"),
+    walletDir: ironcladPath("IRONCLAD_WALLET_DIR"),
+    cosigner: ironcladPath("IRONCLAD_COSIGNER"),
+    frostDir: ironcladPath("IRONCLAD_FROST_DIR"),
+    sessionDir: ironcladPath("IRONCLAD_SESSION_DIR"),
+    share,
+    connection,
+  };
+}
 
 /** ZKOOL_ACCOUNT is zkool_graphql's account id: a positive i32, written as plain digits. */
 export function parseZkoolAccount(raw: string | undefined): number {
@@ -137,8 +161,9 @@ export function loadConfig(cwd = process.cwd()): Config {
   if (rawMode === "mainnet" && !process.env.ZINGO_DATA_DIR) throw new Error("Mainnet requires explicit ZINGO_DATA_DIR.");
   const chainMode: ChainMode = rawMode === "mock" ? "mock" : "live";
   const zkool = rawMode === "zkool";
-  if (zkool && process.env.FINANCIAL_CONTROLS_REQUIRED === "1") {
-    throw new Error("FINANCIAL_CONTROLS_REQUIRED=1 covers the zingo-cli backend only; it is not available with CHAIN_MODE=zkool.");
+  const ironclad = rawMode === "ironclad";
+  if ((zkool || ironclad) && process.env.FINANCIAL_CONTROLS_REQUIRED === "1") {
+    throw new Error(`FINANCIAL_CONTROLS_REQUIRED=1 covers the zingo-cli backend only; it is not available with CHAIN_MODE=${rawMode}.`);
   }
   // Kept as given (env values stay strings) and validated as whole zatoshis, never rounded.
   const spendingCapZec = envOr<number | string>("SPENDING_CAP_ZEC", fromFile.spending_cap_zec ?? 0.1, (v) => v);
@@ -173,17 +198,18 @@ export function loadConfig(cwd = process.cwd()): Config {
       fromFile.view_key_fingerprint_salt ?? "dev-only-change-me",
       (v) => v
     ),
-    chainNetwork: rawMode === "testnet" || rawMode === "mainnet" ? rawMode : zkool ? "testnet" : undefined,
+    chainNetwork: rawMode === "testnet" || rawMode === "mainnet" ? rawMode : zkool || ironclad ? "testnet" : undefined,
     ...(zkool
       ? { chainBackend: "zkool" as const, zkoolUrl: parseZkoolUrl(process.env.ZKOOL_URL), zkoolAccount: parseZkoolAccount(process.env.ZKOOL_ACCOUNT), zkoolStateDir: parseZkoolStateDir(process.env.ZKOOL_STATE_DIR) }
       : {}),
+    ...(ironclad ? { chainBackend: "ironclad" as const, ironclad: parseIronclad() } : {}),
     mainnetEnabled: process.env.MAINNET_ENABLED === "1",
     expectedConsensusBranch: process.env.EXPECTED_CONSENSUS_BRANCH,
     zingoBin: process.env.ZINGO_BIN,
     zingoBinarySha256: process.env.ZINGO_BINARY_SHA256,
     requireFinancialControls: rawMode === "mainnet" || process.env.FINANCIAL_CONTROLS_REQUIRED === "1",
     // Live mode needs an absolute wallet path; loading fails here rather than fall back to a relative one.
-    zingoDataDir: zkool ? undefined : chainMode === "live" ? resolveWalletDir(process.env.ZINGO_DATA_DIR) : process.env.ZINGO_DATA_DIR,
+    zingoDataDir: zkool || ironclad ? undefined : chainMode === "live" ? resolveWalletDir(process.env.ZINGO_DATA_DIR) : process.env.ZINGO_DATA_DIR,
     lightwalletd: checkServerUrl(process.env.LIGHTWALLETD_URL),
     healthMaxLagBlocks: parseMaxLag(
       envOr<number | string>("HEALTH_MAX_LAG_BLOCKS", fromFile.health_max_lag_blocks ?? HEALTH_MAX_LAG_DEFAULT, (v) => v)
