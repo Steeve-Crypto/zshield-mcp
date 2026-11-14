@@ -455,6 +455,8 @@ A send is staged as in the other live modes:
 4. `zcash-devtool pczt extract` gives the signed transaction's txid, with nothing broadcast. Signing cannot change the txid (ZIP 244).
 5. zshield records the txid durably, then `pczt send` broadcasts that same signed PCZT, and its answer must name the recorded txid.
 
+When the co-signer is offline, the signing round waits two minutes and the call ends as not sent: "the Ironclad co-signer did not answer within 120 s (is its daemon running?). Nothing was sent." Nothing is extracted or broadcast, and the next payment can go ahead once the co-signer is back.
+
 A failure before the broadcast means "not sent". A failure during it is `SEND_UNCONFIRMED` with the staged txid, and the wallet takes no new payment until recovery or `zcash_payment_status` sees that txid mined. The signed PCZT lives in a private temporary folder that is removed when the call ends, so a staged payment cannot be resumed after a crash. It stays unresolved until the wallet shows its txid.
 
 Every caller value is passed as its own argument to a program started without a shell. Three limits to know:
@@ -490,6 +492,7 @@ Live testnet run on 14 Nov 2026 (write-up: https://ironclad.adilhusain.dev/zshie
 
 - Approved: 0.001 TAZ to the Ironclad counter, co-signed and mined in block 4,618,918, tx [3202e8ce9d3f…](https://ironclad.adilhusain.dev/tx/3202e8ce9d3f0e5008716b8f9a84e69f936f955751493ebb3494f5659dab2b87) (`3202e8ce9d3f0e5008716b8f9a84e69f936f955751493ebb3494f5659dab2b87`).
 - Refused: 0.21 TAZ to the same counter with zshield's own cap raised to 0.25. zshield's checks passed, and the co-signer refused to sign: "21000000 zat to Ironclad counter (Bitrefill fulfilment, testnet) is above the per-payment cap of 20000000 zat". `zcash_pay` returned `CHAIN_ERROR` with "Nothing was sent.", and the co-signer's hash-chained ledger has the refusal at 2026-11-14T09:20:59Z.
+- Co-signer offline: 0.001 TAZ with zshield pointed at a session folder no daemon watches. `zcash_pay` returned `CHAIN_ERROR` "the Ironclad co-signer did not answer within 120 s (is its daemon running?). Nothing was sent." after 155 s in all, and the session folder was left empty.
 
 ## Proof: live testnet payment
 
