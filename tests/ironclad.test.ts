@@ -38,6 +38,10 @@ import { tempConfig, withEnv } from "./helpers.ts";
 //    terminal, which is the case under an MCP client.
 // 8. IRONCLAD_* paths are absolute; startup refuses a missing program or folder and a
 //    wallet or share folder other users can open.
+// 9. When the co-signer is offline the payment is refused: the signing round waits a bounded
+//    time (two minutes, not the five allowed for building), then the call ends as not sent,
+//    saying the co-signer did not answer, with nothing extracted or broadcast. It is never an
+//    unknown outcome, and the next payment may go ahead once the co-signer is back.
 
 const DEVTOOL = "/opt/ironclad/zcash-devtool";
 const COSIGNER = "/opt/ironclad/ironclad-cosigner";
@@ -88,6 +92,8 @@ interface FakeOptions {
   payments?: number[];
   fee?: number;
   refuse?: string;
+  /** The co-signer daemon is not running: coordinate waits until it is stopped. */
+  offline?: boolean;
   extracted?: string;
   send?: "ok" | "throws" | "other";
   onSend?: () => void;
@@ -100,6 +106,7 @@ interface Call {
   args: string[];
   cwd?: string;
   input?: Buffer;
+  timeoutMs: number;
 }
 
 /** zcash-devtool and ironclad-cosigner stand-ins. Records every call. */
@@ -109,13 +116,15 @@ function fakeTools(opts: FakeOptions = {}) {
   const fail = (stderr: string) => ({ status: 1, stdout: Buffer.alloc(0), stderr });
   const runner: ToolRunner = async (cmd, args, o) => {
     const tool = cmd === DEVTOOL ? "devtool" : cmd === COSIGNER ? "cosigner" : (() => { throw new Error(`unexpected program ${cmd}`); })();
-    calls.push({ tool, args, cwd: o.cwd, input: o.input });
+    calls.push({ tool, args, cwd: o.cwd, input: o.input, timeoutMs: o.timeoutMs });
     const a = args.join(" ");
     if (tool === "cosigner") {
       if (args[0] === "inspect") {
         return ok(JSON.stringify({ payments: (opts.payments ?? [Number(lastCreateValue(calls))]).map((zat) => ({ address: "utest1single", zat })), fee_zat: opts.fee ?? 15000, spent_zat: 1, change_zat: 1, expiry_height: 1, warnings: [], sighash: "00", spends_to_sign: 1 }));
       }
       if (args[0] === "coordinate") {
+        // Nothing answers in the session folder, so coordinate waits until the runner stops it.
+        if (opts.offline) return { status: null, stdout: Buffer.from("[device 1] waiting for the co-signer's commitments in session/commitments.json...\n"), stderr: "" };
         if (opts.refuse) return fail(`error: the co-signer refused to sign: policy: ${opts.refuse}`);
         writeFileSync(args[args.indexOf("--out") + 1], SIGNED);
         return ok("[device 1] 1 spend(s) signed");
@@ -214,6 +223,18 @@ describe("ironclad adapter: staged send", () => {
       return true;
     });
     assert.ok(!fake.steps().includes("pczt extract") && !fake.steps().includes("pczt send"));
+  });
+
+  it("refuses the payment when the co-signer is offline, after a bounded wait, with nothing broadcast", async () => {
+    const fake = fakeTools({ offline: true });
+    let staged = false;
+    await assert.rejects(adapter(fake).pay({ amountZats: 5000n, recipient: ADDR, stage: () => { staged = true; } }), (e: Error) => {
+      assert.ok(!(e instanceof SendOutcomeUnknownError));
+      assert.match(e.message, /co-signer did not answer within 120 s.*Nothing was sent\./);
+      return true;
+    });
+    assert.ok(!staged && !fake.steps().includes("pczt extract") && !fake.steps().includes("pczt send"));
+    assert.equal(fake.calls.find((c) => c.args[0] === "coordinate")!.timeoutMs, 120_000);
   });
 
   it("refuses a PCZT that does not pay exactly the requested amount once, before the co-signer", async () => {
@@ -387,6 +408,18 @@ describe("zcash_pay through the ironclad adapter", () => {
     assert.notEqual(r.audit.status, "ok", r.text);
     assert.notEqual(r.audit.status, "unknown", r.text);
     assert.match(r.text, /co-signer refused/);
+  });
+
+  it("records an offline co-signer as not sent, and pays once the co-signer is back", async () => {
+    const offline = setup({ offline: true });
+    const r = await withEnv("HEALTH_SYNC_TIMEOUT_MS", "1000", () => executePay(input, { config: offline.config, chain: offline.chain }));
+    assert.notEqual(r.audit.status, "ok", r.text);
+    assert.notEqual(r.audit.status, "unknown", r.text);
+    assert.match(r.text, /co-signer did not answer/);
+    assert.ok(!offline.fake.steps().includes("pczt send"));
+    const back = adapter(fakeTools(), offline.state);
+    const again = await withEnv("HEALTH_SYNC_TIMEOUT_MS", "1000", () => executePay({ ...input, idempotency_key: "ic-back" }, { config: offline.config, chain: back }));
+    assert.equal(again.audit.status, "ok", again.text);
   });
 
   it("leaves a failed broadcast unresolved, then recovery confirms it by txid once mined", async () => {
