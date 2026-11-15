@@ -323,3 +323,26 @@ V12 run 17 reviewed db5a00e (PR 12) and reported four findings. F-72, F-59 and F
 | F-90 Medium, migration charges proven-unsent attempts | `initializeHistoricalBudget` charged every call with a fee event | fixed now | the migration charges only calls with a transmit authorization or where `mayHaveBroadcast` is true; a proven non-send is skipped and needs no fee evidence. Calls of one identity are counted once at the highest amount, the live rule | "F-90 migration charges only calls that were authorized or may have broadcast", "F-90 a call that never staged a transaction needs no fee evidence to migrate" |
 
 Tests changed: `tests/operator-controls.test.ts` "a crashed reservation completes without charging twice" and "fee receipts survive crashes without duplicate charges" exercised the removed two-write `reserveSpending` and `reserveFee`; they are replaced by "a crash while publishing the charged authorization leaves neither the charge nor the authorization". `tests/v12r12.test.ts` "F-72 spending reservation dedupes by identity not callId" now checks the same dedupe through `authorizeCharged`. The `ledgerTotal` helpers in `tests/v12r15.test.ts` and `tests/v12r16.test.ts` read `spentZats` instead of the ledger file.
+
+## Run 18
+
+V12 run 18 reviewed 844e819 (PR 13) and reported one finding. The tests in `tests/v12r18.test.ts` marked "fails before" fail on 844e819 and pass now; the others pass on both and check that every cached decision equals a full recount.
+
+| Finding | Path | Status | Fix | Proof |
+|---------|------|--------|-----|-------|
+| F-91 Medium, cap refusals repeatedly rescan history | `needed()` recounted spending from every payment record on every check: each cap refusal read the whole history, and a successful payment read it four times | fixed now, with one remaining cost below | an in-process spending tally (`src/payments/budget.ts`). Records are append-only, so each call's charges are kept with the folder listing they were read from. The store marks a call dirty before every write it makes (`src/payments/store.ts`). A refusal is decided from the tally, which never exceeds the true count. An acceptance is validated: the first check of each wallet lock hold lists every call folder and re-reads only changed calls, later checks in the hold re-read only dirty calls, and a hold is reused only with the OS lock (`exclusiveAcrossProcesses`, `src/payments/lock.ts`). The ledger and receipts folder are compared on every check. The store-open scan seeds the tally. Nothing on disk and no write order changed | "F-91 a fresh process reads the history once in full, at store open" (fails before), "F-91 repeated cap refusals with the same key re-read no unchanged call" (fails before), "F-91 one payment after warm-up re-reads only its own call across all 4 checks" at 100 and 2000 calls (fails before), "F-91 a payment by another process forces a re-read of only that call, and is never missed" (fails before) |
+
+Payment record reads measured by the tests, before (844e819) and now:
+
+| Case | Before | Now |
+|------|--------|-----|
+| Fresh process, store open plus first refusal, 100 calls | 200 history reads, 800 record files opened | 100 history reads (one full scan, at store open), 400 files |
+| 5 repeated refusals with one key after warm-up, 100 calls | 500 history reads, 2000 files | 0 reads, 0 files, 0 folder listings |
+| One payment after warm-up, all 4 checks, 100 calls | 400 history reads, 1639 files | 0 history reads, 23 files (its own records) |
+| One payment after warm-up, all 4 checks, 2000 calls | 8000 history reads, 32039 files | 0 history reads, 23 files |
+| Next payment after another process paid, 100 calls | 100 history reads | 0 history reads, only the other process's call re-read |
+| Restart, first refusal, 100 calls | 200 history reads | 100 history reads (one full rescan at store open) |
+
+Remaining cost, not removed by this fix: a fresh process still reads every payment record once when it opens the store, and the first accepting check of each lock hold lists every call folder (one directory read per call, no record file opened), so that pass grows with history. It is what lets the tally see another process's payments without trusting stale data.
+
+Equivalence checks (pass before and now): "F-91 cached decisions equal the full recount after pay, recovery and a restart", "F-91 cached decisions equal the full recount after migration and resume". Self-audit checks added with the fix: "F-91 a ledger changed on disk is never decided from the old total", "F-91 without the OS lock every acceptance lists the call folders again", "F-91 a charge written through another path to the same store is seen in the same hold". No existing test changed.
