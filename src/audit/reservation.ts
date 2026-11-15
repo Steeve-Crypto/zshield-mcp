@@ -45,33 +45,14 @@ export function ensurePaymentReservation(file: string, budget: AuditBudget, dail
   }
   const slots = Math.floor(parseAuditBudget(budget.auditMaxBytes ?? DEFAULT_AUDIT_MAX_BYTES) / AUDIT_SLOT_BYTES);
   const path = join(dir, "payment-evidence.bin");
-  if (!fs.existsSync(path)) {
-    const tmp = join(dir, `.tmp-reservation-${process.pid}-${randomBytes(8).toString("hex")}`);
-    const fd = openPrivate(tmp, fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL);
-    try {
-      const bytes = JOURNAL_HEADER_BYTES + slots * JOURNAL_SLOT_BYTES;
-      const chunk = Buffer.alloc(64 * 1024);
-      let offset = 0;
-      while (offset < bytes) {
-        const length = Math.min(chunk.length, bytes - offset);
-        const n = fs.writeSync(fd, chunk, 0, length, offset);
-        if (n <= 0) failure("Payment audit preallocation made no progress.");
-        offset += n;
-      }
-      const head = Buffer.alloc(JOURNAL_HEADER_BYTES);
-      head.write(`${MAGIC}${slots}\n`, "ascii");
-      if (fs.writeSync(fd, head, 0, head.length, 0) !== head.length) failure("Incomplete payment audit header.");
-      fs.fsyncSync(fd);
-      header(fd); // Reject sparse/compressed allocation before publication.
-      try { fs.linkSync(tmp, path); } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      }
-      fsyncDir(dir);
-    } finally {
-      fs.closeSync(fd);
-      try { fs.unlinkSync(tmp); } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
-    }
-  }
+  // One initializer at a time, and each one checks again once it holds the lock: racing
+  // processes never each zero-fill a full journal, and a failed allocation still uses a
+  // journal another initializer published meanwhile (F-87).
+  if (!fs.existsSync(path)) withInitializerLock(dir, () => {
+    if (fs.existsSync(path)) return;
+    try { allocateJournal(dir, path, slots); }
+    catch (e) { if (!fs.existsSync(path)) throw e; }
+  });
   const fd = openPrivate(path, fs.constants.O_RDWR);
   try {
     if (header(fd) < slots) failure("Payment audit reservation is too small; offline capacity migration required.");
@@ -79,6 +60,61 @@ export function ensurePaymentReservation(file: string, budget: AuditBudget, dail
     fsyncDir(dir);
   } finally { fs.closeSync(fd); }
   return path;
+}
+
+/** Zero-filled real blocks under a temporary name, verified, then exclusively published. */
+function allocateJournal(dir: string, path: string, slots: number): void {
+  const tmp = join(dir, `.tmp-reservation-${process.pid}-${randomBytes(8).toString("hex")}`);
+  const fd = openPrivate(tmp, fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL);
+  try {
+    const bytes = JOURNAL_HEADER_BYTES + slots * JOURNAL_SLOT_BYTES;
+    const chunk = Buffer.alloc(64 * 1024);
+    let offset = 0;
+    while (offset < bytes) {
+      const length = Math.min(chunk.length, bytes - offset);
+      const n = fs.writeSync(fd, chunk, 0, length, offset);
+      if (n <= 0) failure("Payment audit preallocation made no progress.");
+      offset += n;
+    }
+    const head = Buffer.alloc(JOURNAL_HEADER_BYTES);
+    head.write(`${MAGIC}${slots}\n`, "ascii");
+    if (fs.writeSync(fd, head, 0, head.length, 0) !== head.length) failure("Incomplete payment audit header.");
+    fs.fsyncSync(fd);
+    header(fd); // Reject sparse/compressed allocation before publication.
+    try { fs.linkSync(tmp, path); } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    }
+    fsyncDir(dir);
+  } finally {
+    fs.closeSync(fd);
+    try { fs.unlinkSync(tmp); } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
+  }
+}
+
+/** How long a first initializer waits for another one to finish allocating. */
+const INIT_WAIT_SECONDS = 120;
+/**
+ * flock(2) on the descriptor this process passes in. The lock belongs to the open file
+ * description, so it stays held after perl exits, until this process closes its
+ * descriptor or dies. Nothing is ever deleted to break it.
+ */
+const INIT_LOCK = String.raw`
+use strict; use Fcntl qw(:flock); use Time::HiRes qw(time sleep);
+open(my $fh, '<&=3') or die 'fd'; my $end=time()+$ARGV[0];
+until(flock($fh, LOCK_EX|LOCK_NB)){ exit 75 if time()>=$end; sleep(0.01) }
+print "LOCKED
+"; exit 0;
+`;
+
+function withInitializerLock(dir: string, fn: () => void): void {
+  const fd = openPrivate(join(dir, "payment-evidence.init"), fs.constants.O_RDWR | fs.constants.O_CREAT);
+  try {
+    const result = spawnSync("perl", ["-e", INIT_LOCK, "--", String(INIT_WAIT_SECONDS)], {
+      encoding: "utf8", timeout: (INIT_WAIT_SECONDS + 5) * 1000, maxBuffer: 1024, stdio: ["ignore", "pipe", "pipe", fd],
+    });
+    if (result.status !== 0 || result.stdout !== "LOCKED\n") failure("Another process is still initializing the payment audit reservation.");
+    fn();
+  } finally { fs.closeSync(fd); }
 }
 
 /** Fixed slots, not append growth. An I(ncomplete) slot is permanently charged after a crash.

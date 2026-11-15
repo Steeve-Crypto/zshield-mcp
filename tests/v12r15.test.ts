@@ -141,4 +141,49 @@ describe("V12 run 15 regressions", () => {
     assert.ok(syncedBeforeTransmit?.includes(callDir), "the call directory must be fsynced inside the fence");
     assert.ok(syncedBeforeTransmit?.includes(fs.realpathSync(join(store.dir, "txids"))), "the txid claim must be durable too");
   });
+
+  it("F-87 an initializer that fails allocation uses a journal another process published", () => {
+    const config = tempConfig(), file = join(config.auditDir, "2026-11-15.jsonl");
+    fs.mkdirSync(config.auditDir, { mode: 0o700 });
+    const dir = `${config.auditDir}.budget`, path = join(dir, "payment-evidence.bin");
+    const slots = Math.floor(config.auditMaxBytes! / AUDIT_SLOT_BYTES);
+    const real = fs.writeSync;
+    let raced = false;
+    const fault = mock.method(fs, "writeSync", ((fd: number, ...args: unknown[]) => {
+      if (fs.realpathSync(`/proc/self/fd/${fd}`).includes(".tmp-reservation-")) {
+        if (!raced) {
+          raced = true;
+          // A concurrent initializer finishes and publishes first.
+          const head = Buffer.alloc(JOURNAL_HEADER_BYTES);
+          head.write(`ZSHIELD_PAYMENT_AUDIT_V1 ${slots}\n`, "ascii");
+          fs.writeFileSync(path, Buffer.concat([head, Buffer.alloc(slots * JOURNAL_SLOT_BYTES)]), { mode: 0o600 });
+        }
+        throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+      }
+      return (real as (...a: unknown[]) => number)(fd, ...args);
+    }) as typeof fs.writeSync);
+    try {
+      assert.equal(ensurePaymentReservation(file, config, true), path);
+    } finally { fault.mock.restore(); }
+    assert.equal(fs.readdirSync(dir).filter((n) => n.startsWith(".tmp-")).length, 0);
+  });
+
+  it("F-87 first initialization holds an exclusive initializer lock while it allocates", () => {
+    const config = tempConfig(), file = join(config.auditDir, "2026-11-15.jsonl");
+    fs.mkdirSync(config.auditDir, { mode: 0o700 });
+    const lockFile = join(`${config.auditDir}.budget`, "payment-evidence.init");
+    const real = fs.writeSync;
+    let probed: number | null | undefined;
+    const probe = mock.method(fs, "writeSync", ((fd: number, ...args: unknown[]) => {
+      if (probed === undefined && fs.realpathSync(`/proc/self/fd/${fd}`).includes(".tmp-reservation-")) {
+        // Another process trying the initializer lock now must not get it.
+        probed = spawnSync("perl", ["-e", "use Fcntl qw(:flock); open(my $f, '<', $ARGV[0]) or exit 3; exit(flock($f, LOCK_EX|LOCK_NB) ? 0 : 1)", lockFile]).status;
+      }
+      return (real as (...a: unknown[]) => number)(fd, ...args);
+    }) as typeof fs.writeSync);
+    try { ensurePaymentReservation(file, config, true); } finally { probe.mock.restore(); }
+    assert.equal(probed, 1, "the initializer lock must be held during allocation");
+    // Released afterwards.
+    assert.equal(spawnSync("perl", ["-e", "use Fcntl qw(:flock); open(my $f, '<', $ARGV[0]) or exit 3; exit(flock($f, LOCK_EX|LOCK_NB) ? 0 : 1)", lockFile]).status, 0);
+  });
 });
