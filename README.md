@@ -455,17 +455,17 @@ A send is staged as in the other live modes:
 4. `zcash-devtool pczt extract` gives the signed transaction's txid, with nothing broadcast. Signing cannot change the txid (ZIP 244).
 5. zshield records the txid durably, then `pczt send` broadcasts that same signed PCZT, and its answer must name the recorded txid.
 
-When the co-signer is offline, the signing round waits two minutes and the call ends as not sent: "the Ironclad co-signer did not answer within 120 s (is its daemon running?). Nothing was sent." Nothing is extracted or broadcast, and the next payment can go ahead once the co-signer is back.
+When the co-signer is offline, the signing round waits two minutes and the call ends as not sent: "the Ironclad co-signer did not answer within 120 s (is its daemon running?). Nothing was sent." Nothing is extracted or broadcast, and the next payment can go ahead once the co-signer is back. A co-signer that crashes is reported as killed by its signal, and also ends as not sent.
 
 A failure before the broadcast means "not sent". A failure during it is `SEND_UNCONFIRMED` with the staged txid, and the wallet takes no new payment until recovery or `zcash_payment_status` sees that txid mined. The signed PCZT lives in a private temporary folder that is removed when the call ends, so a staged payment cannot be resumed after a crash. It stays unresolved until the wallet shows its txid.
 
-Every caller value is passed as its own argument to a program started without a shell. Three limits to know:
+Every caller value is passed as its own argument to a program started without a shell, in `--name=value` form, so a memo such as `-5% refund` is never read as a flag. Startup refuses a session folder that any user can write to. Three limits to know:
 
-- The memo is passed on the `pczt create` command line, so other users of the same machine can read it in `ps` while the build runs. Run zshield under its own user on a machine you don't share.
+- The memo is passed on the `pczt create` command line, so other users of the same machine can read it in `ps` while the build runs. Run zshield under its own user on a machine you don't share. Before any mainnet use, the memo should reach devtool through stdin or a 0600 file instead.
 - The co-signer reports each payment under its single-receiver address, so zshield does not compare the recipient as a string. The co-signer's allow-list judges the recipient, and zshield checks the amount.
 - zcash-devtool prints memos in a debug format, so history entries from this mode carry no outgoing notes, and a staged call is settled by its txid alone.
 
-It needs zcash-devtool from October 2026 or later (Ironwood), with the group wallet imported from its viewing key (exactly one account, a `uviewtest1` key), and an `ironclad-cosigner` build that has `inspect --json`. Every child runs with `TERM=dumb`, because zcash-devtool fails with "Resource temporarily unavailable" when it finds no terminal, and an MCP client gives it none.
+It needs zcash-devtool from October 2026 or later (Ironwood), with the group wallet imported from its viewing key (exactly one account, a `uviewtest1` key), and an `ironclad-cosigner` build that has `inspect --json`. Until [ironclad#2](https://github.com/adilhusain01/ironclad/pull/2) merges, build the co-signer at commit `65db7f3`: `git clone https://github.com/adilhusain01/ironclad && cd ironclad && git checkout 65db7f3 && cd cosigner && cargo build --release`. Every child runs with `TERM=dumb`, because zcash-devtool fails with "Resource temporarily unavailable" when it finds no terminal, and an MCP client gives it none.
 
 ```bash
 # the owner's co-signer, share 2, watching the session folder (see the Ironclad README)
