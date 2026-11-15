@@ -112,8 +112,12 @@ export async function resumeOriginal(
       const audit = writeAuditRow(config, { ...base, status: "unknown", note: "Resuming only the originally signed transaction by exact txid; no replacement transaction authorized." });
       if (!audit.durable) throw new ResumeAuditError("Audit evidence could not be persisted; no resume attempted.");
       attempted = true;
-      // Authorize only once the backend lock is held and the fence checks pass (F-53/F-73).
+      // Authorize only once the backend lock is held and the fence checks pass (F-53, F-73).
       if (!hasTransmitAuthorization(record)) store.authorizeTransmit(record.callId, new Date().toISOString());
+      // A visible record is not a durable one: an earlier attempt may have published its
+      // authorization, staging or txid claim and then failed the directory fsync. Make
+      // every record this transmit relies on durable now, or transmit nothing (F-37).
+      store.syncCall(record.callId);
     }, timeoutMs: RESUME_TIMEOUT_MS });
     return { attempted, row: { ...base, status: "broadcast", confidence: "high", note: "Resumed the original signed transaction by exact txid. No replacement was built." } };
   } catch (e) {
