@@ -97,4 +97,48 @@ describe("V12 run 15 regressions", () => {
     assert.equal(sent.count, 0);
     assert.equal(ledgerTotal(config, chain), 0n);
   });
+
+  it("F-37 explicit resume makes a visible transmit authorization durable before transmitting", async () => {
+    const config = liveConfig();
+    const input = { amount_zec: "0.0001", recipient: R, idempotency_key: "orig", memo: "m" };
+    let entry: TxSummary = { txid: TX, status: "calculated", kind: "sent", valueZats: 10000n, verified: true,
+      outgoing: [{ recipient: R, valueZats: 10000n, memo: input.memo }] };
+    const synced: string[] = [];
+    let tracking = false;
+    let syncedBeforeTransmit: string[] | undefined;
+    const chain = {
+      mode: "live", stagesBeforeBroadcast: true, tracksTransmitAuthorization: true,
+      getViewingKey: async () => VF, getTransaction: async () => [entry], getHistory: async () => [entry],
+      checkHealth: async () => ({ walletHeight: 1000, chainTip: 1000, spendableZats: 100000n }),
+      syncWallet: async () => ({ complete: true, elapsedMs: 0 }), walletHeight: async () => 1000,
+      pay: async () => { assert.fail("never build a new transaction"); },
+      resumeSigned: async (_txid: string, opts: { fence: () => void }) => {
+        tracking = true;
+        opts.fence();
+        syncedBeforeTransmit = [...synced];
+        entry = { ...entry, status: "confirmed", blockHeight: 999 };
+      },
+    } as unknown as ChainAdapter;
+    const store = storeFor(config, chain);
+    const hash = paymentParamsHash(input);
+    store.writeIntent({ call_id: "orig-call", ts: now(), amount_zats: "10000", allowlist_hit: true, cap_zec: "0.1", ...input,
+      view_key_fingerprint: fingerprintViewKey(VF, config.viewKeyFingerprintSalt), two_step: true, transmit_tracked: true, params_sha256: hash } as never);
+    store.bindKey(input.idempotency_key, "orig-call", hash);
+    store.stageTxid("orig-call", TX, now());
+    // The first attempt published its authorization, then its directory fsync failed: the
+    // event is visible but a power loss could still erase it.
+    store.authorizeTransmit("orig-call", now());
+    const real = fs.fsyncSync;
+    const spy = mock.method(fs, "fsyncSync", (fd: number) => {
+      if (tracking && fs.fstatSync(fd).isDirectory()) synced.push(fs.realpathSync(`/proc/self/fd/${fd}`));
+      return real(fd);
+    });
+    try {
+      const out = await executePay({ ...input, resume: true }, { config, chain });
+      assert.equal(JSON.parse(out.text).transmission_attempted, true, out.text);
+    } finally { spy.mock.restore(); }
+    const callDir = fs.realpathSync(join(store.dir, "calls", "orig-call"));
+    assert.ok(syncedBeforeTransmit?.includes(callDir), "the call directory must be fsynced inside the fence");
+    assert.ok(syncedBeforeTransmit?.includes(fs.realpathSync(join(store.dir, "txids"))), "the txid claim must be durable too");
+  });
 });

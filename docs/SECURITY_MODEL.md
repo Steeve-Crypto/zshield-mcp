@@ -205,7 +205,7 @@ Tests in `tests/invariants/` are part of `npm test` and fail on 0a27b20. Notes i
 | Finding | Fix |
 |---------|-----|
 | F-14 A frozen or stalled holder lost its lock lease, so a second process sent again | The lease, heartbeat and stale-lock breaking are gone. One OS lock (`send.flock`, held by a `perl` child tied to the paying process) is held for the whole send and released only when the send ends or the process dies. A live holder is never replaced by a timer |
-| F-37 A key directory fsync failure consumed the key | A key file that cannot be made durable is unlinked, so the key stays free for a retry |
+| F-37 A key directory fsync failure consumed the key | A key file that cannot be made durable stays published (unlinking it could race another writer), the call durably records `not_sent` with `key_binding_failed`, nothing is sent, and the same key and parameters can be retried. An explicit resume fsyncs every directory the transmit relies on (events, txid claims, key, pending marker) inside its fence, so a record an earlier attempt published but could not fsync is made durable before anything is transmitted |
 | F-38 Reads ran between stage and transmit | Reads and status take the wallet lock without waiting and return `BUSY` while a send holds it. The viewing key is read under the lock |
 | F-39 Status took an idempotency key of any length | Over 128 characters is `INVALID_LOOKUP`, before any hashing |
 | F-40 A short write could interleave audit rows | One write per row, never finished with a second call. A failed write removes its own partial bytes, and a row after a partial one starts on a new line |
