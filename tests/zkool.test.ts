@@ -35,9 +35,11 @@ import { tempConfig, testUnifiedAddress, withEnv } from "./helpers.ts";
 
 // Real testnet unified addresses: zkool reports each planned output under one receiver,
 // and ZShield decodes both sides to check that the requested address is the one paid.
-const TO = testUnifiedAddress(0xa1), CHANGE = testUnifiedAddress(0xc4), STRANGER = testUnifiedAddress(0x66);
+const TO = testUnifiedAddress(0xa1), STRANGER = testUnifiedAddress(0x66);
 const ADDR = TO.ua;
-const OWN = testUnifiedAddress(0x0f).ua;
+// Change goes to the wallet's own address, which zkool reports with its receivers.
+const OWN_ADDRESSES = testUnifiedAddress(0x0f);
+const OWN = OWN_ADDRESSES.ua;
 const UFVK = "uviewtest1" + "q".repeat(80);
 const TXID = "c0".repeat(32);
 const PCZT = "ab".repeat(40);
@@ -64,7 +66,7 @@ function fakeZkool(opts: FakeOptions = {}) {
     calls.push({ op, query, variables });
     switch (op) {
       case "addressByAccount":
-        return { addressByAccount: { ua: opts.ownAddress ?? OWN } };
+        return { addressByAccount: opts.ownAddress ? { ua: opts.ownAddress } : { ua: OWN, orchard: OWN_ADDRESSES.orchardOnly, sapling: OWN_ADDRESSES.sapling, transparent: null } };
       case "unifiedFullViewingKey":
         return { unifiedFullViewingKey: UFVK };
       case "currentHeight":
@@ -81,7 +83,7 @@ function fakeZkool(opts: FakeOptions = {}) {
         const asked = (variables.pczt === PCZT && (calls.find((c) => c.op === "prepareSend")?.variables.payment as { recipients: { amount: string }[] }).recipients[0].amount) || "0";
         if (opts.pcztTxid === "old") throw new Error('zkool_graphql: Unknown field "txid" on type "UnsignedTx"');
         const txid = "pcztTxid" in opts ? opts.pcztTxid : variables.pczt === PCZT ? TXID : "ff".repeat(32);
-        return { decodePczt: { fee: "0.00010000", txid, recipients: [{ value: opts.plannedValue ?? asked, address: opts.plannedAddress ?? TO.orchardOnly }, { value: "0.50000000", address: CHANGE.orchardOnly }] } };
+        return { decodePczt: { fee: "0.00010000", txid, recipients: [{ value: opts.plannedValue ?? asked, address: opts.plannedAddress ?? TO.orchardOnly }, { value: "0.50000000", address: OWN_ADDRESSES.orchardOnly }] } };
       }
       case "signTx":
         return { signTx: SIGNED };

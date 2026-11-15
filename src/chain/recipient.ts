@@ -263,25 +263,36 @@ function paysRequested(output: DecodedAddress, requested: DecodedAddress): boole
 
 /**
  * Fail closed unless the planned outputs pay the requested address exactly the requested
- * amount: the outputs whose receiver belongs to the requested address must add up to
- * `amountZats`, and none may be missing. A recipient or output address that cannot be
- * decoded is a mismatch. Other outputs (change) are not checked here.
+ * amount and nobody else: the outputs whose receiver belongs to the requested address
+ * must add up to `amountZats`, and every other output with value must pay a receiver of
+ * one of the wallet's own addresses (`own`, as the wallet reported them). An output is
+ * never presumed to be change (F-88). A recipient or output address that cannot be
+ * decoded is a mismatch; an own address that cannot be decoded proves nothing.
  */
-export function assertPlannedRecipient(outputs: PlannedOutput[], recipient: string, amountZats: bigint): void {
+export function assertPlannedRecipient(outputs: PlannedOutput[], recipient: string, amountZats: bigint, own: string[]): void {
   let requested: DecodedAddress;
   try { requested = decodeAddress(recipient); }
   catch (e) { throw new RecipientMismatchError(`The requested recipient cannot be decoded to check the planned transaction (${(e as Error).message}). Nothing was signed or sent.`); }
+  const mine: DecodedAddress[] = [];
+  for (const address of own) {
+    try { mine.push(decodeAddress(address)); } catch { /* not provably the wallet's: matches nothing */ }
+  }
   let paid = 0n;
+  let stranger = false;
   for (const o of outputs) {
     if (o.valueZats === 0n) continue; // Orchard padding actions carry no value.
     let decoded: DecodedAddress;
     try { decoded = decodeAddress(o.address); }
     catch { throw new RecipientMismatchError("The planned transaction has an output whose address cannot be checked. Nothing was signed or sent."); }
     if (paysRequested(decoded, requested)) paid += o.valueZats;
+    else if (!mine.some((m) => paysRequested(decoded, m))) stranger = true;
   }
   if (paid !== amountZats) {
     throw new RecipientMismatchError(paid === 0n
       ? "The planned transaction does not pay the requested recipient. Nothing was signed or sent."
       : `The planned transaction pays the requested recipient ${paid} zatoshis, not the ${amountZats} requested. Nothing was signed or sent.`);
+  }
+  if (stranger) {
+    throw new RecipientMismatchError("The planned transaction pays an address that is neither the requested recipient nor one this wallet reported as its own. Nothing was signed or sent.");
   }
 }

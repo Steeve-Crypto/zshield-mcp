@@ -95,15 +95,26 @@ export class ZkoolChainAdapter implements ChainAdapter {
 
   /** The account's unified address, checked to be testnet: a mainnet database is refused. */
   async getReceiveAddress(): Promise<string> {
-    const data = await this.call<{ addressByAccount?: { ua?: string | null } }>(
-      "query($account: Int!) { addressByAccount(idAccount: $account) { ua } }",
+    return (await this.ownAddresses())[0];
+  }
+
+  /**
+   * The account's own addresses as zkool reports them: the unified address first, then its
+   * transparent, Sapling and Orchard forms. A planned output to any of these is the
+   * wallet's own; zkool reports no other own address (an internal change address is not
+   * among them), so change anywhere else is refused (F-88).
+   */
+  private async ownAddresses(): Promise<string[]> {
+    const data = await this.call<{ addressByAccount?: { ua?: string | null; transparent?: string | null; sapling?: string | null; orchard?: string | null } }>(
+      "query($account: Int!) { addressByAccount(idAccount: $account) { ua transparent sapling orchard } }",
       { account: this.account },
       readTimeoutMs()
     );
-    const ua = data?.addressByAccount?.ua;
+    const a = data?.addressByAccount;
+    const ua = a?.ua;
     if (typeof ua !== "string" || ua === "") throw new Error("zkool_graphql returned no address for the account");
     assertTestnetAddress(ua);
-    return ua;
+    return [ua, ...[a?.transparent, a?.sapling, a?.orchard].filter((x): x is string => typeof x === "string" && x !== "")];
   }
 
   async getViewingKey(): Promise<string> {
@@ -237,7 +248,7 @@ export class ZkoolChainAdapter implements ChainAdapter {
       throw new Error(`Memo refused: longer than ${MAX_MEMO_BYTES} bytes`);
     }
     // The account must be a testnet wallet before anything is built from it.
-    await this.getReceiveAddress();
+    const own = await this.ownAddresses();
     const payment = {
       recipients: [{ address: req.recipient, amount: formatZec(req.amountZats), ...(req.memo ? { memo: req.memo } : {}) }],
       confirmations: 1,
@@ -266,14 +277,15 @@ export class ZkoolChainAdapter implements ChainAdapter {
     const feeZats = zecToZats(decoded?.decodePczt?.fee, "fee");
     if (feeZats <= 0n) throw new Error("zkool_graphql planned a transaction with no fee");
     // The allow-list binds to what zkool built, not only to what it was asked: the outputs
-    // paying the requested address must carry exactly the requested amount. zkool lists
-    // each output under one receiver (an Orchard-only unified address, a Sapling or a
-    // transparent address), so both sides are decoded to receivers and compared.
+    // paying the requested address must carry exactly the requested amount, and every other
+    // output must pay the wallet's own address as reported above. zkool lists each output
+    // under one receiver (an Orchard-only unified address, a Sapling or a transparent
+    // address), so every side is decoded to receivers and compared.
     const outputs = (decoded?.decodePczt?.recipients ?? []).map((r) => ({
       address: typeof r.address === "string" ? r.address : "",
       valueZats: zecToZats(r.value, "output value"),
     }));
-    assertPlannedRecipient(outputs, req.recipient, req.amountZats);
+    assertPlannedRecipient(outputs, req.recipient, req.amountZats, own);
     const signed = await this.call<{ signTx?: string }>(
       "query($account: Int!, $pczt: String!) { signTx(idAccount: $account, pczt: $pczt) }",
       { account: this.account, pczt },
