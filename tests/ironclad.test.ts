@@ -48,6 +48,8 @@ import { tempConfig, withEnv } from "./helpers.ts";
 //     co-signer that did not answer; it still ends as not sent.
 // 12. A recipient, amount or memo that starts with "-" reaches devtool as a value, never
 //     as a flag (`--memo=-5% refund`).
+// 13. Startup refuses a session folder that any user can write to, since signing rounds
+//     pass through it.
 
 const DEVTOOL = "/opt/ironclad/zcash-devtool";
 const COSIGNER = "/opt/ironclad/ironclad-cosigner";
@@ -513,4 +515,9 @@ describe("CHAIN_MODE=ironclad startup", () => {
     assert.throws(() => startupChecks(config(share.ironclad), "linux"));
   });
 
+  it("refuses a session folder any user can write to", { skip: process.platform === "win32" }, () => {
+    const d = dirs();
+    chmodSync(d.ironclad.sessionDir, 0o777);
+    assert.throws(() => startupChecks(config(d.ironclad), "linux"), /IRONCLAD_SESSION_DIR can be written by any user/);
+  });
 });
