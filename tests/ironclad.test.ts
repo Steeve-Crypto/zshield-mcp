@@ -50,6 +50,11 @@ import { tempConfig, withEnv } from "./helpers.ts";
 //     as a flag (`--memo=-5% refund`).
 // 13. Startup refuses a session folder that any user can write to, since signing rounds
 //     pass through it.
+// 14. The fee is checked before the co-signer is asked: req.checkFee gets inspect's fee
+//     and reserves nothing. If it refuses, nothing is signed or sent. The fee is still
+//     reserved by req.authorizeFee after signing, as before. Through zcash_pay, a fee that
+//     the total spending allowance cannot cover ends as not sent with no co-signer round
+//     and no fee charged.
 
 const DEVTOOL = "/opt/ironclad/zcash-devtool";
 const COSIGNER = "/opt/ironclad/ironclad-cosigner";
@@ -285,6 +290,22 @@ describe("ironclad adapter: staged send", () => {
     }
   });
 
+  it("checks the fee before the co-signer and reserves it only after signing", async () => {
+    const fake = fakeTools({ fee: 20000 });
+    const order: string[] = [];
+    await adapter(fake).pay({
+      amountZats: 5000n,
+      recipient: ADDR,
+      checkFee: (fee) => order.push(`check ${fee} after ${fake.steps().at(-1)}`),
+      authorizeFee: (fee) => order.push(`reserve ${fee} after ${fake.steps().at(-1)}`),
+    });
+    assert.deepEqual(order, ["check 20000 after cosigner inspect", "reserve 20000 after pczt extract"]);
+
+    const refused = fakeTools();
+    await assert.rejects(adapter(refused).pay({ amountZats: 5000n, recipient: ADDR, checkFee: () => { throw new Error("fee does not fit"); } }), /fee does not fit/);
+    assert.ok(!refused.steps().includes("cosigner coordinate") && !refused.steps().includes("pczt send"));
+  });
+
   it("broadcasts nothing when the txid cannot be recorded or the transmit fence refuses", async () => {
     const fake = fakeTools();
     await assert.rejects(adapter(fake).pay({ amountZats: 5000n, recipient: ADDR, stage: () => { throw new Error("disk full"); } }), /disk full/);
@@ -464,6 +485,19 @@ describe("zcash_pay through the ironclad adapter", () => {
     const back = adapter(fakeTools(), offline.state);
     const again = await withEnv("HEALTH_SYNC_TIMEOUT_MS", "1000", () => executePay({ ...input, idempotency_key: "ic-back" }, { config: offline.config, chain: back }));
     assert.equal(again.audit.status, "ok", again.text);
+  });
+
+  it("refuses a fee the spending allowance cannot cover before the co-signer signs, charging no fee", async () => {
+    // 0.0005 TAZ fits a 0.0006 allowance; with the 0.00015 fee it does not.
+    const s = setup();
+    s.config.totalSpendingCapZec = "0.0006";
+    const r = await withEnv("HEALTH_SYNC_TIMEOUT_MS", "1000", () => executePay(input, { config: s.config, chain: s.chain }));
+    assert.notEqual(r.audit.status, "ok", r.text);
+    assert.notEqual(r.audit.status, "unknown", r.text);
+    assert.ok(!s.fake.steps().includes("cosigner coordinate"), s.fake.steps().join(", "));
+    assert.ok(!s.fake.steps().includes("pczt send"));
+    const ledger = JSON.parse(readFileSync(join(s.store.dir, "spending-budget", "ledger.json"), "utf8"));
+    assert.equal(ledger.total, "50000", "only the principal is charged");
   });
 
   it("leaves a failed broadcast unresolved, then recovery confirms it by txid once mined", async () => {

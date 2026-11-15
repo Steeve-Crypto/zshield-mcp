@@ -229,6 +229,11 @@ export interface PaymentRequest {
   beforeTransmit?: () => void;
   /** Re-check policy after the backend wallet lock is held, immediately before transmit. */
   afterLock?: () => void;
+  /**
+   * Check, reserving nothing, that the calculated fee fits the spending allowance. Called
+   * before a co-signer is asked to sign; throws to refuse, and then nothing is signed.
+   */
+  checkFee?: (feeZats: bigint) => void;
   /** Reserve the exact calculated fee before any transmission. */
   authorizeFee?: (feeZats: bigint) => void;
 }

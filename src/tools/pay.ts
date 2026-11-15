@@ -1,5 +1,5 @@
 import { assertApproval } from "../payments/approval.js";
-import { reserveSpending, reserveFee } from "../payments/budget.js";
+import { checkFee, reserveSpending, reserveFee } from "../payments/budget.js";
 import { assertPaymentsEnabled } from "../payments/pause.js";
 import { resumeOriginal, RESUME_TIMEOUT_MS } from "../payments/resume.js";
 import { eventFor, recordReconcile } from "../payments/recovery.js";
@@ -946,6 +946,10 @@ async function runPay(
         try {
           let calculatedFee: bigint | undefined;
           const receipt = await chain.pay({
+            checkFee: (fee) => {
+              lock!.assertHeld();
+              checkFee(config, store, lock!, fee, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
+            },
             authorizeFee: (fee) => {
               lock!.assertHeld();
               store.appendEvent({ ts: now(), call_id: callId, state: "pending", calculated_fee_zats: fee.toString(), by: "send" });
