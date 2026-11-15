@@ -11,7 +11,7 @@ import { reserveAudit, AUDIT_SLOT_BYTES } from "../src/audit/budget.ts";
 import { writeAuditRow, freezeAuditWrites, unfreezeAuditWrites } from "../src/audit/log.ts";
 import { assertCoherentRecordFilesystem } from "../src/startup.ts";
 import { reconcile, eventFor, recordReconcile } from "../src/payments/recovery.ts";
-import { reserveSpending } from "../src/payments/budget.ts";
+import { authorizeCharged, checkSpending, spentZats } from "../src/payments/budget.ts";
 import type { CallRecord } from "../src/payments/store.ts";
 import type { ChainAdapter } from "../src/chain/types.ts";
 import type { Config } from "../src/types.ts";
@@ -169,18 +169,25 @@ describe("V12 run 12 regressions", () => {
     await Promise.all([recovery, pay]);
   });
 
-  it("F-72 spending reservation dedupes by identity not callId", () => {
+  it("F-72 spending charges dedupe by identity not callId", () => {
     const dir = mkdtempSync(join(tmpdir(), "v12r12-spend-"));
     const store = new PaymentStore(dir);
     store.ensureLayout();
     const lock = { assertHeld() {}, async release() {} };
     const config = { totalSpendingCapZec: "1" } as Config;
     const params = "a".repeat(64);
-    reserveSpending(config, store, lock as any, "call-1", 10_000n, params, "key-1");
+    // A fresh store's first spending check creates the empty ledger before any intent.
+    checkSpending(config, store, lock as any, 10_000n, 1_000n, params, "key-1");
+    const intent = (call_id: string) => {
+      store.writeIntent({ call_id, ts: new Date().toISOString(), amount_zec: "0.0001", amount_zats: "10000", recipient: "utest1" + "r".repeat(100),
+        allowlist_hit: true, cap_zec: "0.1", view_key_fingerprint: null, idempotency_key: "key-1", params_sha256: params });
+      return store.readCall(call_id)!;
+    };
+    const first = intent("call-1");
+    authorizeCharged(config, store, lock as any, first, 10_000n, 1_000n);
     // Same identity, different call id: must not charge again.
-    reserveSpending(config, store, lock as any, "call-2", 10_000n, params, "key-1");
-    const ledger = JSON.parse(readFileSync(join(dir, "spending-budget", "ledger.json"), "utf8"));
-    assert.equal(ledger.total, "10000");
+    authorizeCharged(config, store, lock as any, intent("call-2"), 10_000n, 1_000n);
+    assert.equal(spentZats(store), 11_000n);
   });
 
   it("F-73 allow-list is re-loaded by name for transmit fences", async () => {

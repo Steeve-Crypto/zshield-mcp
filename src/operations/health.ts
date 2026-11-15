@@ -7,6 +7,7 @@ import { AUDIT_SLOT_BYTES, DEFAULT_AUDIT_MAX_BYTES } from "../audit/budget.js";
 import { parseZecToZats } from "../policy/amount.js";
 import type { Config } from "../types.js";
 import type { PaymentStore } from "../payments/store.js";
+import { spentZats } from "../payments/budget.js";
 
 /** Local operator metrics. Never exports recipients, memos, keys, paths or credentials. */
 export function operationalHealth(config: Config, store: PaymentStore) {
@@ -18,11 +19,10 @@ export function operationalHealth(config: Config, store: PaymentStore) {
  const controls=!!config.totalSpendingCapZec && !!config.approvalPublicKeys?.length;
  if(!controls) alerts.push("FINANCIAL_CONTROLS_MISSING");
  try {
-  const raw=readPrivate(join(store.dir,"spending-budget/ledger.json"),4096);
-  if(raw) {
-   const ledger=JSON.parse(raw);
-   if(ledger.version!==2 || typeof ledger.total!=="string" || !/^(0|[1-9][0-9]{0,30})$/.test(ledger.total))throw new Error("bad ledger");
-   total=ledger.total;
+  // The same count the allowance enforces: the ledger plus every charged transmit authorization.
+  const spent=spentZats(store);
+  if(spent!==undefined) {
+   total=spent.toString();
    if(!config.totalSpendingCapZec)alerts.push("SPENDING_CONFIGURATION_MISSING");
    else if(BigInt(total!)*100n>=parseZecToZats(config.totalSpendingCapZec)*80n)alerts.push("SPENDING_ALLOWANCE_LOW");
   }
