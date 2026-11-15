@@ -318,7 +318,8 @@ export class IroncladChainAdapter implements ChainAdapter {
       req.fence?.();
       await this.run(
         this.opts.devtool,
-        ["pczt", "-w", this.opts.walletDir, "create", "--address", req.recipient, "--value", req.amountZats.toString(), ...(req.memo ? ["--memo", req.memo] : []), "--output", created],
+        // name=value, so a value that starts with "-" is never read as a flag.
+        ["pczt", "-w", this.opts.walletDir, "create", `--address=${req.recipient}`, `--value=${req.amountZats}`, ...(req.memo ? [`--memo=${req.memo}`] : []), "--output", created],
         STAGE_TIMEOUT_MS
       );
       const provenBytes = await this.run(this.opts.devtool, ["pczt", "-w", this.opts.walletDir, "prove"], STAGE_TIMEOUT_MS, { input: await readFile(created) });
