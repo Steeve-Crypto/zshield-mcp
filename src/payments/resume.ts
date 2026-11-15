@@ -1,5 +1,5 @@
 import { assertApproval } from "./approval.js";
-import { checkSpending, paymentIdentity, reservePayment } from "./budget.js";
+import { authorizeCharged, checkSpending, paymentIdentity } from "./budget.js";
 import { assertPaymentsEnabled } from "./pause.js";
 import { fingerprintViewKey, writeAuditRow } from "../audit/log.js";
 import { assertFingerprintSalt } from "../config.js";
@@ -48,6 +48,11 @@ export async function resumeOriginal(
     }
     // The same proof that permits a replacement must forbid later revival.
     if (!mayHaveBroadcast(record)) return unknown("This call has no possible broadcast and cannot be revived; no transmission attempted.");
+    const current = (): CallRecord => {
+      const now = store.readCall(record.callId);
+      if (!now || now.intent?.amount_zats !== intent.amount_zats) throw new ResumeAuditError("The original call is no longer eligible for transmission.");
+      return now;
+    };
     const assertNoOtherSend = () => {
       lock.assertHeld();
       const current = store.readCall(record.callId);
@@ -110,21 +115,23 @@ export async function resumeOriginal(
       assertApproval(config, store, intent.idempotency_key!, paymentParamsHash(intent), fingerprint);
       assertRecipientAllowed(intent.recipient, loadAllowlist(config.allowlistPath));
       checkSpending(config, store, lock, amount, originalFee ?? 0n, identity.paramsHash, identity.key);
-      // Financial evidence is charged only here, after every gate of THIS attempt passed and
-      // with the backend lock held, immediately before the network mutation. A refusal at any
-      // earlier point consumes no protected audit capacity and can be repeated safely (F-59).
-      const audit = writeAuditRow(config, { ...base, status: "unknown", note: "Resuming only the originally signed transaction by exact txid; no replacement transaction authorized." });
-      if (!audit.durable) throw new ResumeAuditError("Audit evidence could not be persisted; no resume attempted.");
-      // The single spending charge point, after the final gates, the backend lock and the
-      // audit write, in the same critical section that authorizes transmit (F-72, F-89).
-      reservePayment(config, store, lock, record.callId, amount, originalFee, identity.paramsHash, identity.key);
-      attempted = true;
-      // Authorize only once the backend lock is held and the fence checks pass (F-53, F-73).
-      if (!hasTransmitAuthorization(record)) store.authorizeTransmit(record.callId, new Date().toISOString());
+      // The single charge point, after the final gates with the backend lock held: one
+      // durable event is both the transmit authorization and the principal and fee
+      // charge. A payment already counted (by its first attempt or the historical
+      // migration) and already authorized writes nothing and is never charged twice
+      // (F-72, F-89). A refusal here writes nothing at all (F-59).
+      authorizeCharged(config, store, lock, current(), amount, originalFee, true);
       // A visible record is not a durable one: an earlier attempt may have published its
       // authorization, staging or txid claim and then failed the directory fsync. Make
       // every record this transmit relies on durable now, or transmit nothing (F-37).
       store.syncCall(record.callId);
+      // Protected financial evidence only once the authorization is durable, after every
+      // gate of THIS attempt passed, immediately before the network mutation. Any failure
+      // before this point leaves the protected payment journal untouched (F-59).
+      const audit = writeAuditRow(config, { ...base, status: "unknown", note: "Resuming only the originally signed transaction by exact txid; no replacement transaction authorized." });
+      if (!audit.durable) throw new ResumeAuditError("Audit evidence could not be persisted; no resume attempted.");
+      lock.assertHeld();
+      attempted = true;
     }, timeoutMs: RESUME_TIMEOUT_MS });
     return { attempted, row: { ...base, status: "broadcast", confidence: "high", note: "Resumed the original signed transaction by exact txid. No replacement was built." } };
   } catch (e) {

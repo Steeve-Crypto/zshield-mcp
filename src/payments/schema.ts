@@ -19,7 +19,7 @@ const schemas = {
     ts, call_id:id, state:z.enum(["pending","unknown","not_sent","expired","sent","failed","mined"]),
     txid:id.optional(), staged_txid:id.optional(), block_height:height.optional(), code:text.optional(), error:text.optional(),
     possible_sends:z.array(candidate).max(128).optional(), note:text.optional(), transmit_authorized:z.boolean().optional(),
-    calculated_fee_zats:z.string().regex(/^[0-9]{1,31}$/).optional(), by:z.enum(["send","recovery","status","import"]),
+    calculated_fee_zats:z.string().regex(/^[0-9]{1,31}$/).optional(), charged_principal_zats:z.string().regex(/^(0|[1-9][0-9]{0,30})$/).optional(), charged_fee_zats:z.string().regex(/^(0|[1-9][0-9]{0,30})$/).optional(), by:z.enum(["send","recovery","status","import"]),
   }),
   binding:z.strictObject({key:id,call_id:id,params_sha256:z.string().min(1).max(128),ts}),
   index:z.strictObject({call_id:id}),
