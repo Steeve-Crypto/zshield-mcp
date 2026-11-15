@@ -32,6 +32,7 @@ import {
 } from "../payments/store.js";
 import { ChainUnreachableError, SendOutcomeUnknownError } from "../chain/outcome.js";
 import { WalletBusyError } from "../chain/walletlock.js";
+import { RecipientMismatchError } from "../chain/recipient.js";
 import type { AuditEntry, ChainHealth, Config, MatchConfidence, PayStatus, PossibleSend, TxSummary } from "../types.js";
 
 /**
@@ -1052,9 +1053,9 @@ async function runPay(
             const current = store.readCall(callId);
             const staged = current?.stagedTxid;
             const authorized = current?.events.some((ev) => ev.transmit_authorized);
-            // A policy gate inside the send (fee allowance, approval, allow-list) keeps its
-            // own code; only the outcome below decides not_sent or unknown.
-            const gate = e instanceof PolicyError ? e.code as PayCode : "CHAIN_ERROR";
+            // A policy gate inside the send (fee allowance, approval, allow-list, recipient
+            // check) keeps its own code; only the outcome below decides not_sent or unknown.
+            const gate = e instanceof PolicyError ? e.code as PayCode : e instanceof RecipientMismatchError ? e.code : "CHAIN_ERROR";
             fail("error", gate, redactInput(e instanceof Error ? e.message : String(e), input));
             // A post-authorize chain error may have raced a broadcast; never settle as not_sent.
             recordSafely(store, { ts: now(), call_id: callId, state: (staged && authorized) ? "unknown" : "not_sent", code, error, possible_sends: staged ? [{ txid: staged, confidence: "high", matched: ["txid"], status: "signed" }] : undefined, by: "send" }, warnings);
