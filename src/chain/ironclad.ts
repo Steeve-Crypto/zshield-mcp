@@ -14,7 +14,10 @@ import { zecToZats } from "./zkool.js";
 import { healthSyncTimeoutMs, healthTimeoutMs, readTimeoutMs, SEND_TIMEOUT_MS, STAGE_TIMEOUT_MS } from "./live.js";
 
 export interface ToolResult {
+  /** null when the program did not exit on its own: stopped at the timeout, or killed by `signal`. */
   status: number | null;
+  /** The signal that killed the program, when that was not the runner's own timeout. */
+  signal?: string;
   stdout: Buffer;
   stderr: string;
 }
@@ -47,7 +50,11 @@ export function createToolRunner(): ToolRunner {
       const child = spawn(cmd, args, { cwd: opts.cwd, env: { ...process.env, TERM: "dumb" }, stdio: ["pipe", "pipe", "pipe"] });
       const out: Buffer[] = [];
       let err = "";
-      const timer = setTimeout(() => child.kill("SIGKILL"), opts.timeoutMs);
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGKILL");
+      }, opts.timeoutMs);
       child.stdout.on("data", (d: Buffer) => out.push(d));
       child.stderr.on("data", (d: Buffer) => {
         err = (err + d.toString("utf8")).slice(-STDERR_KEEP);
@@ -58,7 +65,8 @@ export function createToolRunner(): ToolRunner {
       });
       child.on("close", (status, signal) => {
         clearTimeout(timer);
-        resolve({ status: signal ? null : status, stdout: Buffer.concat(out), stderr: err });
+        const killedBy = signal && !timedOut ? { signal } : {};
+        resolve({ status: signal ? null : status, ...killedBy, stdout: Buffer.concat(out), stderr: err });
       });
       // A program that exits before reading its input breaks the pipe (EPIPE). Without a
       // listener that is an uncaught exception that ends the server; the exit status says
@@ -144,10 +152,11 @@ export class IroncladChainAdapter implements ChainAdapter {
     } catch (e) {
       throw new Error(redact(`${cmd.split("/").pop()} did not start: ${e instanceof Error ? e.message : String(e)}`));
     }
-    if (r.status === null) throw new ToolTimeoutError(redact(`${cmd.split("/").pop()} ${args[0] ?? ""} was stopped (timeout)`));
+    const name = `${cmd.split("/").pop()} ${args[0] ?? ""}`;
+    if (r.status === null && r.signal) throw new Error(redact(`${name} was killed by ${r.signal}: ${lastLines(r.stderr)}`.replace(/\s+/g, " ").trim()));
+    if (r.status === null) throw new ToolTimeoutError(redact(`${name} was stopped (timeout)`));
     if (r.status !== 0) {
-      const what = r.status === null ? "was stopped (timeout)" : `exited ${r.status}`;
-      throw new Error(redact(`${cmd.split("/").pop()} ${args[0] ?? ""} ${args[1] ?? ""} ${what}: ${lastLines(r.stderr)}`.replace(/\s+/g, " ").trim()));
+      throw new Error(redact(`${name} ${args[1] ?? ""} exited ${r.status}: ${lastLines(r.stderr)}`.replace(/\s+/g, " ").trim()));
     }
     return r.stdout;
   }
