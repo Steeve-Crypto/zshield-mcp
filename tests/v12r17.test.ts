@@ -9,9 +9,11 @@ import { acquireWalletLock } from "../src/payments/lock.ts";
 import { recoverPendingPayments } from "../src/payments/recovery.ts";
 import { paymentParamsHash, storeFor, type PaymentStore } from "../src/payments/store.ts";
 import { executePay } from "../src/tools/pay.ts";
+import { ZkoolChainAdapter, type GraphqlRunner } from "../src/chain/zkool.ts";
+import { assertPlannedRecipient, RecipientMismatchError } from "../src/chain/recipient.ts";
 import type { ChainAdapter } from "../src/chain/types.ts";
 import type { Config, PaymentRequest, TxSummary } from "../src/types.ts";
-import { tempConfig } from "./helpers.ts";
+import { tempConfig, testUnifiedAddress } from "./helpers.ts";
 
 const R = "utest1" + "r".repeat(100), TX = "e7".repeat(32), VF = "uviewtest1" + "q".repeat(80);
 const now = () => new Date().toISOString();
@@ -222,5 +224,51 @@ describe("V12 run 17 regressions", () => {
     const lock = await acquireWalletLock(store, 1000, "migration");
     try { budget.initializeHistoricalBudget(store, lock); } finally { await lock.release(); }
     assert.equal(spent(store), 0n);
+  });
+
+  const TO = testUnifiedAddress(0xa1), OWN = testUnifiedAddress(0x0f), STRANGER = testUnifiedAddress(0x66);
+  function zkool(alias: Record<string, string | null>, change: string) {
+    const ops: string[] = [];
+    const runner: GraphqlRunner = async (_url, query, variables) => {
+      const op = /\{\s*(\w+)/.exec(query)?.[1] ?? "?";
+      ops.push(op);
+      switch (op) {
+        case "addressByAccount": return { addressByAccount: { ua: OWN.ua, transparent: null, sapling: null, orchard: null, ...alias } };
+        case "prepareSend": return { prepareSend: "ab".repeat(40) };
+        case "decodePczt": return { decodePczt: { fee: "0.00010000", txid: TX, recipients: [
+          { value: "0.00010000", address: TO.orchardOnly }, { value: "0.50000000", address: change }] } };
+        case "signTx": return { signTx: "cd".repeat(60) };
+        case "broadcastTx": return { broadcastTx: TX };
+        default: throw new Error(`unexpected ${op} ${JSON.stringify(variables)}`);
+      }
+    };
+    return { adapter: new ZkoolChainAdapter({ network: "testnet", account: 3, runner }), ops };
+  }
+
+  for (const [label, alias, change] of [
+    ["Sapling", { sapling: STRANGER.sapling }, STRANGER.sapling],
+    ["Orchard", { orchard: STRANGER.orchardOnly }, STRANGER.orchardOnly],
+  ] as const) {
+    it(`F-88 zkool refuses change to an unrelated ${label} alias the backend reports`, async () => {
+      const z = zkool(alias, change);
+      await assert.rejects(() => z.adapter.pay({ amountZats: 10_000n, recipient: TO.ua }), (e: Error) => e instanceof RecipientMismatchError);
+      assert.ok(!z.ops.includes("signTx"), "nothing is signed");
+      assert.ok(!z.ops.includes("broadcastTx"), "nothing is broadcast");
+    });
+  }
+
+  it("F-88 only receivers inside the wallet's unified address count as its own", () => {
+    const pay = { address: TO.orchardOnly, valueZats: 5000n };
+    assert.throws(() => assertPlannedRecipient([pay, { address: STRANGER.sapling, valueZats: 900n }], TO.ua, 5000n, [OWN.ua, STRANGER.sapling]),
+      (e: unknown) => e instanceof RecipientMismatchError && e.code === "RECIPIENT_MISMATCH");
+    assertPlannedRecipient([pay, { address: OWN.orchardOnly, valueZats: 900n }, { address: OWN.sapling, valueZats: 1n }], TO.ua, 5000n, [OWN.ua]);
+  });
+
+  it("F-88 zkool still accepts change to receivers of its own unified address", async () => {
+    for (const change of [OWN.orchardOnly, OWN.sapling]) {
+      const z = zkool({ sapling: OWN.sapling, orchard: OWN.orchardOnly }, change);
+      const receipt = await z.adapter.pay({ amountZats: 10_000n, recipient: TO.ua });
+      assert.equal(receipt.txid, TX);
+    }
   });
 });

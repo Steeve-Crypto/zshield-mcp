@@ -248,6 +248,12 @@ export function decodeAddress(address: string): DecodedAddress {
   throw new Error("Unrecognized address encoding.");
 }
 
+/** Whether `address` is encoded as a unified address (its receivers are decoded separately). */
+export function isUnifiedAddress(address: string): boolean {
+  const a = address.trim().toLowerCase();
+  return a.startsWith(`${UA_HRP.testnet}1`) || a.startsWith(`${UA_HRP.mainnet}1`);
+}
+
 export interface PlannedOutput {
   /** The address the backend reports for this output. */
   address: string;
@@ -264,18 +270,21 @@ function paysRequested(output: DecodedAddress, requested: DecodedAddress): boole
 /**
  * Fail closed unless the planned outputs pay the requested address exactly the requested
  * amount and nobody else: the outputs whose receiver belongs to the requested address
- * must add up to `amountZats`, and every other output with value must pay a receiver of
- * one of the wallet's own addresses (`own`, as the wallet reported them). An output is
- * never presumed to be change (F-88). A recipient or output address that cannot be
+ * must add up to `amountZats`, and every other output with value must pay a receiver
+ * carried inside the wallet's own unified address (`own`). Any other own entry is ignored.
+ * An output is never presumed to be change (F-88). A recipient or output address that cannot be
  * decoded is a mismatch; an own address that cannot be decoded proves nothing.
  */
 export function assertPlannedRecipient(outputs: PlannedOutput[], recipient: string, amountZats: bigint, own: string[]): void {
   let requested: DecodedAddress;
   try { requested = decodeAddress(recipient); }
   catch (e) { throw new RecipientMismatchError(`The requested recipient cannot be decoded to check the planned transaction (${(e as Error).message}). Nothing was signed or sent.`); }
+  // Only a unified address counts as the wallet's own, and only the receivers it carries
+  // inside it. A standalone Sapling, transparent or single-receiver alias a backend reports
+  // beside it proves nothing about who holds it (F-88).
   const mine: DecodedAddress[] = [];
   for (const address of own) {
-    try { mine.push(decodeAddress(address)); } catch { /* not provably the wallet's: matches nothing */ }
+    try { if (isUnifiedAddress(address)) mine.push(decodeAddress(address)); } catch { /* not provably the wallet's: matches nothing */ }
   }
   let paid = 0n;
   let stranger = false;
