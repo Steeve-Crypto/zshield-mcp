@@ -1,5 +1,5 @@
 import { assertApproval } from "./approval.js";
-import { reserveSpending, reserveFee } from "./budget.js";
+import { reservePayment } from "./budget.js";
 import { assertPaymentsEnabled } from "./pause.js";
 import { fingerprintViewKey, writeAuditRow } from "../audit/log.js";
 import { assertFingerprintSalt } from "../config.js";
@@ -97,16 +97,15 @@ export async function resumeOriginal(
     if (config.totalSpendingCapZec !== undefined && originalFee !== entry.feeZats) return unknown("The original durable fee does not match the wallet transaction.");
     // Budget and fee gates before any financial audit charge: a policy refusal must not
     // consume protected capacity, and can be repeated safely.
-    reserveSpending(config, store, lock, record.callId, amount, paymentParamsHash(intent), intent.idempotency_key!);
-    reserveFee(config, store, lock, record.callId, originalFee, paymentParamsHash(intent), intent.idempotency_key!);
+    // Principal and fee together: a fee that does not fit charges nothing (F-72).
+    reservePayment(config, store, lock, record.callId, amount, originalFee, paymentParamsHash(intent), intent.idempotency_key!);
     lock.assertHeld();
     await chain.resumeSigned(txid, { fence: () => {
       assertNoOtherSend();
       assertPaymentsEnabled(store);
       assertApproval(config, store, intent.idempotency_key!, paymentParamsHash(intent), fingerprint);
       assertRecipientAllowed(intent.recipient, loadAllowlist(config.allowlistPath));
-      reserveFee(config, store, lock, record.callId, originalFee, paymentParamsHash(intent), intent.idempotency_key!);
-      reserveSpending(config, store, lock, record.callId, amount, paymentParamsHash(intent), intent.idempotency_key!);
+      reservePayment(config, store, lock, record.callId, amount, originalFee, paymentParamsHash(intent), intent.idempotency_key!);
       // Financial evidence is charged only here, after every gate of THIS attempt passed and
       // with the backend lock held, immediately before the network mutation. A refusal at any
       // earlier point consumes no protected audit capacity and can be repeated safely (F-59).

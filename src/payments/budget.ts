@@ -77,6 +77,66 @@ export function reserveSpending(config: Config, store: PaymentStore, lock: Walle
   }
 }
 
+/** The principal and fee receipt identities of one payment. */
+function identities(paramsHash: string, key: string): { principal: string; fee: string } {
+  return { principal: hash(JSON.stringify([key, paramsHash, "principal"])), fee: hash(JSON.stringify([key, paramsHash, "fee"])) };
+}
+
+/**
+ * Refuses when the principal plus `feeZats` cannot fit in the cumulative allowance.
+ * Charges nothing, so a refusal here is repeatable at no cost (F-59, F-72). The only
+ * write is creating an empty ledger for a store with no payments yet, before the first
+ * intent exists. Any state the reservation itself would refuse (missing, corrupt,
+ * disabled ledger) is refused here too. Caller holds the wallet lock.
+ */
+export function checkSpending(config: Config, store: PaymentStore, lock: WalletLock, principal: bigint, feeZats: bigint, paramsHash: string, key: string): void {
+  lock.assertHeld();
+  const dir = join(store.dir, "spending-budget");
+  try {
+    if (config.totalSpendingCapZec === undefined) {
+      if (fs.existsSync(dir)) throw new Error("An existing spending ledger cannot be disabled by removing configuration");
+      return;
+    }
+    const cap = parseZecToZats(config.totalSpendingCapZec, "Total spending cap");
+    if (principal <= 0n || feeZats < 0n || !hex.test(paramsHash) || !key) throw new Error("Invalid spending check");
+    let total = 0n;
+    const ids = identities(paramsHash, key);
+    let charged = { principal: false, fee: false };
+    if (fs.existsSync(dir)) {
+      const ledger = readLedger(dir);
+      total = BigInt(ledger.total);
+      const has = (id: string) => ledger.pending?.id === id || readPrivate(join(dir, "receipts", id), 4096) !== undefined;
+      charged = { principal: has(ids.principal), fee: has(ids.fee) };
+    } else {
+      // A call that is refused later still leaves an intent behind, so the empty ledger
+      // must exist before the first one, or the next payment would look historical.
+      if (fs.readdirSync(join(store.dir, "calls")).length) throw new Error("Historical payments require operator budget initialization");
+      ensurePrivateDir(dir);
+      createExclusive(dir, "ledger.json", JSON.stringify({ version: 2, total: "0" }));
+    }
+    const needed = (charged.principal ? 0n : principal) + (charged.fee ? 0n : feeZats);
+    if (total + needed > cap) throw new Error("Cumulative spending allowance exhausted");
+  } catch {
+    throw new PolicyError("SPENDING_BUDGET_REFUSED", "The durable cumulative spending allowance cannot authorize this payment. Operator review is required; no allowance was reset.");
+  }
+}
+
+/**
+ * Charge the principal and the exact fee together, once both are known. The pair is
+ * checked first under the wallet lock, so a fee that does not fit charges nothing: a
+ * refused send never keeps a principal charge (F-72).
+ */
+export function reservePayment(config: Config, store: PaymentStore, lock: WalletLock,
+  callId: string, principal: bigint, fee: bigint | undefined, paramsHash: string, key: string): void {
+  lock.assertHeld();
+  if (config.totalSpendingCapZec !== undefined && (typeof fee !== "bigint" || fee <= 0n)) {
+    throw new PolicyError("SPENDING_BUDGET_REFUSED", "A positive verified transaction fee is required before transmission.");
+  }
+  checkSpending(config, store, lock, principal, fee ?? 0n, paramsHash, key);
+  reserveSpending(config, store, lock, callId, principal, paramsHash, key);
+  reserveFee(config, store, lock, callId, fee, paramsHash, key);
+}
+
 /** Local operator migration, under the wallet lock. Charges every historical intent. */
 export function initializeHistoricalBudget(store: PaymentStore, lock: WalletLock): void {
   lock.assertHeld();
@@ -94,33 +154,6 @@ export function initializeHistoricalBudget(store: PaymentStore, lock: WalletLock
   if (!digits.test(total.toString())) throw new Error("Historical total out of range");
   ensurePrivateDir(dir);
   if (!createExclusive(dir, "ledger.json", JSON.stringify({ version: 2, total: total.toString() }))) throw new Error("Budget already exists");
-}
-
-/**
- * Read-only twin of reserveFee: throws when reserveFee would refuse this fee now, and
- * writes nothing. The principal is already reserved when this runs.
- */
-export function checkFee(config: Config, store: PaymentStore, lock: WalletLock,
-  fee: bigint | undefined, paramsHash: string, key: string): void {
-  if (config.totalSpendingCapZec === undefined) return;
-  if (typeof fee !== "bigint" || fee <= 0n) throw new PolicyError("SPENDING_BUDGET_REFUSED", "A positive verified transaction fee is required before signing.");
-  lock.assertHeld();
-  try {
-    const cap = parseZecToZats(config.totalSpendingCapZec, "Total spending cap");
-    const dir = join(store.dir, "spending-budget");
-    const ledger = readLedger(dir);
-    const identity = hash(JSON.stringify([key, paramsHash, "fee"]));
-    const raw = readPrivate(join(dir, "receipts", identity), 4096);
-    const prior = raw !== undefined ? (JSON.parse(raw) as Charge) : ledger.pending?.id === identity ? ledger.pending : undefined;
-    if (prior) {
-      if (!validCharge(prior) || prior.amount !== fee.toString()) throw new Error("Fee reservation identity changed");
-      if (BigInt(ledger.total) > cap) throw new Error("Current spending allowance is below reserved spending");
-      return;
-    }
-    if (BigInt(ledger.total) + fee > cap) throw new Error("Cumulative spending allowance exhausted");
-  } catch {
-    throw new PolicyError("SPENDING_BUDGET_REFUSED", "The durable cumulative spending allowance cannot cover this payment's fee. Nothing was signed; no allowance was reserved or reset.");
-  }
 }
 
 /** Separate immutable receipt permits upgrading a principal reservation without refunds. */
