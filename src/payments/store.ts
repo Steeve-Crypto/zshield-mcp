@@ -203,6 +203,27 @@ export function newOperationId(): string {
   return `op_${randomBytes(16).toString("hex")}`;
 }
 
+/**
+ * Listeners for the in-process spending tally (budget.ts). Every write into a call's
+ * folder goes through writeIntent or appendEvent and is reported here before it happens,
+ * and the store-open scan reports each record it read with its folder listing. Nothing
+ * here is persisted; a listener can only make the next spending check re-read more.
+ */
+type CallHooks = {
+  write: (dir: string, name: string) => void;
+  scan: (dir: string, name: string, record: CallRecord | undefined, listing: string[]) => void;
+  reset: () => void;
+};
+const callHooks: CallHooks[] = [];
+export function onCallChanges(hooks: CallHooks): void {
+  callHooks.push(hooks);
+}
+function reportWrite(dir: string, callId: string): void {
+  let name: string;
+  try { name = safeName(callId, "call id"); } catch { return; }
+  for (const h of callHooks) h.write(resolve(dir), name);
+}
+
 export class PaymentStore {
   readonly dir: string;
   /** Live mode: the OS wallet lock is required, not best effort. Set by storeFor */
@@ -228,7 +249,10 @@ export class PaymentStore {
     // store instance before live use; failure aborts store initialization.
     for (const callId of fs.readdirSync(this.sub("calls"))) {
       if (callId.startsWith(".tmp-")) continue;
-      const record = this.readCall(callId);
+      const listed: { names?: string[] } = {};
+      const record = this.readCall(callId, listed);
+      // The spending tally adopts this read, so a fresh process reads its history once.
+      if (listed.names) for (const h of callHooks) h.scan(resolve(this.dir), callId, record, listed.names);
       if (!record) continue;
       // Upgrade path (F-76): every unsettled record that may have broadcast stays pending, including
       // older staged calls whose send-path not_sent now folds to unknown.
@@ -303,6 +327,7 @@ export class PaymentStore {
   /** Write the intent and the pending marker. The intent file is written once. */
   writeIntent(intent: CallIntent): void {
     const dir = this.callDir(intent.call_id);
+    reportWrite(this.dir, intent.call_id);
     ensurePrivateDir(dir);
     createExclusive(dir, "intent.json", JSON.stringify(intent));
     if (intent.operation_id) createExclusive(this.sub("ops"), `${intent.operation_id}.json`, JSON.stringify({ call_id: intent.call_id }));
@@ -362,13 +387,17 @@ export class PaymentStore {
   /** Add one event. Events are never rewritten. */
   appendEvent(event: CallEvent): void {
     const dir = this.callDir(event.call_id);
+    reportWrite(this.dir, event.call_id);
     ensurePrivateDir(dir);
     const name = `${Date.now().toString().padStart(15, "0")}-${randomBytes(6).toString("hex")}.json`;
     createExclusive(dir, name, JSON.stringify(event));
   }
 
-  /** A call's current state, read fresh from disk. Undefined when the store has no such call. */
-  readCall(callId: string): CallRecord | undefined {
+  /**
+   * A call's current state, read fresh from disk. Undefined when the store has no such call.
+   * With `listed`, also returns the folder listing the record was read from.
+   */
+  readCall(callId: string, listed?: { names?: string[] }): CallRecord | undefined {
     let dir: string;
     try {
       dir = this.callDir(callId);
@@ -382,6 +411,7 @@ export class PaymentStore {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       throw e;
     }
+    if (listed) listed.names = [...names].sort();
     const intent = this.readJson<CallIntent>(join(dir, "intent.json"));
     if (intent !== undefined) { validatePaymentState("intent", intent); if (intent.call_id !== callId) invalidPaymentState(); }
     const events: CallEvent[] = [];
@@ -511,7 +541,8 @@ const stores = new Map<string, PaymentStore>();
 
 /**
  * The store for this config and chain, opened on first use in this process: folders
- * created and checked. Every read after that goes to disk; nothing is cached.
+ * created and checked. Every read after that goes to disk; the store caches nothing. The
+ * spending tally in budget.ts keeps counts in memory and re-validates them against disk.
  */
 export function storeFor(
   config: Pick<Config, "auditDir" | "auditFallbackPath">,
@@ -562,6 +593,7 @@ function openStore(dir: string): PaymentStore {
 export function resetPaymentStores(): void {
   stores.clear();
   recentRefusals.clear();
+  for (const h of callHooks) h.reset();
 }
 
 /** Calls refused before any send, kept in memory so zcash_payment_status can report them. */
