@@ -88,30 +88,32 @@ describe("ZIP 316 decoding", () => {
 
 describe("planned recipient check", () => {
   const to = testUnifiedAddress(11), other = testUnifiedAddress(22), change = testUnifiedAddress(33);
+  // The wallet reports its own address, and change goes there.
+  const own = [change.ua];
 
   it("accepts an output to any receiver of the requested address, with change beside it", () => {
-    assertPlannedRecipient([{ address: to.orchardOnly, valueZats: 5000n }, { address: change.orchardOnly, valueZats: 900n }], to.ua, 5000n);
-    assertPlannedRecipient([{ address: to.sapling, valueZats: 5000n }], to.ua, 5000n);
+    assertPlannedRecipient([{ address: to.orchardOnly, valueZats: 5000n }, { address: change.orchardOnly, valueZats: 900n }], to.ua, 5000n, own);
+    assertPlannedRecipient([{ address: to.sapling, valueZats: 5000n }], to.ua, 5000n, own);
     // Orchard padding outputs carry no value and are skipped, whatever they name.
-    assertPlannedRecipient([{ address: to.orchardOnly, valueZats: 5000n }, { address: "padding", valueZats: 0n }], to.ua, 5000n);
+    assertPlannedRecipient([{ address: to.orchardOnly, valueZats: 5000n }, { address: "padding", valueZats: 0n }], to.ua, 5000n, own);
     // A Sapling recipient is matched by its own receiver.
-    assertPlannedRecipient([{ address: to.sapling, valueZats: 5000n }], to.sapling, 5000n);
+    assertPlannedRecipient([{ address: to.sapling, valueZats: 5000n }], to.sapling, 5000n, own);
   });
 
   it("refuses a transaction that pays someone else the requested amount", () => {
-    assert.throws(() => assertPlannedRecipient([{ address: other.orchardOnly, valueZats: 5000n }, { address: change.orchardOnly, valueZats: 900n }], to.ua, 5000n),
+    assert.throws(() => assertPlannedRecipient([{ address: other.orchardOnly, valueZats: 5000n }, { address: change.orchardOnly, valueZats: 900n }], to.ua, 5000n, own),
       (e: unknown) => e instanceof RecipientMismatchError && e.code === "RECIPIENT_MISMATCH" && /does not pay the requested recipient/.test(e.message));
   });
 
   it("refuses a wrong amount to the recipient, split or not", () => {
-    assert.throws(() => assertPlannedRecipient([{ address: to.orchardOnly, valueZats: 5001n }], to.ua, 5000n), /5001 zatoshis, not the 5000/);
-    assert.throws(() => assertPlannedRecipient([{ address: to.orchardOnly, valueZats: 5000n }, { address: to.sapling, valueZats: 5000n }], to.ua, 5000n), /10000 zatoshis/);
+    assert.throws(() => assertPlannedRecipient([{ address: to.orchardOnly, valueZats: 5001n }], to.ua, 5000n, own), /5001 zatoshis, not the 5000/);
+    assert.throws(() => assertPlannedRecipient([{ address: to.orchardOnly, valueZats: 5000n }, { address: to.sapling, valueZats: 5000n }], to.ua, 5000n, own), /10000 zatoshis/);
   });
 
   it("refuses an output or recipient that cannot be decoded, and a network mismatch", () => {
-    assert.throws(() => assertPlannedRecipient([{ address: to.orchardOnly, valueZats: 5000n }, { address: "garbage", valueZats: 1n }], to.ua, 5000n), /cannot be checked/);
-    assert.throws(() => assertPlannedRecipient([{ address: to.orchardOnly, valueZats: 5000n }], "utest1" + "a".repeat(100), 5000n), /requested recipient cannot be decoded/);
+    assert.throws(() => assertPlannedRecipient([{ address: to.orchardOnly, valueZats: 5000n }, { address: "garbage", valueZats: 1n }], to.ua, 5000n, own), /cannot be checked/);
+    assert.throws(() => assertPlannedRecipient([{ address: to.orchardOnly, valueZats: 5000n }], "utest1" + "a".repeat(100), 5000n, own), /requested recipient cannot be decoded/);
     const mainnetTwin = encodeUnifiedAddress("mainnet", new Map([[3, new Uint8Array(43).fill(11 ^ 0x5a)]]));
-    assert.throws(() => assertPlannedRecipient([{ address: mainnetTwin, valueZats: 5000n }], to.ua, 5000n), /does not pay/);
+    assert.throws(() => assertPlannedRecipient([{ address: mainnetTwin, valueZats: 5000n }], to.ua, 5000n, own), /does not pay/);
   });
 });
