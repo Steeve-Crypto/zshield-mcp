@@ -2,7 +2,7 @@ import type { ChainAdapter } from "./types.js";
 import type { SyncResult } from "./sync.js";
 import type { ChainHealth, PaymentReceipt, PaymentRequest, TxSummary, WalletBalance } from "../types.js";
 import { assertTestnetAddress, NetworkError } from "./network.js";
-import { assertPlannedRecipient } from "./recipient.js";
+import { assertPlannedRecipient, decodeAddress, isUnifiedAddress } from "./recipient.js";
 import { ChainUnreachableError, SendOutcomeUnknownError } from "./outcome.js";
 import { MAX_MONEY_ZATS, ZATS_PER_ZEC } from "../policy/amount.js";
 import { walletStateDir } from "../payments/store.js";
@@ -99,22 +99,24 @@ export class ZkoolChainAdapter implements ChainAdapter {
   }
 
   /**
-   * The account's own addresses as zkool reports them: the unified address first, then its
-   * transparent, Sapling and Orchard forms. A planned output to any of these is the
-   * wallet's own; zkool reports no other own address (an internal change address is not
-   * among them), so change anywhere else is refused (F-88).
+   * The account's unified address, checked to be testnet and to decode with a shielded
+   * receiver. It is the only own address used to recognize change: a planned output is
+   * the wallet's own only when it pays a receiver inside this unified address. The
+   * separate transparent, Sapling and Orchard aliases zkool can report are never asked
+   * for or trusted, since nothing ties them to this address (F-88).
    */
   private async ownAddresses(): Promise<string[]> {
-    const data = await this.call<{ addressByAccount?: { ua?: string | null; transparent?: string | null; sapling?: string | null; orchard?: string | null } }>(
-      "query($account: Int!) { addressByAccount(idAccount: $account) { ua transparent sapling orchard } }",
+    const data = await this.call<{ addressByAccount?: { ua?: string | null } }>(
+      "query($account: Int!) { addressByAccount(idAccount: $account) { ua } }",
       { account: this.account },
       readTimeoutMs()
     );
-    const a = data?.addressByAccount;
-    const ua = a?.ua;
+    const ua = data?.addressByAccount?.ua;
     if (typeof ua !== "string" || ua === "") throw new Error("zkool_graphql returned no address for the account");
     assertTestnetAddress(ua);
-    return [ua, ...[a?.transparent, a?.sapling, a?.orchard].filter((x): x is string => typeof x === "string" && x !== "")];
+    if (!isUnifiedAddress(ua)) throw new Error("zkool_graphql returned an account address that is not a unified address");
+    try { decodeAddress(ua); } catch (e) { throw new Error(`zkool_graphql returned an account address that cannot be decoded: ${(e as Error).message}`); }
+    return [ua];
   }
 
   async getViewingKey(): Promise<string> {
@@ -278,7 +280,7 @@ export class ZkoolChainAdapter implements ChainAdapter {
     if (feeZats <= 0n) throw new Error("zkool_graphql planned a transaction with no fee");
     // The allow-list binds to what zkool built, not only to what it was asked: the outputs
     // paying the requested address must carry exactly the requested amount, and every other
-    // output must pay the wallet's own address as reported above. zkool lists each output
+    // output must pay a receiver inside the wallet's own unified address read above. zkool lists each output
     // under one receiver (an Orchard-only unified address, a Sapling or a transparent
     // address), so every side is decoded to receivers and compared.
     const outputs = (decoded?.decodePczt?.recipients ?? []).map((r) => ({
