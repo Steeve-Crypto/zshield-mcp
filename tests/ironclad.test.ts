@@ -44,6 +44,8 @@ import { tempConfig, withEnv } from "./helpers.ts";
 //    unknown outcome, and the next payment may go ahead once the co-signer is back.
 // 10. A program that exits before reading its input never takes the server down: the
 //     runner ignores the broken pipe and reports how the program ended.
+// 11. A co-signer that crashes (killed by a signal) is reported as a crash, never as a
+//     co-signer that did not answer; it still ends as not sent.
 
 const DEVTOOL = "/opt/ironclad/zcash-devtool";
 const COSIGNER = "/opt/ironclad/ironclad-cosigner";
@@ -96,6 +98,8 @@ interface FakeOptions {
   refuse?: string;
   /** The co-signer daemon is not running: coordinate waits until it is stopped. */
   offline?: boolean;
+  /** The co-signer program is killed by this signal during the signing round. */
+  crash?: string;
   extracted?: string;
   send?: "ok" | "throws" | "other";
   onSend?: () => void;
@@ -127,6 +131,7 @@ function fakeTools(opts: FakeOptions = {}) {
       if (args[0] === "coordinate") {
         // Nothing answers in the session folder, so coordinate waits until the runner stops it.
         if (opts.offline) return { status: null, stdout: Buffer.from("[device 1] waiting for the co-signer's commitments in session/commitments.json...\n"), stderr: "" };
+        if (opts.crash) return { status: null, signal: opts.crash, stdout: Buffer.alloc(0), stderr: "" };
         if (opts.refuse) return fail(`error: the co-signer refused to sign: policy: ${opts.refuse}`);
         writeFileSync(args[args.indexOf("--out") + 1], SIGNED);
         return ok("[device 1] 1 spend(s) signed");
@@ -216,6 +221,17 @@ describe("ironclad adapter: staged send", () => {
     assert.equal(create[create.indexOf("--memo") + 1], sly);
     assert.equal(create.filter((x) => x === "--address").length, 1);
   });
+  it("reports a co-signer that crashes as a crash, not as offline, with nothing sent", async () => {
+    const fake = fakeTools({ crash: "SIGSEGV" });
+    await assert.rejects(adapter(fake).pay({ amountZats: 5000n, recipient: ADDR }), (e: Error) => {
+      assert.ok(!(e instanceof SendOutcomeUnknownError));
+      assert.doesNotMatch(e.message, /did not answer/);
+      assert.match(e.message, /signing round failed: .*killed by SIGSEGV.*Nothing was sent\./);
+      return true;
+    });
+    assert.ok(!fake.steps().includes("pczt extract") && !fake.steps().includes("pczt send"));
+  });
+
 
   it("ends as not sent with the co-signer's reason when its policy refuses", async () => {
     const fake = fakeTools({ refuse: "recipient utest1m0z…4cxmldnl is not on the allow-list" });
@@ -335,6 +351,14 @@ describe("ironclad tool runner", () => {
     assert.equal(r.status, 0);
   });
 
+  it("tells a program killed by a signal from one stopped at the timeout", { skip: process.platform === "win32" }, async () => {
+    const killed = await createToolRunner()(process.execPath, ["-e", "process.kill(process.pid, 'SIGKILL')"], { timeoutMs: 10_000 });
+    assert.equal(killed.status, null);
+    assert.equal(killed.signal, "SIGKILL");
+    const slow = await createToolRunner()(process.execPath, ["-e", "setTimeout(() => {}, 10_000)"], { timeoutMs: 300 });
+    assert.equal(slow.status, null);
+    assert.equal(slow.signal, undefined);
+  });
 });
 
 describe("CHAIN_MODE=ironclad config", () => {
