@@ -46,6 +46,8 @@ import { tempConfig, withEnv } from "./helpers.ts";
 //     runner ignores the broken pipe and reports how the program ended.
 // 11. A co-signer that crashes (killed by a signal) is reported as a crash, never as a
 //     co-signer that did not answer; it still ends as not sent.
+// 12. A recipient, amount or memo that starts with "-" reaches devtool as a value, never
+//     as a flag (`--memo=-5% refund`).
 
 const DEVTOOL = "/opt/ironclad/zcash-devtool";
 const COSIGNER = "/opt/ironclad/ironclad-cosigner";
@@ -170,7 +172,7 @@ function fakeTools(opts: FakeOptions = {}) {
 
 function lastCreateValue(calls: Call[]): string {
   const create = [...calls].reverse().find((c) => c.args.includes("create"))!;
-  return create.args[create.args.indexOf("--value") + 1];
+  return create.args.find((x) => x.startsWith("--value="))!.slice("--value=".length);
 }
 
 const adapter = (fake: ReturnType<typeof fakeTools>, stateDir?: string) =>
@@ -216,11 +218,20 @@ describe("ironclad adapter: staged send", () => {
     const sly = "x' --address utest1evil --value 9\n; rm -rf ~";
     await adapter(fake).pay({ amountZats: 5000n, recipient: ADDR, memo: sly });
     const create = fake.calls.find((c) => c.args.includes("create"))!.args;
-    assert.equal(create[create.indexOf("--address") + 1], ADDR);
-    assert.equal(create[create.indexOf("--value") + 1], "5000");
-    assert.equal(create[create.indexOf("--memo") + 1], sly);
-    assert.equal(create.filter((x) => x === "--address").length, 1);
+    assert.ok(create.includes(`--address=${ADDR}`));
+    assert.ok(create.includes("--value=5000"));
+    assert.ok(create.includes(`--memo=${sly}`));
+    assert.equal(create.filter((x) => x.startsWith("--address")).length, 1);
   });
+
+  it("passes a memo, recipient or amount that starts with a dash as a value, not a flag", async () => {
+    const fake = fakeTools();
+    await adapter(fake).pay({ amountZats: 5000n, recipient: ADDR, memo: "-5% refund" });
+    const create = fake.calls.find((c) => c.args.includes("create"))!.args;
+    assert.ok(create.includes("--memo=-5% refund"));
+    assert.ok(!create.includes("--memo") && !create.includes("--address") && !create.includes("--value"));
+  });
+
   it("reports a co-signer that crashes as a crash, not as offline, with nothing sent", async () => {
     const fake = fakeTools({ crash: "SIGSEGV" });
     await assert.rejects(adapter(fake).pay({ amountZats: 5000n, recipient: ADDR }), (e: Error) => {
@@ -231,7 +242,6 @@ describe("ironclad adapter: staged send", () => {
     });
     assert.ok(!fake.steps().includes("pczt extract") && !fake.steps().includes("pczt send"));
   });
-
 
   it("ends as not sent with the co-signer's reason when its policy refuses", async () => {
     const fake = fakeTools({ refuse: "recipient utest1m0z…4cxmldnl is not on the allow-list" });
@@ -346,6 +356,7 @@ describe("ironclad tool runner", () => {
     const echoed = await createToolRunner()("/bin/echo", ["a b", "$(x)"], { timeoutMs: 10_000 });
     assert.equal(echoed.stdout.toString(), "a b $(x)\n");
   });
+
   it("survives a program that exits without reading its input", { skip: process.platform === "win32" }, async () => {
     const r = await createToolRunner()(process.execPath, ["-e", "process.exit(0)"], { timeoutMs: 10_000, input: Buffer.alloc(8 * 1024 * 1024, 0x61) });
     assert.equal(r.status, 0);
@@ -430,7 +441,7 @@ describe("zcash_pay through the ironclad adapter", () => {
     assert.equal(r.audit.status, "ok", r.text);
     assert.equal(stagedAtBroadcast, TXID);
     const create = s.fake.calls.find((c) => c.args.includes("create"))!.args;
-    assert.equal(create[create.indexOf("--value") + 1], "50000");
+    assert.ok(create.includes("--value=50000"));
   });
 
   it("records a co-signer refusal as not sent, so the next call may pay", async () => {
@@ -501,4 +512,5 @@ describe("CHAIN_MODE=ironclad startup", () => {
     chmodSync(share.ironclad.frostDir, 0o755);
     assert.throws(() => startupChecks(config(share.ironclad), "linux"));
   });
+
 });
