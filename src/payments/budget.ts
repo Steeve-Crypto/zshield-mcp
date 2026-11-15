@@ -1,11 +1,11 @@
 import fs from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { createExclusive, ensurePrivateDir, fsyncDir, readPrivate } from "../fsafe.js";
 import { parseZecToZats } from "../policy/amount.js";
 import { PolicyError } from "../policy/caps.js";
 import type { Config } from "../types.js";
-import { mayHaveBroadcast, paymentParamsHash, type CallEvent, type CallIntent, type CallRecord, type PaymentStore } from "./store.js";
+import { mayHaveBroadcast, onCallChanges, paymentParamsHash, safeName, type CallEvent, type CallIntent, type CallRecord, type PaymentStore } from "./store.js";
 import type { WalletLock } from "./lock.js";
 
 type Charge = { id: string; amount: string; identity: string };
@@ -13,12 +13,14 @@ type Ledger = { version: 2; total: string; pending?: Charge };
 const digits = /^(0|[1-9][0-9]{0,30})$/;
 const hex = /^[a-f0-9]{64}$/;
 function validCharge(c: Charge): boolean { return !!c && hex.test(c.id) && digits.test(c.amount) && BigInt(c.amount) > 0n && hex.test(c.identity); }
-function readLedger(dir: string): Ledger {
-  const raw = readPrivate(join(dir, "ledger.json"), 4096);
+function parseLedger(raw: string | undefined): Ledger {
   if (raw === undefined) throw new Error("Missing spending ledger");
   const l = JSON.parse(raw) as Ledger;
   if (!l || l.version !== 2 || typeof l.total !== "string" || !digits.test(l.total) || (l.pending && (!validCharge(l.pending) || BigInt(l.pending.amount) > BigInt(l.total)))) throw new Error("Invalid spending ledger");
   return l;
+}
+function readLedger(dir: string): Ledger {
+  return parseLedger(readPrivate(join(dir, "ledger.json"), 4096));
 }
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 
@@ -105,14 +107,276 @@ function counted(store: PaymentStore, dir: string): { total: bigint; charged: (p
 }
 const max = (a: bigint, b: bigint) => (a > b ? a : b);
 
+/** The charges one call's transmit authorizations carry, by payment identity. Throws on an invalid charge. */
+function chargesOf(record: CallRecord | undefined): Map<string, Roles> {
+  const charges = new Map<string, Roles>();
+  if (!record) return charges;
+  for (const e of record.events) {
+    const charge = chargeOf(record, e);
+    if (!charge) continue;
+    const { key, paramsHash } = paymentIdentity(record.intent!, record.callId);
+    const at = JSON.stringify([key, paramsHash]);
+    const prior = charges.get(at) ?? ZERO;
+    charges.set(at, { principal: max(prior.principal, charge.principal), fee: max(prior.fee, charge.fee) });
+  }
+  return charges;
+}
+
+/**
+ * The in-process spending tally (F-91). It holds exactly what `counted` would compute, built
+ * from each call's charges and kept current without re-reading unchanged calls:
+ *
+ * - Call records are append-only. An intent is written once and events are immutable files
+ *   that are never rewritten or removed, so a call whose folder listing is unchanged has the
+ *   same charges. Each entry keeps the listing it was read from.
+ * - Every write this process makes into a call goes through the store, which marks the call
+ *   dirty before writing; a dirty call is re-read before the next decision.
+ * - Another process can only charge while it holds the exclusive wallet lock, so the first
+ *   decision of every lock hold compares each call's folder listing (directory listings
+ *   only, no record files) and re-reads just the calls that changed. Later decisions in the
+ *   same hold re-read only dirty calls. Spending is never authorized from data older than
+ *   the current hold.
+ * - Charges, receipts and the ledger only ever add to the count, so the cached total never
+ *   exceeds the true one. A refusal decided from it is therefore always a correct refusal and
+ *   needs no disk check; only an acceptance is validated.
+ * - The ledger file and the receipts folder are compared on every decision. Any change to
+ *   them, a call that disappears or a call whose charges shrink rebuilds the totals.
+ *
+ * A fresh process reads every call once, when the store is opened (`ensureLayout`); that
+ * read seeds the tally. Nothing here is written to disk.
+ */
+type Entry = { listing: string; charges: Map<string, Roles> };
+interface Tally {
+  mark: string;
+  ledger: Ledger;
+  total: bigint;
+  calls: Map<string, Entry>;
+  byIdentity: Map<string, Roles>;
+  receipts: Map<string, Roles>;
+  dirty: Set<string>;
+  validFor?: WeakRef<object>;
+}
+const tallies = new Map<string, Tally>();
+const keys = new Map<string, string>();
+/** One key per store folder however it is named, so every alias shares one tally. */
+function storeKey(dir: string): string {
+  let key = keys.get(dir);
+  if (key === undefined) {
+    try {
+      key = fs.realpathSync(dir);
+      keys.set(dir, key);
+    } catch { key = resolve(dir); }
+  }
+  return key;
+}
+/** Records the store-open scan read, by store, adopted by the first tally built. */
+const seeds = new Map<string, Map<string, Entry>>();
+class Rebuild extends Error {}
+
+onCallChanges({
+  write(dir, name) {
+    const key = storeKey(dir);
+    tallies.get(key)?.dirty.add(name);
+    seeds.get(key)?.delete(name);
+  },
+  scan(dir, name, record, listing) {
+    dir = storeKey(dir);
+    let charges: Map<string, Roles>;
+    try { charges = chargesOf(record); } catch { return; }
+    let pool = seeds.get(dir);
+    if (!pool) seeds.set(dir, (pool = new Map()));
+    pool.set(name, { listing: listing.join("/"), charges });
+  },
+  reset() {
+    tallies.clear();
+    seeds.clear();
+    keys.clear();
+  },
+});
+
+const callsDir = (store: PaymentStore) => join(store.dir, "calls");
+
+/** A call folder's listing, the marker of what its record holds. Throws like readCall would. */
+function listingOf(store: PaymentStore, name: string): string {
+  let dir: string;
+  try { dir = join(callsDir(store), safeName(name, "call id")); } catch { return "!invalid"; }
+  try {
+    return fs.readdirSync(dir).sort().join("/");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return "!absent";
+    throw e;
+  }
+}
+
+function readEntry(store: PaymentStore, name: string): Entry {
+  const listed: { names?: string[] } = {};
+  const record = store.readCall(name, listed);
+  const listing = listed.names ? listed.names.join("/") : listingOf(store, name);
+  return { listing, charges: chargesOf(record) };
+}
+
+/** The ledger's content and the identity of the budget and receipts folders. */
+function ledgerMark(dir: string): { mark: string; ledger: Ledger } {
+  const raw = readPrivate(join(dir, "ledger.json"), 4096);
+  const ledger = parseLedger(raw);
+  const d = fs.statSync(dir, { bigint: true });
+  let r = "none";
+  try {
+    const st = fs.statSync(join(dir, "receipts"), { bigint: true });
+    r = `${st.dev}:${st.ino}:${st.mtimeNs}:${st.ctimeNs}:${st.size}`;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+  }
+  return { mark: `${d.dev}:${d.ino}|${r}|${raw}`, ledger };
+}
+
+function receiptsOf(t: Tally, dir: string, at: string): Roles {
+  let r = t.receipts.get(at);
+  if (r) return r;
+  const [key, paramsHash] = JSON.parse(at) as [string, string];
+  const ids = identities(paramsHash, key);
+  const receipt = (id: string): bigint => {
+    if (t.ledger.pending?.id === id) return BigInt(t.ledger.pending.amount);
+    const raw = readPrivate(join(dir, "receipts", id), 4096);
+    if (raw === undefined) return 0n;
+    const c = JSON.parse(raw) as Charge;
+    if (!validCharge(c) || c.id !== id || c.identity !== id) throw new Error("Invalid spending receipt");
+    return BigInt(c.amount);
+  };
+  r = { principal: receipt(ids.principal), fee: receipt(ids.fee) };
+  t.receipts.set(at, r);
+  return r;
+}
+
+function term(t: Tally, dir: string, at: string, events: Roles): bigint {
+  const receipts = receiptsOf(t, dir, at);
+  return max(0n, events.principal - receipts.principal) + max(0n, events.fee - receipts.fee);
+}
+
+/** Adopt a call's entry. Charges only grow; one that shrank or vanished means rebuild. */
+function apply(t: Tally, dir: string, name: string, entry: Entry): void {
+  const old = t.calls.get(name);
+  if (old) {
+    for (const [at, r] of old.charges) {
+      const n = entry.charges.get(at);
+      if (!n || n.principal < r.principal || n.fee < r.fee) throw new Rebuild();
+    }
+  }
+  if (entry.listing === "!absent") {
+    t.calls.delete(name);
+    return;
+  }
+  for (const [at, r] of entry.charges) {
+    const prev = t.byIdentity.get(at);
+    const next = prev ? { principal: max(prev.principal, r.principal), fee: max(prev.fee, r.fee) } : r;
+    if (prev && next.principal === prev.principal && next.fee === prev.fee) continue;
+    t.total += term(t, dir, at, next) - (prev ? term(t, dir, at, prev) : 0n);
+    t.byIdentity.set(at, next);
+  }
+  t.calls.set(name, entry);
+}
+
+/**
+ * A new tally, exact when it returns: every call folder on disk is listed, and a known entry
+ * (from `pool` or the store-open scan) is reused only when its listing is unchanged; every
+ * other call is read. A call that disappeared is simply no longer counted.
+ */
+function build(store: PaymentStore, dir: string, key: string, mark: { mark: string; ledger: Ledger }, pool?: Map<string, Entry>): Tally {
+  const t: Tally = { mark: mark.mark, ledger: mark.ledger, total: BigInt(mark.ledger.total), calls: new Map(), byIdentity: new Map(), receipts: new Map(), dirty: new Set() };
+  const seeded = seeds.get(key);
+  for (const name of fs.readdirSync(callsDir(store))) {
+    const known = pool?.get(name) ?? seeded?.get(name);
+    apply(t, dir, name, known && known.listing === listingOf(store, name) ? known : readEntry(store, name));
+  }
+  seeds.delete(key);
+  tallies.set(key, t);
+  return t;
+}
+
+/** The tally for this store, current with its ledger. Builds it on first use in a process. */
+function tallyFor(store: PaymentStore, dir: string): Tally {
+  const key = storeKey(store.dir);
+  const mark = ledgerMark(dir);
+  const t = tallies.get(key);
+  if (t && t.mark === mark.mark) return t;
+  return rebuild(store, dir, t);
+}
+
+/** Rebuild from disk, reusing entries whose folder listing is unchanged. */
+function rebuild(store: PaymentStore, dir: string, prior?: Tally): Tally {
+  const pool = prior ? new Map([...prior.calls].filter(([name]) => !prior.dirty.has(name))) : undefined;
+  return build(store, dir, storeKey(store.dir), ledgerMark(dir), pool);
+}
+
+/** Re-read the calls this process wrote since the last decision. */
+function refreshDirty(store: PaymentStore, dir: string, t: Tally): Tally {
+  try {
+    for (const name of [...t.dirty]) {
+      const entry = readEntry(store, name);
+      apply(t, dir, name, entry);
+      t.dirty.delete(name);
+    }
+    return t;
+  } catch (e) {
+    if (!(e instanceof Rebuild)) throw e;
+    return rebuild(store, dir, t);
+  }
+}
+
+/**
+ * Bring every call up to date: list each call folder and re-read only those whose listing
+ * changed. Reads no record file of an unchanged call. Equal to a full recount.
+ */
+function refreshAll(store: PaymentStore, dir: string, t: Tally): Tally {
+  try {
+    const names = fs.readdirSync(callsDir(store));
+    const present = new Set(names);
+    for (const name of t.calls.keys()) if (!present.has(name)) throw new Rebuild();
+    for (const name of names) {
+      const entry = t.calls.get(name);
+      if (entry && !t.dirty.has(name) && entry.listing === listingOf(store, name)) continue;
+      apply(t, dir, name, readEntry(store, name));
+      t.dirty.delete(name);
+    }
+    return t;
+  } catch (e) {
+    if (!(e instanceof Rebuild)) throw e;
+    return rebuild(store, dir, t);
+  }
+}
+
+function chargedIn(t: Tally, dir: string, paramsHash: string, key: string): Roles {
+  const at = JSON.stringify([key, paramsHash]);
+  const receipts = receiptsOf(t, dir, at), events = t.byIdentity.get(at) ?? ZERO;
+  return { principal: max(receipts.principal, events.principal), fee: max(receipts.fee, events.fee) };
+}
+
 /**
  * The cumulative spending the allowance has counted, or undefined when this store has no
- * spending ledger. Read only. Throws when the spending state cannot be read.
+ * spending ledger. Read only. Throws when the spending state cannot be read. Lists every
+ * call folder and re-reads only changed calls, so it always equals a full recount.
  */
 export function spentZats(store: PaymentStore): bigint | undefined {
   const dir = join(store.dir, "spending-budget");
   if (!fs.existsSync(dir)) return undefined;
+  return refreshAll(store, dir, tallyFor(store, dir)).total;
+}
+
+/** The full recount from every record, with no tally. For audits and tests. */
+export function recountSpentZats(store: PaymentStore): bigint | undefined {
+  const dir = join(store.dir, "spending-budget");
+  if (!fs.existsSync(dir)) return undefined;
   return counted(store, dir).total;
+}
+
+/**
+ * What a decision inside an already validated lock hold counts: the tally plus the calls
+ * this process wrote since. No folder listing. For tests.
+ */
+export function cachedSpentZats(store: PaymentStore): bigint | undefined {
+  const dir = join(store.dir, "spending-budget");
+  if (!fs.existsSync(dir)) return undefined;
+  return refreshDirty(store, dir, tallyFor(store, dir)).total;
 }
 
 /**
@@ -139,11 +403,25 @@ function needed(config: Config, store: PaymentStore, lock: WalletLock, principal
       ensurePrivateDir(dir);
       createExclusive(dir, "ledger.json", JSON.stringify({ version: 2, total: "0" }));
     }
-    const { total, charged } = counted(store, dir);
-    const has = charged(paramsHash, key);
-    const more = max(0n, principal - has.principal) + max(0n, feeZats - has.fee);
-    if (total + more > cap) throw new Error("Cumulative spending allowance exhausted");
-    return more;
+    const decide = (t: Tally): bigint => {
+      const has = chargedIn(t, dir, paramsHash, key);
+      const more = max(0n, principal - has.principal) + max(0n, feeZats - has.fee);
+      if (t.total + more > cap) throw new Error("Cumulative spending allowance exhausted");
+      return more;
+    };
+    // The cached count never exceeds the true one, so a refusal from it is final and costs
+    // no disk reads (F-91). Only an acceptance is validated: by every call folder's listing
+    // on the first decision of this lock hold, then by the calls this process wrote since.
+    // The hold is reused only when the OS lock excludes every other process; with only the
+    // in-process lock (mock fallback) every acceptance lists every call folder again.
+    let t = tallyFor(store, dir);
+    decide(t);
+    if (lock.exclusiveAcrossProcesses === true && t.validFor?.deref() === lock) t = refreshDirty(store, dir, t);
+    else {
+      t = refreshAll(store, dir, t);
+      t.validFor = new WeakRef(lock);
+    }
+    return decide(t);
   } catch {
     throw new PolicyError("SPENDING_BUDGET_REFUSED", "The durable cumulative spending allowance cannot authorize this payment. Operator review is required; no allowance was reset.");
   }

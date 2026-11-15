@@ -44,9 +44,29 @@ empty ledger is created at its first payment check, before any intent exists.
 The shared wallet lock serializes accounting across processes. The amount counted is the
 ledger total (the historical migration and receipts written by earlier versions) plus,
 for each payment identity, whatever its charged transmit authorizations carry beyond its
-receipts. Every check reads the payment records, so a spending check takes time in
-proportion to the number of recorded calls. The ledger is never reconstructed as zero
-from missing or malformed state, and an unreadable payment record refuses every payment.
+receipts. The ledger is never reconstructed as zero from missing or malformed state, and
+an unreadable payment record refuses every payment.
+
+Each server process keeps that count in memory and does not re-read unchanged payment
+records. Records are append-only, so a call whose folder listing has not changed carries
+the same charges. Costs, by case:
+
+- When a process opens the store it reads every payment record once, in full. This is
+  the remaining cost that grows with history, and the spending count reuses that read.
+  It happens once per process start, never per payment.
+- A refusal is decided from the in-memory count, which can only be equal to or lower than
+  the true count. A repeated refusal reads no payment record and lists no folder.
+- The first spending check that would accept a payment in each hold of the wallet lock
+  lists every call folder (directory listings only, no record files) and re-reads only
+  the calls whose listing changed, for example a payment another process made. That
+  listing pass is one directory read per recorded call per payment.
+- Later checks in the same hold re-read only the calls this process wrote, normally the
+  payment's own call.
+- A change to the ledger or receipts, a call that disappears, or a restart rebuilds the
+  count from disk.
+
+Without the OS wallet lock (the mock chain's in-process fallback), every check that would
+accept a payment lists every call folder again.
 
 An existing wallet with historical intents requires explicit initialization. It charges
 every historical call that holds a transmit authorization or whose record cannot prove
