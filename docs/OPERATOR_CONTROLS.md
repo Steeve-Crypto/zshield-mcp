@@ -26,31 +26,39 @@ record, a read-only check refuses a payment whose principal plus the estimated f
 not fit; that refusal charges neither allowance nor protected audit capacity and can be
 repeated. Once the backend has built and signed the transaction, the principal and the
 exact fee are checked again, still without charging. The charge happens at one point
-only: after every final gate (pause, approval, allow-list), with the backend lock held
-and the audit record written, in the same step that records the transmit authorization.
-Pay, explicit resume, automatic recovery and every adapter (zingo, zkool, mock) pass
-through that point. A refusal or a backend lock failure before it charges nothing, so a
-payment refused with `SPENDING_BUDGET_REFUSED` or any other pre-broadcast code can be
-retried at no cost. Receipts follow the stored idempotency identity (key and parameter
-hash), never one attempt's call id, so a retry, resume or recovery of the same payment is
-never charged twice. A store's empty ledger is created at its first payment check,
-before any intent exists.
+only: after every final gate (pause, approval, allow-list), with the backend lock held.
+There the transmit authorization is written as one immutable event in the call's record
+that carries the principal and fee charge, published by one exclusive link and fsynced.
+It is the only spending write, so a crash or a failed write leaves both the charge and
+the authorization or neither; a charge never exists for a call that recovery can prove
+was never authorized. Pay, explicit resume, automatic recovery and every adapter (zingo,
+zkool, mock) pass through that point. A refusal or a backend lock failure before it
+charges nothing, so a payment refused with `SPENDING_BUDGET_REFUSED` or any other
+pre-broadcast code can be retried at no cost. A resume writes its protected audit record
+only after that authorization is durable, so a resume refused or failed before it uses
+no protected audit capacity and reports `transmission_attempted: false`. Charges follow
+the stored idempotency identity (key and parameter hash), never one attempt's call id,
+so a retry, resume or recovery of the same payment is never charged twice. A store's
+empty ledger is created at its first payment check, before any intent exists.
 
-The shared wallet lock serializes accounting across processes. A fixed-size ledger
-atomically records the new total plus a pending receipt; immutable per-call receipts
-make recovery idempotent. A crash between these steps finishes the same receipt
-before admitting another reservation. The ledger is never reconstructed as zero
-from missing or malformed state.
+The shared wallet lock serializes accounting across processes. The amount counted is the
+ledger total (the historical migration and receipts written by earlier versions) plus,
+for each payment identity, whatever its charged transmit authorizations carry beyond its
+receipts. Every check reads the payment records, so a spending check takes time in
+proportion to the number of recorded calls. The ledger is never reconstructed as zero
+from missing or malformed state, and an unreadable payment record refuses every payment.
 
-An existing wallet with historical intents requires explicit initialization, which
-conservatively charges every historical intent and writes a principal and a fee receipt
-for each, under the same identity a live charge uses. A later resume or automatic
-recovery of a historical payment finds those receipts and is not charged again. A ledger
-initialized by an earlier version has no such receipts, so a resume of one of its
-historical payments is still charged once more. This can consume more allowance than
-was actually paid; it cannot silently authorize more principal plus fees than the cap.
-Retain the ledger and all receipts with the wallet and payment records. Do not delete
-or edit accounting files to replenish allowance.
+An existing wallet with historical intents requires explicit initialization. It charges
+every historical call that holds a transmit authorization or whose record cannot prove
+that nothing was broadcast, and writes a principal and a fee receipt for each, under the
+same identity a live charge uses. A call the store proves was never sent (never staged,
+or staged but never authorized to transmit) is not charged and needs no fee evidence.
+A later resume or automatic recovery of a historical payment finds those receipts and is
+not charged again. A ledger initialized by an earlier version has no such receipts, so a
+resume of one of its historical payments is still charged once more. This can consume
+more allowance than was actually paid; it cannot silently authorize more principal plus
+fees than the cap. Retain the ledger, all receipts and the payment records with the
+wallet. Do not delete or edit accounting files or payment records to replenish allowance.
 
 ## Signed approvals
 
@@ -161,7 +169,7 @@ remain release decisions with evidence that local fixtures cannot manufacture.
 
 ### Fee-inclusive allowance upgrade
 
-New spending ledgers use version 2. Every payment reserves its principal and the exact positive calculated fee together, at the single transmit authorization point after signing, the final gates and the backend lock. Fee receipts survive interrupted writes, are idempotent, and are never refunded. Resume requires the original durable fee to agree with the wallet transaction; a missing or changed fee blocks retransmission. The per-call cap still limits recipient principal; the cumulative cap limits principal plus fees.
+New spending ledgers use version 2. Every payment reserves its principal and the exact positive calculated fee together, at the single transmit authorization point after signing, the final gates and the backend lock. The charge is part of the transmit authorization record, so it survives interrupted writes, is idempotent per payment identity, and is never refunded. Resume requires the original durable fee to agree with the wallet transaction; a missing or changed fee blocks retransmission. The per-call cap still limits recipient principal; the cumulative cap limits principal plus fees.
 
 Version 1 ledgers are refused: their historical fees were not accounted for. Never delete or reset a ledger to upgrade. Existing historical records without durable fee evidence require operator reconciliation before enabling this allowance. `budget-init` refuses incomplete historical fee evidence. Monitoring exposes `reserved_spending_zats` and policy exposes `cumulative_spending_cap_zec`.
 
