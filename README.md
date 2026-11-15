@@ -450,10 +450,10 @@ Mainnet is refused, and so is `FINANCIAL_CONTROLS_REQUIRED=1`, whose checks cove
 A send is staged as in the other live modes:
 
 1. `zcash-devtool pczt create` builds the payment and `pczt prove` proves it.
-2. `ironclad-cosigner inspect --json` runs the co-signer's own PCZT checks on this side. The result must contain exactly one payment of exactly the requested zatoshis, plus a fee, and that fee is what zshield's fee allowance is charged.
+2. `ironclad-cosigner inspect --json` runs the co-signer's own PCZT checks on this side. The result must contain exactly one payment of exactly the requested zatoshis, plus a fee. That fee is checked against the total spending allowance here, before anyone signs, without reserving it; a fee the allowance cannot cover ends the call as not sent with no signing round. The fee is reserved later, after signing (step 5), as in the other live modes.
 3. `ironclad-cosigner coordinate` runs the signing round with the co-signer through the session folder it watches. When its policy refuses, the call ends as not sent, with the co-signer's reason, and the refusal is in the co-signer's ledger.
 4. `zcash-devtool pczt extract` gives the signed transaction's txid, with nothing broadcast. Signing cannot change the txid (ZIP 244).
-5. zshield records the txid durably, then `pczt send` broadcasts that same signed PCZT, and its answer must name the recorded txid.
+5. zshield records the txid durably and reserves the fee, then `pczt send` broadcasts that same signed PCZT, and its answer must name the recorded txid.
 
 When the co-signer is offline, the signing round waits two minutes and the call ends as not sent: "the Ironclad co-signer did not answer within 120 s (is its daemon running?). Nothing was sent." Nothing is extracted or broadcast, and the next payment can go ahead once the co-signer is back. A co-signer that crashes is reported as killed by its signal, and also ends as not sent.
 
