@@ -60,6 +60,10 @@ export function createToolRunner(): ToolRunner {
         clearTimeout(timer);
         resolve({ status: signal ? null : status, stdout: Buffer.concat(out), stderr: err });
       });
+      // A program that exits before reading its input breaks the pipe (EPIPE). Without a
+      // listener that is an uncaught exception that ends the server; the exit status says
+      // what happened, so the error itself is dropped, as the other runners here do.
+      child.stdin.on("error", () => {});
       child.stdin.end(opts.input);
     });
 }
