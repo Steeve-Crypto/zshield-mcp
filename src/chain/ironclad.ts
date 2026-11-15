@@ -335,6 +335,8 @@ export class IroncladChainAdapter implements ChainAdapter {
       if (checked.payments.length !== 1 || checked.payments[0] !== req.amountZats) {
         throw new Error("the PCZT does not pay exactly the requested amount in one payment. Nothing was signed or sent.");
       }
+      // The fee must fit before anyone signs. Reserving it waits until after signing.
+      req.checkFee?.(checked.feeZats);
 
       try {
         await this.run(
