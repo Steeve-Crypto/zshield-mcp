@@ -1,6 +1,6 @@
 import { approvalKeys } from "./payments/approval.js";
 import { parseZecToZats } from "./policy/amount.js";
-import { existsSync, readdirSync, statfsSync } from "node:fs";
+import { existsSync, readdirSync, statfsSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { assertFingerprintSalt } from "./config.js";
 import { resolveWalletDir } from "./chain/live.js";
@@ -130,6 +130,11 @@ function ironcladStartupChecks(config: Config, platform: string, deps: StartupDe
   if (!ic) throw new Error("zshield-mcp: CHAIN_MODE=ironclad has no IRONCLAD_* settings.");
   for (const [name, path] of [["IRONCLAD_DEVTOOL", ic.devtool], ["IRONCLAD_COSIGNER", ic.cosigner], ["IRONCLAD_SESSION_DIR", ic.sessionDir]] as const) {
     if (!existsSync(path)) throw new Error(`zshield-mcp: ${name} does not exist.`);
+  }
+  // Signing rounds pass through the session folder; the co-signer daemon must be able to
+  // write there, but not every user of the machine.
+  if (platform !== "win32" && (statSync(ic.sessionDir).mode & 0o002) !== 0) {
+    throw new Error("zshield-mcp: IRONCLAD_SESSION_DIR can be written by any user. Remove that permission (chmod o-w), then start the server.");
   }
   const warnings: string[] = [];
   for (const [name, dir] of [["IRONCLAD_WALLET_DIR", ic.walletDir], ["IRONCLAD_FROST_DIR", ic.frostDir]] as const) {
