@@ -42,6 +42,8 @@ import { tempConfig, withEnv } from "./helpers.ts";
 //    time (two minutes, not the five allowed for building), then the call ends as not sent,
 //    saying the co-signer did not answer, with nothing extracted or broadcast. It is never an
 //    unknown outcome, and the next payment may go ahead once the co-signer is back.
+// 10. A program that exits before reading its input never takes the server down: the
+//     runner ignores the broken pipe and reports how the program ended.
 
 const DEVTOOL = "/opt/ironclad/zcash-devtool";
 const COSIGNER = "/opt/ironclad/ironclad-cosigner";
@@ -328,6 +330,11 @@ describe("ironclad tool runner", () => {
     const echoed = await createToolRunner()("/bin/echo", ["a b", "$(x)"], { timeoutMs: 10_000 });
     assert.equal(echoed.stdout.toString(), "a b $(x)\n");
   });
+  it("survives a program that exits without reading its input", { skip: process.platform === "win32" }, async () => {
+    const r = await createToolRunner()(process.execPath, ["-e", "process.exit(0)"], { timeoutMs: 10_000, input: Buffer.alloc(8 * 1024 * 1024, 0x61) });
+    assert.equal(r.status, 0);
+  });
+
 });
 
 describe("CHAIN_MODE=ironclad config", () => {
