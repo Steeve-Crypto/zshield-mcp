@@ -1,5 +1,5 @@
 import { assertApproval } from "./approval.js";
-import { reservePayment } from "./budget.js";
+import { checkSpending, paymentIdentity, reservePayment } from "./budget.js";
 import { assertPaymentsEnabled } from "./pause.js";
 import { fingerprintViewKey, writeAuditRow } from "../audit/log.js";
 import { assertFingerprintSalt } from "../config.js";
@@ -95,22 +95,29 @@ export async function resumeOriginal(
     const fees = record.events.filter(e => e.calculated_fee_zats !== undefined).map(e => e.calculated_fee_zats!);
     const originalFee = fees.length === 1 && /^[1-9][0-9]{0,15}$/.test(fees[0]) ? BigInt(fees[0]) : undefined;
     if (config.totalSpendingCapZec !== undefined && originalFee !== entry.feeZats) return unknown("The original durable fee does not match the wallet transaction.");
-    // Budget and fee gates before any financial audit charge: a policy refusal must not
-    // consume protected capacity, and can be repeated safely.
-    // Principal and fee together: a fee that does not fit charges nothing (F-72).
-    reservePayment(config, store, lock, record.callId, amount, originalFee, paymentParamsHash(intent), intent.idempotency_key!);
+    // Read only before the final fence: a refusal here or at the fence charges nothing,
+    // and a payment already charged (by an earlier attempt or by the historical migration)
+    // is recognized by its stored idempotency identity, never charged twice (F-89).
+    const identity = paymentIdentity(intent, record.callId);
+    if (config.totalSpendingCapZec !== undefined && originalFee === undefined) {
+      throw new PolicyError("SPENDING_BUDGET_REFUSED", "A positive verified transaction fee is required before transmission.");
+    }
+    checkSpending(config, store, lock, amount, originalFee ?? 0n, identity.paramsHash, identity.key);
     lock.assertHeld();
     await chain.resumeSigned(txid, { fence: () => {
       assertNoOtherSend();
       assertPaymentsEnabled(store);
       assertApproval(config, store, intent.idempotency_key!, paymentParamsHash(intent), fingerprint);
       assertRecipientAllowed(intent.recipient, loadAllowlist(config.allowlistPath));
-      reservePayment(config, store, lock, record.callId, amount, originalFee, paymentParamsHash(intent), intent.idempotency_key!);
+      checkSpending(config, store, lock, amount, originalFee ?? 0n, identity.paramsHash, identity.key);
       // Financial evidence is charged only here, after every gate of THIS attempt passed and
       // with the backend lock held, immediately before the network mutation. A refusal at any
       // earlier point consumes no protected audit capacity and can be repeated safely (F-59).
       const audit = writeAuditRow(config, { ...base, status: "unknown", note: "Resuming only the originally signed transaction by exact txid; no replacement transaction authorized." });
       if (!audit.durable) throw new ResumeAuditError("Audit evidence could not be persisted; no resume attempted.");
+      // The single spending charge point, after the final gates, the backend lock and the
+      // audit write, in the same critical section that authorizes transmit (F-72, F-89).
+      reservePayment(config, store, lock, record.callId, amount, originalFee, identity.paramsHash, identity.key);
       attempted = true;
       // Authorize only once the backend lock is held and the fence checks pass (F-53, F-73).
       if (!hasTransmitAuthorization(record)) store.authorizeTransmit(record.callId, new Date().toISOString());

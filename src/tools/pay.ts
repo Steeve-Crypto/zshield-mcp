@@ -1,5 +1,5 @@
 import { assertApproval } from "../payments/approval.js";
-import { checkSpending, reserveSpending, reserveFee, reservePayment } from "../payments/budget.js";
+import { checkSpending, reservePayment } from "../payments/budget.js";
 import { assertPaymentsEnabled } from "../payments/pause.js";
 import { resumeOriginal, RESUME_TIMEOUT_MS } from "../payments/resume.js";
 import { eventFor, recordReconcile } from "../payments/recovery.js";
@@ -844,7 +844,7 @@ async function runPay(
 
     // Every policy gate runs again here, before the protected pending row: a refusal is
     // refusal evidence, repeatable at no cost to payment capacity (F-59). Spending is only
-    // checked, never charged, until the exact fee is known inside the send (F-72).
+    // checked, never charged, until transmit is authorized after the backend lock (F-72).
     if (policyPassed && amountZats !== undefined && lock) {
       try {
         // Re-check under the same lock after health; the first check was before the sync.
@@ -965,8 +965,9 @@ async function runPay(
             authorizeFee: (fee) => {
               lock!.assertHeld();
               store.appendEvent({ ts: now(), call_id: callId, state: "pending", calculated_fee_zats: fee.toString(), by: "send" });
-              // Principal and fee are charged together, only once the exact fee is known.
-              reservePayment(config, store, lock!, callId, amountZats!, fee, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
+              // Read only: a fee that cannot fit is refused here, but nothing is charged
+              // until transmit is irrevocably authorized in afterLock (F-72).
+              checkSpending(config, store, lock!, amountZats!, fee, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
               calculatedFee = fee;
             },
             amountZats,
@@ -986,8 +987,8 @@ async function runPay(
               // Re-load the allow-list at the transmit fence so a revocation while this call
               // waited cannot still be paid (F-73).
               assertRecipientAllowed(input.recipient, loadAllowlist(config.allowlistPath));
-              reserveSpending(config, store, lock!, callId, amountZats!, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
-              reserveFee(config, store, lock!, callId, calculatedFee, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
+              // Read only, like every gate before the backend lock (F-72).
+              checkSpending(config, store, lock!, amountZats!, calculatedFee ?? 0n, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
             },
             afterLock: () => {
               // Re-check expiry/pause/budget/allow-list after the backend lock wait.
@@ -997,8 +998,10 @@ async function runPay(
               assertPaymentsEnabled(store);
               assertApproval(config, store, keyFields.idempotency_key ?? callId, keyFields.params_sha256 ?? paymentParamsHash(input), viewKeyFingerprint);
               assertRecipientAllowed(input.recipient, loadAllowlist(config.allowlistPath));
-              reserveSpending(config, store, lock!, callId, amountZats!, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
-              reserveFee(config, store, lock!, callId, calculatedFee, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
+              // The single charge point: every final gate has passed and the backend lock is
+              // held. Principal and fee are charged by the stored idempotency identity, then
+              // transmit is authorized. Any earlier refusal charged nothing (F-72).
+              reservePayment(config, store, lock!, callId, amountZats!, calculatedFee, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
               store.authorizeTransmit(callId, now());
             },
             stage: (txid) => {

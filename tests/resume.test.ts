@@ -288,7 +288,7 @@ it("legacy testnet intent cannot resume under mainnet configuration", async () =
   assert.ok(w.store.unresolvedSend());
 });
 
-it("resume reserves the original fee and refuses changed fee evidence", async () => {
+it("resume keeps the migrated fee charge and refuses changed fee evidence", async () => {
   for (const fee of [10000n,20000n,undefined]) {
     const w=setup();
     w.config.totalSpendingCapZec="0.0004";
@@ -301,7 +301,9 @@ it("resume reserves the original fee and refuses changed fee evidence", async ()
     await recoverPendingPayments(w.config,w.chain);
     assert.equal(w.attempts(),fee===10000n?1:0);
     const total=JSON.parse(fs.readFileSync(join(w.store.dir,"spending-budget/ledger.json"),"utf8")).total;
-    assert.equal(total,fee===10000n?"40000":"20000");
+    // The migration already charged this payment's principal and fee: a resume of it is
+    // recognized by its receipts and never charged a second time (V12 F-89).
+    assert.equal(total,"20000");
     await recoverPendingPayments(w.config,w.chain);
     assert.equal(JSON.parse(fs.readFileSync(join(w.store.dir,"spending-budget/ledger.json"),"utf8")).total,total);
   }
