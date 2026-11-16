@@ -694,16 +694,27 @@ export class LiveChainAdapter implements ChainAdapter {
     // happens in afterLock once the lock is held, so a WalletBusyError here stays not_sent.
     req.beforeTransmit?.();
     let sent: string;
+    let refusedAtGate = false;
     try {
       sent = await this.exec(this.baseArgs(), {
         timeoutMs: SEND_TIMEOUT_MS,
         input: transmitInput,
         lockWaitMs: SEND_LOCK_WAIT_MS,
-        afterLock: () => { req.fence?.(); req.afterLock?.(); },
+        afterLock: () => {
+          try {
+            req.fence?.();
+            req.afterLock?.();
+          } catch (e) {
+            // The gate refused, so the wallet process is never released to transmit.
+            refusedAtGate = true;
+            throw e;
+          }
+        },
       });
     } catch (e) {
-      // The wallet process never started: nothing was transmitted.
-      if (e instanceof WalletBusyError) throw e;
+      // The wallet process never started, or a final gate refused before it was let go:
+      // nothing was transmitted, and the exact refusal is kept.
+      if (e instanceof WalletBusyError || refusedAtGate) throw e;
       // Anything else may have happened after the broadcast.
       throw new SendOutcomeUnknownError(e instanceof Error ? e.message : String(e), txid);
     }

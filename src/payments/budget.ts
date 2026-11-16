@@ -1,11 +1,11 @@
 import fs from "node:fs";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
-import { createExclusive, ensurePrivateDir, readPrivate, replaceAtomic } from "../fsafe.js";
+import { createHash, randomBytes } from "node:crypto";
+import { createExclusive, ensurePrivateDir, fsyncDir, readPrivate, replaceAtomic } from "../fsafe.js";
 import { parseZecToZats } from "../policy/amount.js";
 import { PolicyError } from "../policy/caps.js";
 import type { Config } from "../types.js";
-import type { PaymentStore } from "./store.js";
+import { paymentParamsHash, type CallIntent, type PaymentStore } from "./store.js";
 import type { WalletLock } from "./lock.js";
 
 type Charge = { id: string; amount: string; identity: string };
@@ -137,12 +137,27 @@ export function reservePayment(config: Config, store: PaymentStore, lock: Wallet
   reserveFee(config, store, lock, callId, fee, paramsHash, key);
 }
 
-/** Local operator migration, under the wallet lock. Charges every historical intent. */
+/**
+ * The stored idempotency identity a payment is charged under: its key (the call id for a
+ * keyless call) and its parameter hash. Every charge site uses this, never the call id
+ * of one attempt, so retries, resumes and recovery all find the same receipts.
+ */
+export function paymentIdentity(intent: CallIntent, callId: string): { key: string; paramsHash: string } {
+  return { key: intent.idempotency_key ?? callId, paramsHash: intent.params_sha256 ?? paymentParamsHash(intent) };
+}
+
+/**
+ * Local operator migration, under the wallet lock. Charges every historical intent and
+ * writes its principal and fee receipts, so a later resume or recovery of one of those
+ * payments is recognized as already charged and is never charged twice (F-89). The
+ * ledger is built in a private temporary directory and published by one rename.
+ */
 export function initializeHistoricalBudget(store: PaymentStore, lock: WalletLock): void {
   lock.assertHeld();
   const dir = join(store.dir, "spending-budget");
   if (fs.existsSync(dir)) throw new Error("Spending budget already exists; never reset its ledger.");
   let total = 0n;
+  const charges = new Map<string, Charge>();
   for (const id of fs.readdirSync(join(store.dir, "calls"))) {
     if (id.startsWith(".tmp-")) throw new Error("Incomplete historical state requires investigation");
     const record = store.readCall(id);
@@ -150,10 +165,29 @@ export function initializeHistoricalBudget(store: PaymentStore, lock: WalletLock
     const fees = record.events.filter(e => e.calculated_fee_zats !== undefined);
     if (fees.length !== 1 || !digits.test(fees[0].calculated_fee_zats!)) throw new Error("Historical fee evidence is missing; refuse to undercount spending.");
     total += BigInt(record.intent.amount_zats) + BigInt(fees[0].calculated_fee_zats!);
+    const { key, paramsHash } = paymentIdentity(record.intent, record.callId);
+    const ids = identities(paramsHash, key);
+    for (const [identity, amount] of [[ids.principal, record.intent.amount_zats], [ids.fee, fees[0].calculated_fee_zats!]] as const) {
+      // Two historical calls of one payment identity must agree, or a later charge of
+      // that identity is refused rather than guessed.
+      if (BigInt(amount) <= 0n) continue;
+      const prior = charges.get(identity);
+      if (prior && prior.amount !== amount) throw new Error("Historical charges of one payment disagree; operator review is required.");
+      charges.set(identity, { id: identity, amount, identity });
+    }
   }
   if (!digits.test(total.toString())) throw new Error("Historical total out of range");
-  ensurePrivateDir(dir);
-  if (!createExclusive(dir, "ledger.json", JSON.stringify({ version: 2, total: total.toString() }))) throw new Error("Budget already exists");
+  const staging = join(store.dir, `.tmp-spending-budget-${randomBytes(8).toString("hex")}`);
+  ensurePrivateDir(staging);
+  const receipts = join(staging, "receipts");
+  ensurePrivateDir(receipts);
+  for (const charge of charges.values()) createExclusive(receipts, charge.id, JSON.stringify(charge));
+  fsyncDir(receipts);
+  if (!createExclusive(staging, "ledger.json", JSON.stringify({ version: 2, total: total.toString() }))) throw new Error("Budget already exists");
+  fsyncDir(staging);
+  if (fs.existsSync(dir)) throw new Error("Budget already exists");
+  fs.renameSync(staging, dir);
+  fsyncDir(store.dir);
 }
 
 /** Separate immutable receipt permits upgrading a principal reservation without refunds. */

@@ -72,6 +72,9 @@ export class MockChainAdapter implements ChainAdapter {
     const mockTxid = `mock_${txid.slice(0, 32)}`;
     req.authorizeFee?.(MOCK_FEE_ZATS);
     req.beforeTransmit?.();
+    // The mock has no backend lock to wait on; it still passes the single point where
+    // transmit is authorized and spending is charged, like every other adapter.
+    req.afterLock?.();
     this.balanceZats -= needed;
     this.txs.push({
       txid: mockTxid,
