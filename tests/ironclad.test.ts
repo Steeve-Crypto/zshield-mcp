@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, chownSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { describe, it } from "node:test";
@@ -55,6 +56,15 @@ import { tempConfig, withEnv } from "./helpers.ts";
 //     reserved by req.authorizeFee after signing, as before. Through zcash_pay, a fee that
 //     the total spending allowance cannot cover ends as not sent with no co-signer round
 //     and no fee charged.
+// 15. IRONCLAD_DEVTOOL_SHA256 and IRONCLAD_COSIGNER_SHA256, when set, pin each program. A
+//     wrong digest stops the adapter, and so the server, at start, naming the program. A
+//     program changed after start is refused before it runs, for reads and payments alike.
+//     The pins are checked once more before the transmit is authorized, so a program
+//     swapped during a payment ends it as not sent, never unknown, with nothing broadcast.
+//     A file the pin cannot trust (missing, a symlink, writable by group or others, or
+//     owned by someone other than you or root) is refused with that reason, at start and
+//     before a run, and never reported as a digest mismatch, which would send the owner
+//     off re-pinning a digest that is right.
 
 const DEVTOOL = "/opt/ironclad/zcash-devtool";
 const COSIGNER = "/opt/ironclad/ironclad-cosigner";
@@ -112,6 +122,8 @@ interface FakeOptions {
   extracted?: string;
   send?: "ok" | "throws" | "other";
   onSend?: () => void;
+  /** Runs when `pczt extract` is asked for the txid, after the signing round. */
+  onExtract?: () => void;
   listTx?: string;
   listTxJson?: string;
 }
@@ -164,7 +176,10 @@ function fakeTools(opts: FakeOptions = {}) {
         return ok("");
       }
       if (args.includes("prove")) return ok(PROVEN);
-      if (args[1] === "extract") return ok(`${opts.extracted ?? TXID}\n`);
+      if (args[1] === "extract") {
+        opts.onExtract?.();
+        return ok(`${opts.extracted ?? TXID}\n`);
+      }
       if (args.includes("send")) {
         opts.onSend?.();
         assert.deepEqual(readFileSync(args[args.length - 1]), SIGNED, "send gets the signed PCZT");
@@ -195,6 +210,117 @@ const adapter = (fake: ReturnType<typeof fakeTools>, stateDir?: string) =>
     stateDir,
     runner: fake.runner,
   });
+
+/** The two programs as files on disk, with the SHA-256 of each, for the pins. */
+function pinnedPrograms() {
+  const dir = mkdtempSync(join(tmpdir(), "zshield-ironclad-bin-"));
+  const devtool = join(dir, "zcash-devtool");
+  const cosigner = join(dir, "ironclad-cosigner");
+  writeFileSync(devtool, "devtool build", { mode: 0o700 });
+  writeFileSync(cosigner, "cosigner build", { mode: 0o700 });
+  const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+  return { devtool, cosigner, devtoolSha256: sha("devtool build"), cosignerSha256: sha("cosigner build") };
+}
+
+/** An adapter on those files, pinned, with the fake tools answering for them. */
+const pinnedAdapter = (fake: ReturnType<typeof fakeTools>, p: ReturnType<typeof pinnedPrograms>, pins: { devtoolSha256?: string; cosignerSha256?: string } = {}, stateDir?: string) =>
+  new IroncladChainAdapter({
+    network: "testnet",
+    devtool: p.devtool,
+    walletDir: "/var/ironclad/group",
+    cosigner: p.cosigner,
+    frostDir: "/var/ironclad/frost",
+    sessionDir: "/var/ironclad/frost/session",
+    share: "1",
+    connection: "direct",
+    devtoolSha256: p.devtoolSha256,
+    cosignerSha256: p.cosignerSha256,
+    ...pins,
+    stateDir,
+    runner: (cmd, args, o) => fake.runner(cmd === p.devtool ? DEVTOOL : cmd === p.cosigner ? COSIGNER : cmd, args, o),
+  });
+
+describe("ironclad adapter: program pins", { skip: process.platform === "win32" }, () => {
+  it("refuses to start when a program does not match its pin, naming the program", () => {
+    const p = pinnedPrograms();
+    assert.throws(() => pinnedAdapter(fakeTools(), p, { devtoolSha256: "0".repeat(64) }), /IRONCLAD_DEVTOOL does not match IRONCLAD_DEVTOOL_SHA256/);
+    assert.throws(() => pinnedAdapter(fakeTools(), p, { cosignerSha256: "0".repeat(64) }), /IRONCLAD_COSIGNER does not match IRONCLAD_COSIGNER_SHA256/);
+  });
+
+  it("pays with matching pins, then refuses a program changed after start before running it", async () => {
+    const p = pinnedPrograms();
+    const fake = fakeTools();
+    const chain = pinnedAdapter(fake, p);
+    await chain.pay({ amountZats: 5000n, recipient: ADDR });
+    writeFileSync(p.devtool, "another devtool build");
+    const before = fake.calls.length;
+    await assert.rejects(chain.getHistory(5), /IRONCLAD_DEVTOOL does not match/);
+    await assert.rejects(chain.pay({ amountZats: 5000n, recipient: ADDR }), /IRONCLAD_DEVTOOL does not match/);
+    assert.equal(fake.calls.length, before, "nothing ran");
+  });
+
+  it("checks both pins again before the transmit is authorized", async () => {
+    for (const swap of ["devtool", "cosigner"] as const) {
+      const p = pinnedPrograms();
+      const fake = fakeTools({ onExtract: () => writeFileSync(p[swap], "a swapped build") });
+      let authorized = false;
+      await assert.rejects(pinnedAdapter(fake, p).pay({ amountZats: 5000n, recipient: ADDR, afterLock: () => { authorized = true; } }), (e: unknown) => {
+        assert.ok(!(e instanceof SendOutcomeUnknownError), swap);
+        assert.match(String(e), new RegExp(`IRONCLAD_${swap.toUpperCase()} does not match`));
+        return true;
+      });
+      assert.ok(!authorized, `${swap}: transmit not authorized`);
+      assert.ok(!fake.steps().includes("pczt send"), swap);
+    }
+  });
+
+  /** Asserts the adapter refuses at start with `reason`, naming the program, and not as a digest mismatch. */
+  const refusedFor = (p: ReturnType<typeof pinnedPrograms>, reason: RegExp) =>
+    assert.throws(() => pinnedAdapter(fakeTools(), p), (e: unknown) => {
+      assert.match(String(e), /IRONCLAD_DEVTOOL/);
+      assert.match(String(e), reason);
+      assert.doesNotMatch(String(e), /does not match/);
+      return true;
+    });
+
+  it("names a symlink as the reason, though the digest is right", () => {
+    const p = pinnedPrograms();
+    const link = `${p.devtool}-link`;
+    symlinkSync(p.devtool, link);
+    refusedFor({ ...p, devtool: link }, /symlink/);
+  });
+
+  it("names a program writable by group or others as the reason, though the digest is right", () => {
+    const p = pinnedPrograms();
+    chmodSync(p.devtool, 0o720);
+    refusedFor(p, /writable by group or others/);
+  });
+
+  it("names a missing program as the reason", () => {
+    const p = pinnedPrograms();
+    rmSync(p.devtool);
+    refusedFor(p, /does not exist/);
+  });
+
+  it("names a program owned by another user as the reason", { skip: process.getuid?.() !== 0 && "needs root to give the file away" }, () => {
+    const p = pinnedPrograms();
+    chownSync(p.devtool, 1, 1);
+    refusedFor(p, /owned by another user/);
+  });
+
+  it("names the reason when a program's file turns unsafe after start, and runs nothing", async () => {
+    const p = pinnedPrograms();
+    const fake = fakeTools();
+    const chain = pinnedAdapter(fake, p);
+    chmodSync(p.devtool, 0o720);
+    await assert.rejects(chain.getHistory(5), (e: unknown) => {
+      assert.match(String(e), /IRONCLAD_DEVTOOL.*writable by group or others/);
+      assert.doesNotMatch(String(e), /does not match/);
+      return true;
+    });
+    assert.equal(fake.calls.length, 0, "nothing ran");
+  });
+});
 
 describe("ironclad adapter: staged send", () => {
   it("builds, proves, checks, co-signs, records the txid, then broadcasts the signed PCZT", async () => {
@@ -396,7 +522,7 @@ describe("ironclad tool runner", () => {
 });
 
 describe("CHAIN_MODE=ironclad config", () => {
-  const keys = ["CHAIN_MODE", "IRONCLAD_DEVTOOL", "IRONCLAD_WALLET_DIR", "IRONCLAD_COSIGNER", "IRONCLAD_FROST_DIR", "IRONCLAD_SESSION_DIR", "IRONCLAD_SHARE", "IRONCLAD_CONNECTION", "VIEW_KEY_FINGERPRINT_SALT", "FINANCIAL_CONTROLS_REQUIRED"];
+  const keys = ["CHAIN_MODE", "IRONCLAD_DEVTOOL_SHA256", "IRONCLAD_COSIGNER_SHA256", "IRONCLAD_DEVTOOL", "IRONCLAD_WALLET_DIR", "IRONCLAD_COSIGNER", "IRONCLAD_FROST_DIR", "IRONCLAD_SESSION_DIR", "IRONCLAD_SHARE", "IRONCLAD_CONNECTION", "VIEW_KEY_FINGERPRINT_SALT", "FINANCIAL_CONTROLS_REQUIRED"];
   const env = (vars: Record<string, string | undefined>, fn: () => void) => {
     const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
     for (const k of keys) delete process.env[k];
@@ -442,6 +568,26 @@ describe("CHAIN_MODE=ironclad config", () => {
     for (const share of ["0", "-1", "a", "1 2"]) env({ ...good, IRONCLAD_SHARE: share }, () => assert.throws(() => loadConfig(cwd), /IRONCLAD_SHARE/, share));
     for (const connection of ["socks5://", "http://proxy", "tor --x"]) env({ ...good, IRONCLAD_CONNECTION: connection }, () => assert.throws(() => loadConfig(cwd), /IRONCLAD_CONNECTION/, connection));
     env({ ...good, FINANCIAL_CONTROLS_REQUIRED: "1" }, () => assert.throws(() => loadConfig(cwd), /zingo-cli backend only/));
+  });
+
+  it("reads the optional program pins, refuses a malformed one, and stops at start on a wrong one", { skip: process.platform === "win32" }, () => {
+    const cwd = mkdtempSync(join(tmpdir(), "zshield-cfg-"));
+    const digest = "ab".repeat(32);
+    env({ ...good, IRONCLAD_DEVTOOL_SHA256: digest, IRONCLAD_COSIGNER_SHA256: digest }, () => {
+      const c = loadConfig(cwd);
+      assert.equal(c.ironclad?.devtoolSha256, digest);
+      assert.equal(c.ironclad?.cosignerSha256, digest);
+    });
+    env(good, () => assert.equal(loadConfig(cwd).ironclad?.devtoolSha256, undefined));
+    for (const k of ["IRONCLAD_DEVTOOL_SHA256", "IRONCLAD_COSIGNER_SHA256"]) {
+      for (const bad of ["abc", "0".repeat(63), "g".repeat(64), "AB".repeat(32)]) {
+        env({ ...good, [k]: bad }, () => assert.throws(() => loadConfig(cwd), new RegExp(k), bad));
+      }
+    }
+    const p = pinnedPrograms();
+    env({ ...good, IRONCLAD_DEVTOOL: p.devtool, IRONCLAD_DEVTOOL_SHA256: "0".repeat(64) }, () => {
+      assert.throws(() => createChain(loadConfig(cwd)), /IRONCLAD_DEVTOOL does not match/);
+    });
   });
 });
 
@@ -498,6 +644,18 @@ describe("zcash_pay through the ironclad adapter", () => {
     assert.ok(!s.fake.steps().includes("pczt send"));
     const ledger = JSON.parse(readFileSync(join(s.store.dir, "spending-budget", "ledger.json"), "utf8"));
     assert.equal(ledger.total, "0", "nothing is charged");
+  });
+
+  it("ends a payment as not sent when a pinned program is swapped during it", { skip: process.platform === "win32" }, async () => {
+    const p = pinnedPrograms();
+    const fake = fakeTools({ onExtract: () => writeFileSync(p.devtool, "a swapped build") });
+    const s = setup();
+    const chain = pinnedAdapter(fake, p, {}, s.state);
+    const r = await withEnv("HEALTH_SYNC_TIMEOUT_MS", "1000", () => executePay(input, { config: s.config, chain }));
+    assert.notEqual(r.audit.status, "ok", r.text);
+    assert.notEqual(r.audit.status, "unknown", r.text);
+    assert.match(r.text, /IRONCLAD_DEVTOOL does not match/);
+    assert.ok(!fake.steps().includes("pczt send"));
   });
 
   it("leaves a failed broadcast unresolved, then recovery confirms it by txid once mined", async () => {

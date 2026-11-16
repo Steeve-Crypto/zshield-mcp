@@ -15,6 +15,15 @@ it('wallet binary pin rejects a replacement and an incorrect digest',()=>{
  fs.renameSync(bin,bin+'.old');fs.writeFileSync(bin,'approved executable',{mode:0o700});
  assert.throws(check,/approved identity/);
 });
+it('wallet binary pin names an unsafe file as the reason, not the digest',()=>{
+ const c=tempConfig(),bin=join(dirname(c.auditDir),'wallet-bin');
+ fs.writeFileSync(bin,'approved executable',{mode:0o700});
+ const digest=createHash('sha256').update('approved executable').digest('hex');
+ fs.symlinkSync(bin,bin+'-link');
+ assert.throws(()=>pinExecutable(bin+'-link',digest),e=>/symlink/.test(String(e))&&!/approved identity/.test(String(e)));
+ fs.chmodSync(bin,0o720);
+ assert.throws(()=>pinExecutable(bin,digest),e=>/writable by group or others/.test(String(e))&&!/approved identity/.test(String(e)));
+});
 it('financial profile refuses missing controls and weak approval thresholds',()=>{
  const c=tempConfig({requireFinancialControls:true,chainMode:'live',chainNetwork:'testnet'});
  assert.throws(()=>assertFinancialProfile(c,'linux'),/TOTAL_SPENDING/);

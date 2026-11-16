@@ -486,6 +486,10 @@ VIEW_KEY_FINGERPRINT_SALT=$(openssl rand -hex 32) ALLOWLIST_PATH=./allowlists/te
 | `IRONCLAD_SESSION_DIR` | none, required | Absolute path of the session folder the co-signer daemon watches |
 | `IRONCLAD_SHARE` | `1` | The share number zshield signs as, a positive integer |
 | `IRONCLAD_CONNECTION` | `tor` | zcash-devtool's connection for sync and broadcast: `tor`, `direct` or `socks5://host:port` |
+| `IRONCLAD_DEVTOOL_SHA256` | none, not pinned | The approved zcash-devtool build's SHA-256, 64 lowercase hex characters (`sha256sum`) |
+| `IRONCLAD_COSIGNER_SHA256` | none, not pinned | The approved ironclad-cosigner build's SHA-256 |
+
+Set both pins for anything beyond a trial. A pinned program is hashed at start, and a mismatch stops the server with the program's name. After that, its file must keep the same inode, size, times, mode and owner, and must not be writable by group or others. The check runs before every run of that program, for reads and payments alike. Both pins are checked once more after signing, before the txid is recorded or the transmit authorized, so a program swapped mid-payment ends it as not sent. A rebuilt program needs its new digest pinned and a restart; that includes the co-signer once ironclad#2 merges. Point each setting at the real file, not a symlink (`readlink -f` gives it), and keep the file yours or root's with no group or other write bit (`chmod go-w`). A file that breaks one of these is refused with that reason before its digest counts, so re-pinning will not help.
 
 Mainnet is refused, and so is `FINANCIAL_CONTROLS_REQUIRED=1`. The co-signer's host and zshield's host together hold two shares, which is the threshold, so in production run the co-signer on a different machine.
 
