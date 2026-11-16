@@ -40,6 +40,15 @@ export function parseIronclad(env: NodeJS.ProcessEnv = process.env): NonNullable
   if (!/^[1-9][0-9]{0,4}$/.test(share)) throw new Error("IRONCLAD_SHARE must be this agent's member number in the group (a positive integer).");
   const connection = (env.IRONCLAD_CONNECTION ?? "tor").trim();
   if (!/^(tor|direct|socks5:\/\/\S+)$/.test(connection)) throw new Error("IRONCLAD_CONNECTION must be tor, direct or socks5://host:port.");
+  // Optional: a program's approved SHA-256, as sha256sum prints it.
+  const pin = (name: string): string | undefined => {
+    const raw = env[name]?.trim();
+    if (!raw) return undefined;
+    if (!/^[a-f0-9]{64}$/.test(raw)) throw new Error(`${name} must be the program's SHA-256: 64 lowercase hex characters, as sha256sum prints it.`);
+    return raw;
+  };
+  const devtoolSha256 = pin("IRONCLAD_DEVTOOL_SHA256");
+  const cosignerSha256 = pin("IRONCLAD_COSIGNER_SHA256");
   return {
     devtool: ironcladPath("IRONCLAD_DEVTOOL"),
     walletDir: ironcladPath("IRONCLAD_WALLET_DIR"),
@@ -48,6 +57,8 @@ export function parseIronclad(env: NodeJS.ProcessEnv = process.env): NonNullable
     sessionDir: ironcladPath("IRONCLAD_SESSION_DIR"),
     share,
     connection,
+    ...(devtoolSha256 ? { devtoolSha256 } : {}),
+    ...(cosignerSha256 ? { cosignerSha256 } : {}),
   };
 }
 

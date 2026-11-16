@@ -37,6 +37,9 @@ export interface Config {
     sessionDir: string;
     share: string;
     connection: string;
+    /** IRONCLAD_DEVTOOL_SHA256 and IRONCLAD_COSIGNER_SHA256: each program's approved SHA-256. */
+    devtoolSha256?: string;
+    cosignerSha256?: string;
   };
   /** zkool backend: the server, the account id to pay from, and the payment store folder. */
   zkoolUrl?: string;
