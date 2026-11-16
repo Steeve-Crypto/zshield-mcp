@@ -1,6 +1,7 @@
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { after } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../src/server.ts";
@@ -13,8 +14,38 @@ import type { AuditEntry, Config } from "../src/types.ts";
 
 export const ALLOWED = "u1mockrecipientaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+/**
+ * Every temp root tempConfig made in this test process. Each one holds physically allocated
+ * audit journals (about 193 MB), so they are removed when the file's tests finish, pass or
+ * fail, and on any other exit.
+ */
+const tempRoots = new Set<string>();
+function removeTempRoots(): void {
+  for (const root of tempRoots) {
+    try {
+      // A test may leave a folder without write permission; give it back before removing.
+      rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+    } catch {
+      try {
+        chmodTree(root);
+        rmSync(root, { recursive: true, force: true });
+      } catch { /* leave it rather than fail the run */ }
+    }
+    tempRoots.delete(root);
+  }
+}
+function chmodTree(dir: string): void {
+  try { chmodSync(dir, 0o700); } catch { return; }
+  let names: string[] = [];
+  try { names = readdirSync(dir); } catch { return; }
+  for (const n of names) chmodTree(join(dir, n));
+}
+after(removeTempRoots);
+process.once("exit", removeTempRoots);
+
 export function tempConfig(overrides: Partial<Config> = {}): Config {
   const root = mkdtempSync(join(tmpdir(), "zshield-test-"));
+  tempRoots.add(root);
   const allowPath = join(root, "allow.json");
   writeFileSync(allowPath, JSON.stringify({ recipients: [{ address: ALLOWED, label: "Demo" }] }));
   chmodSync(allowPath, 0o600);
