@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { describe, it } from "node:test";
@@ -61,6 +61,10 @@ import { tempConfig, withEnv } from "./helpers.ts";
 //     program changed after start is refused before it runs, for reads and payments alike.
 //     The pins are checked once more before the transmit is authorized, so a program
 //     swapped during a payment ends it as not sent, never unknown, with nothing broadcast.
+//     A file the pin cannot trust (missing, a symlink, writable by group or others, or
+//     owned by someone other than you or root) is refused with that reason, at start and
+//     before a run, and never reported as a digest mismatch, which would send the owner
+//     off re-pinning a digest that is right.
 
 const DEVTOOL = "/opt/ironclad/zcash-devtool";
 const COSIGNER = "/opt/ironclad/ironclad-cosigner";
@@ -268,6 +272,53 @@ describe("ironclad adapter: program pins", { skip: process.platform === "win32" 
       assert.ok(!authorized, `${swap}: transmit not authorized`);
       assert.ok(!fake.steps().includes("pczt send"), swap);
     }
+  });
+
+  /** Asserts the adapter refuses at start with `reason`, naming the program, and not as a digest mismatch. */
+  const refusedFor = (p: ReturnType<typeof pinnedPrograms>, reason: RegExp) =>
+    assert.throws(() => pinnedAdapter(fakeTools(), p), (e: unknown) => {
+      assert.match(String(e), /IRONCLAD_DEVTOOL/);
+      assert.match(String(e), reason);
+      assert.doesNotMatch(String(e), /does not match/);
+      return true;
+    });
+
+  it("names a symlink as the reason, though the digest is right", () => {
+    const p = pinnedPrograms();
+    const link = `${p.devtool}-link`;
+    symlinkSync(p.devtool, link);
+    refusedFor({ ...p, devtool: link }, /symlink/);
+  });
+
+  it("names a program writable by group or others as the reason, though the digest is right", () => {
+    const p = pinnedPrograms();
+    chmodSync(p.devtool, 0o720);
+    refusedFor(p, /writable by group or others/);
+  });
+
+  it("names a missing program as the reason", () => {
+    const p = pinnedPrograms();
+    rmSync(p.devtool);
+    refusedFor(p, /does not exist/);
+  });
+
+  it("names a program owned by another user as the reason", { skip: process.getuid?.() !== 0 && "needs root to give the file away" }, () => {
+    const p = pinnedPrograms();
+    chownSync(p.devtool, 1, 1);
+    refusedFor(p, /owned by another user/);
+  });
+
+  it("names the reason when a program's file turns unsafe after start, and runs nothing", async () => {
+    const p = pinnedPrograms();
+    const fake = fakeTools();
+    const chain = pinnedAdapter(fake, p);
+    chmodSync(p.devtool, 0o720);
+    await assert.rejects(chain.getHistory(5), (e: unknown) => {
+      assert.match(String(e), /IRONCLAD_DEVTOOL.*writable by group or others/);
+      assert.doesNotMatch(String(e), /does not match/);
+      return true;
+    });
+    assert.equal(fake.calls.length, 0, "nothing ran");
   });
 });
 

@@ -10,7 +10,7 @@ import { ChainUnreachableError, SendOutcomeUnknownError } from "./outcome.js";
 import { MAX_MONEY_ZATS } from "../policy/amount.js";
 import { walletStateDir } from "../payments/store.js";
 import { redact } from "../redact.js";
-import { pinExecutable } from "./executable.js";
+import { pinExecutable, PinRefusedError } from "./executable.js";
 import { zecToZats } from "./zkool.js";
 import { healthSyncTimeoutMs, healthTimeoutMs, readTimeoutMs, SEND_TIMEOUT_MS, STAGE_TIMEOUT_MS } from "./live.js";
 
@@ -108,20 +108,26 @@ export interface IroncladOptions {
  * returns a check that refuses later if the file has changed since. Both name the program.
  */
 function pinProgram(name: string, path: string, sha256: string): () => void {
-  const refuse = (): never => {
-    throw new Error(`${name} does not match ${name}_SHA256. A rebuilt program needs its new digest pinned and a restart.`);
+  // A digest or identity mismatch says so; a file that cannot be trusted whatever its digest
+  // (a symlink, writable by others, someone else's) says why, so nobody re-pins a right digest.
+  const refuse = (e: unknown): never => {
+    if (e instanceof PinRefusedError && !e.unsafe) {
+      throw new Error(`${name} does not match ${name}_SHA256. A rebuilt program needs its new digest pinned and a restart.`);
+    }
+    const why = e instanceof PinRefusedError ? `it ${e.reason}` : (e as Error).message;
+    throw new Error(`${name} is refused: ${why}. Re-pinning ${name}_SHA256 will not fix this.`);
   };
   let check: () => void;
   try {
     check = pinExecutable(path, sha256);
-  } catch {
-    return refuse();
+  } catch (e) {
+    return refuse(e);
   }
   return () => {
     try {
       check();
-    } catch {
-      refuse();
+    } catch (e) {
+      refuse(e);
     }
   };
 }
