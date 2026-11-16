@@ -10,6 +10,7 @@ import { ChainUnreachableError, SendOutcomeUnknownError } from "./outcome.js";
 import { MAX_MONEY_ZATS } from "../policy/amount.js";
 import { walletStateDir } from "../payments/store.js";
 import { redact } from "../redact.js";
+import { pinExecutable, PinRefusedError } from "./executable.js";
 import { zecToZats } from "./zkool.js";
 import { healthSyncTimeoutMs, healthTimeoutMs, readTimeoutMs, SEND_TIMEOUT_MS, STAGE_TIMEOUT_MS } from "./live.js";
 
@@ -94,8 +95,41 @@ export interface IroncladOptions {
   server?: string;
   /** devtool's connection mode: "tor", "direct" or "socks5://host:port". */
   connection?: string;
+  /** SHA-256 of the approved zcash-devtool build (IRONCLAD_DEVTOOL_SHA256). Unset, it is not pinned. */
+  devtoolSha256?: string;
+  /** SHA-256 of the approved ironclad-cosigner build (IRONCLAD_COSIGNER_SHA256). Unset, it is not pinned. */
+  cosignerSha256?: string;
   stateDir?: string;
   runner?: ToolRunner;
+}
+
+/**
+ * Pins one program to its approved SHA-256: refuses now if the file does not match, and
+ * returns a check that refuses later if the file has changed since. Both name the program.
+ */
+function pinProgram(name: string, path: string, sha256: string): () => void {
+  // A digest or identity mismatch says so; a file that cannot be trusted whatever its digest
+  // (a symlink, writable by others, someone else's) says why, so nobody re-pins a right digest.
+  const refuse = (e: unknown): never => {
+    if (e instanceof PinRefusedError && !e.unsafe) {
+      throw new Error(`${name} does not match ${name}_SHA256. A rebuilt program needs its new digest pinned and a restart.`);
+    }
+    const why = e instanceof PinRefusedError ? `it ${e.reason}` : (e as Error).message;
+    throw new Error(`${name} is refused: ${why}. Re-pinning ${name}_SHA256 will not fix this.`);
+  };
+  let check: () => void;
+  try {
+    check = pinExecutable(path, sha256);
+  } catch (e) {
+    return refuse(e);
+  }
+  return () => {
+    try {
+      check();
+    } catch (e) {
+      refuse(e);
+    }
+  };
 }
 
 /**
@@ -119,7 +153,9 @@ export class IroncladChainAdapter implements ChainAdapter {
   readonly tracksTransmitAuthorization = true as const;
   readonly network = "testnet" as const;
   readonly stateDir?: string;
-  private readonly opts: Required<Omit<IroncladOptions, "stateDir" | "runner" | "network">>;
+  private readonly opts: Required<Omit<IroncladOptions, "stateDir" | "runner" | "network" | "devtoolSha256" | "cosignerSha256">>;
+  /** Each pinned program's check, by path. */
+  private readonly pins = new Map<string, () => void>();
   private readonly runner: ToolRunner;
 
   constructor(opts: IroncladOptions) {
@@ -142,10 +178,19 @@ export class IroncladChainAdapter implements ChainAdapter {
     };
     this.stateDir = opts.stateDir ? walletStateDir(opts.stateDir) : undefined;
     this.runner = opts.runner ?? createToolRunner();
+    if (opts.devtoolSha256) this.pins.set(opts.devtool, pinProgram("IRONCLAD_DEVTOOL", opts.devtool, opts.devtoolSha256));
+    if (opts.cosignerSha256) this.pins.set(opts.cosigner, pinProgram("IRONCLAD_COSIGNER", opts.cosigner, opts.cosignerSha256));
+  }
+
+  /** Refuses unless every pinned program is still the approved file. */
+  private assertPinned(): void {
+    for (const check of this.pins.values()) check();
   }
 
   /** Runs a program and returns its stdout; a non-zero exit throws with the end of stderr. */
   private async run(cmd: string, args: string[], timeoutMs: number, opts: { cwd?: string; input?: Buffer } = {}): Promise<Buffer> {
+    // A pinned program that has changed is never started.
+    this.pins.get(cmd)?.();
     let r: ToolResult;
     try {
       r = await this.runner(cmd, args, { ...opts, timeoutMs });
@@ -359,6 +404,9 @@ export class IroncladChainAdapter implements ChainAdapter {
       const txid = extracted.trim().split("\n").pop()?.trim().toLowerCase() ?? "";
       if (!TXID.test(txid)) throw new Error("zcash-devtool pczt extract gave no txid. Nothing was sent.");
 
+      // Both programs must still be the approved builds before anything is recorded, charged
+      // or authorized: a swap found here ends the payment as not sent.
+      this.assertPinned();
       // Record the txid durably; if that fails, nothing is broadcast.
       req.stage?.(txid);
       req.authorizeFee?.(checked.feeZats);
