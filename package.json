@@ -5,7 +5,7 @@
   "description": "MCP server for agent-initiated shielded ZEC payments under human policy (caps, allow-list, viewing-key audit). Mock chain first.",
   "type": "module",
   "bin": {
-    "zshield-mcp": "./dist/index.js"
+    "zshield-mcp": "dist/index.js"
   },
   "files": [
     "dist",
