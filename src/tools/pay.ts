@@ -1,5 +1,5 @@
 import { assertApproval } from "../payments/approval.js";
-import { checkFee, reserveSpending, reserveFee } from "../payments/budget.js";
+import { checkSpending, reserveSpending, reserveFee, reservePayment } from "../payments/budget.js";
 import { assertPaymentsEnabled } from "../payments/pause.js";
 import { resumeOriginal, RESUME_TIMEOUT_MS } from "../payments/resume.js";
 import { eventFor, recordReconcile } from "../payments/recovery.js";
@@ -32,6 +32,7 @@ import {
 } from "../payments/store.js";
 import { ChainUnreachableError, SendOutcomeUnknownError } from "../chain/outcome.js";
 import { WalletBusyError } from "../chain/walletlock.js";
+import { RecipientMismatchError } from "../chain/recipient.js";
 import type { AuditEntry, ChainHealth, Config, MatchConfidence, PayStatus, PossibleSend, TxSummary } from "../types.js";
 
 /**
@@ -841,6 +842,20 @@ async function runPay(
       }
     }
 
+    // Every policy gate runs again here, before the protected pending row: a refusal is
+    // refusal evidence, repeatable at no cost to payment capacity (F-59). Spending is only
+    // checked, never charged, until the exact fee is known inside the send (F-72).
+    if (policyPassed && amountZats !== undefined && lock) {
+      try {
+        // Re-check under the same lock after health; the first check was before the sync.
+        assertApproval(config, store, keyFields.idempotency_key ?? callId, keyFields.params_sha256 ?? paymentParamsHash(input), viewKeyFingerprint);
+        checkSpending(config, store, lock, amountZats, ESTIMATED_FEE_ZATS, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
+      } catch (e) {
+        policyPassed = false;
+        fail(e instanceof PolicyError ? "rejected" : "error", e instanceof PolicyError ? e.code : "STATE_WRITE_FAILED", e instanceof Error ? e.message : String(e));
+      }
+    }
+
     if (policyPassed && amountZats !== undefined && lock) {
       // Record the audit pending row, then the intent, then bind the key: all on disk
       // before the broadcast. The key is bound last so a call that stops here leaves it
@@ -877,9 +892,6 @@ async function runPay(
       }
       if (ready) {
         try {
-          // Re-check under the same lock after health; first check was before sync.
-          assertApproval(config, store, keyFields.idempotency_key ?? callId, keyFields.params_sha256 ?? paymentParamsHash(input), viewKeyFingerprint);
-          reserveSpending(config, store, lock, callId, amountZats, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
           store.writeIntent(intent);
           wroteIntent = true;
         } catch (e) {
@@ -948,12 +960,13 @@ async function runPay(
           const receipt = await chain.pay({
             checkFee: (fee) => {
               lock!.assertHeld();
-              checkFee(config, store, lock!, fee, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
+              checkSpending(config, store, lock!, amountZats!, fee, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
             },
             authorizeFee: (fee) => {
               lock!.assertHeld();
               store.appendEvent({ ts: now(), call_id: callId, state: "pending", calculated_fee_zats: fee.toString(), by: "send" });
-              reserveFee(config, store, lock!, callId, fee, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
+              // Principal and fee are charged together, only once the exact fee is known.
+              reservePayment(config, store, lock!, callId, amountZats!, fee, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
               calculatedFee = fee;
             },
             amountZats,
@@ -1040,7 +1053,10 @@ async function runPay(
             const current = store.readCall(callId);
             const staged = current?.stagedTxid;
             const authorized = current?.events.some((ev) => ev.transmit_authorized);
-            fail("error", "CHAIN_ERROR", redactInput(e instanceof Error ? e.message : String(e), input));
+            // A policy gate inside the send (fee allowance, approval, allow-list, recipient
+            // check) keeps its own code; only the outcome below decides not_sent or unknown.
+            const gate = e instanceof PolicyError ? e.code as PayCode : e instanceof RecipientMismatchError ? e.code : "CHAIN_ERROR";
+            fail("error", gate, redactInput(e instanceof Error ? e.message : String(e), input));
             // A post-authorize chain error may have raced a broadcast; never settle as not_sent.
             recordSafely(store, { ts: now(), call_id: callId, state: (staged && authorized) ? "unknown" : "not_sent", code, error, possible_sends: staged ? [{ txid: staged, confidence: "high", matched: ["txid"], status: "signed" }] : undefined, by: "send" }, warnings);
           }

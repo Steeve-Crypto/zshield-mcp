@@ -497,7 +497,7 @@ describe("zcash_pay through the ironclad adapter", () => {
     assert.ok(!s.fake.steps().includes("cosigner coordinate"), s.fake.steps().join(", "));
     assert.ok(!s.fake.steps().includes("pczt send"));
     const ledger = JSON.parse(readFileSync(join(s.store.dir, "spending-budget", "ledger.json"), "utf8"));
-    assert.equal(ledger.total, "50000", "only the principal is charged");
+    assert.equal(ledger.total, "0", "nothing is charged");
   });
 
   it("leaves a failed broadcast unresolved, then recovery confirms it by txid once mined", async () => {

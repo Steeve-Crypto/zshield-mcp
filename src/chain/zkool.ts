@@ -2,6 +2,7 @@ import type { ChainAdapter } from "./types.js";
 import type { SyncResult } from "./sync.js";
 import type { ChainHealth, PaymentReceipt, PaymentRequest, TxSummary, WalletBalance } from "../types.js";
 import { assertTestnetAddress, NetworkError } from "./network.js";
+import { assertPlannedRecipient } from "./recipient.js";
 import { ChainUnreachableError, SendOutcomeUnknownError } from "./outcome.js";
 import { MAX_MONEY_ZATS, ZATS_PER_ZEC } from "../policy/amount.js";
 import { walletStateDir } from "../payments/store.js";
@@ -53,7 +54,8 @@ export interface ZkoolOptions {
  * server with a release binary and no Rust build. One zkool account is one wallet.
  *
  * A send is staged like the zingo adapter's: `prepareSend` builds the transaction,
- * `decodePczt` gives its txid (zkool2 #1647; under ZIP 244 signing cannot change it), and
+ * `decodePczt` gives its txid (zkool2 #1647; under ZIP 244 signing cannot change it) and the
+ * outputs it pays, which must pay the requested address exactly the requested amount, and
  * `signTx` signs it, with nothing broadcast; `req.stage` records the txid durably; only then
  * does `broadcastTx` post exactly those bytes, and its answer must be that txid. Any
  * failure before the broadcast is a clean "not sent". The signed bytes live only in this
@@ -250,8 +252,8 @@ export class ZkoolChainAdapter implements ChainAdapter {
       STAGE_TIMEOUT_MS
     );
     const pczt = hexOrThrow(prepared?.prepareSend, "prepareSend");
-    const decoded = await this.call<{ decodePczt?: { fee?: unknown; txid?: unknown; recipients?: { value?: unknown }[] } }>(
-      "query($pczt: String!) { decodePczt(pczt: $pczt) { fee txid recipients { value } } }",
+    const decoded = await this.call<{ decodePczt?: { fee?: unknown; txid?: unknown; recipients?: { value?: unknown; address?: unknown }[] } }>(
+      "query($pczt: String!) { decodePczt(pczt: $pczt) { fee txid recipients { value address } } }",
       { pczt },
       STAGE_TIMEOUT_MS
     );
@@ -263,10 +265,15 @@ export class ZkoolChainAdapter implements ChainAdapter {
     }
     const feeZats = zecToZats(decoded?.decodePczt?.fee, "fee");
     if (feeZats <= 0n) throw new Error("zkool_graphql planned a transaction with no fee");
-    // zkool lists each output under its single-receiver address, so the recipient cannot be
-    // compared as a string. The amount can: one output must carry exactly what was asked.
-    const outputs = (decoded?.decodePczt?.recipients ?? []).map((r) => zecToZats(r.value, "output value"));
-    if (!outputs.includes(req.amountZats)) throw new Error("zkool_graphql planned a transaction with no output of the requested amount");
+    // The allow-list binds to what zkool built, not only to what it was asked: the outputs
+    // paying the requested address must carry exactly the requested amount. zkool lists
+    // each output under one receiver (an Orchard-only unified address, a Sapling or a
+    // transparent address), so both sides are decoded to receivers and compared.
+    const outputs = (decoded?.decodePczt?.recipients ?? []).map((r) => ({
+      address: typeof r.address === "string" ? r.address : "",
+      valueZats: zecToZats(r.value, "output value"),
+    }));
+    assertPlannedRecipient(outputs, req.recipient, req.amountZats);
     const signed = await this.call<{ signTx?: string }>(
       "query($account: Int!, $pczt: String!) { signTx(idAccount: $account, pczt: $pczt) }",
       { account: this.account, pczt },
