@@ -96,6 +96,33 @@ export function initializeHistoricalBudget(store: PaymentStore, lock: WalletLock
   if (!createExclusive(dir, "ledger.json", JSON.stringify({ version: 2, total: total.toString() }))) throw new Error("Budget already exists");
 }
 
+/**
+ * Read-only twin of reserveFee: throws when reserveFee would refuse this fee now, and
+ * writes nothing. The principal is already reserved when this runs.
+ */
+export function checkFee(config: Config, store: PaymentStore, lock: WalletLock,
+  fee: bigint | undefined, paramsHash: string, key: string): void {
+  if (config.totalSpendingCapZec === undefined) return;
+  if (typeof fee !== "bigint" || fee <= 0n) throw new PolicyError("SPENDING_BUDGET_REFUSED", "A positive verified transaction fee is required before signing.");
+  lock.assertHeld();
+  try {
+    const cap = parseZecToZats(config.totalSpendingCapZec, "Total spending cap");
+    const dir = join(store.dir, "spending-budget");
+    const ledger = readLedger(dir);
+    const identity = hash(JSON.stringify([key, paramsHash, "fee"]));
+    const raw = readPrivate(join(dir, "receipts", identity), 4096);
+    const prior = raw !== undefined ? (JSON.parse(raw) as Charge) : ledger.pending?.id === identity ? ledger.pending : undefined;
+    if (prior) {
+      if (!validCharge(prior) || prior.amount !== fee.toString()) throw new Error("Fee reservation identity changed");
+      if (BigInt(ledger.total) > cap) throw new Error("Current spending allowance is below reserved spending");
+      return;
+    }
+    if (BigInt(ledger.total) + fee > cap) throw new Error("Cumulative spending allowance exhausted");
+  } catch {
+    throw new PolicyError("SPENDING_BUDGET_REFUSED", "The durable cumulative spending allowance cannot cover this payment's fee. Nothing was signed; no allowance was reserved or reset.");
+  }
+}
+
 /** Separate immutable receipt permits upgrading a principal reservation without refunds. */
 export function reserveFee(config: Config, store: PaymentStore, lock: WalletLock,
   callId: string, fee: bigint | undefined, paramsHash: string, key: string): void {

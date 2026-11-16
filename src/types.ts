@@ -22,8 +22,22 @@ export interface Config {
   auditDir: string;
   viewKeyFingerprintSalt: string;
   chainNetwork?: string;
-  /** Which wallet a live chain talks to: zingo-cli (default) or a zkool_graphql server. */
-  chainBackend?: "zingo" | "zkool";
+  /** Which wallet a live chain talks to: zingo-cli (default), a zkool_graphql server, or an Ironclad FROST group. */
+  chainBackend?: "zingo" | "zkool" | "ironclad";
+  /**
+   * Ironclad backend: zcash-devtool and its group wallet, the co-signer binary, its data
+   * folder (this agent's share), the session folder the co-signer daemon watches, this
+   * agent's member number and devtool's connection mode.
+   */
+  ironclad?: {
+    devtool: string;
+    walletDir: string;
+    cosigner: string;
+    frostDir: string;
+    sessionDir: string;
+    share: string;
+    connection: string;
+  };
   /** zkool backend: the server, the account id to pay from, and the payment store folder. */
   zkoolUrl?: string;
   zkoolAccount?: number;
@@ -215,6 +229,11 @@ export interface PaymentRequest {
   beforeTransmit?: () => void;
   /** Re-check policy after the backend wallet lock is held, immediately before transmit. */
   afterLock?: () => void;
+  /**
+   * Check, reserving nothing, that the calculated fee fits the spending allowance. Called
+   * before a co-signer is asked to sign; throws to refuse, and then nothing is signed.
+   */
+  checkFee?: (feeZats: bigint) => void;
   /** Reserve the exact calculated fee before any transmission. */
   authorizeFee?: (feeZats: bigint) => void;
 }
