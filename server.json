@@ -1,0 +1,29 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Steeve-Crypto/zshield-mcp",
+  "title": "ZShield MCP",
+  "description": "Capped, allow-listed shielded Zcash payments for AI agents. Testnet beta.",
+  "repository": {
+    "url": "https://github.com/Steeve-Crypto/zshield-mcp",
+    "source": "github"
+  },
+  "version": "0.2.0-beta.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "zshield-mcp",
+      "version": "0.2.0-beta.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        { "name": "ALLOWLIST_PATH", "description": "Path to the recipient allow-list JSON", "isRequired": true, "format": "string" },
+        { "name": "SPENDING_CAP_ZEC", "description": "Hard max ZEC per payment", "isRequired": true, "format": "string" },
+        { "name": "CHAIN_MODE", "description": "mock (default), testnet, zkool or ironclad", "isRequired": false, "format": "string" },
+        { "name": "AUDIT_DIR", "description": "Directory for append-only audit logs", "isRequired": false, "format": "string" },
+        { "name": "VIEW_KEY_FINGERPRINT_SALT", "description": "Unique salt, required outside mock mode", "isRequired": false, "format": "string", "isSecret": true },
+        { "name": "TOTAL_SPENDING_CAP_ZEC", "description": "Lifetime principal plus fee allowance", "isRequired": false, "format": "string" }
+      ]
+    }
+  ]
+}

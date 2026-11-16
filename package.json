@@ -1,11 +1,20 @@
 {
   "name": "zshield-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0-beta.1",
+  "mcpName": "io.github.Steeve-Crypto/zshield-mcp",
   "description": "MCP server for agent-initiated shielded ZEC payments under human policy (caps, allow-list, viewing-key audit). Mock chain first.",
   "type": "module",
   "bin": {
     "zshield-mcp": "./dist/index.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    ".env.example",
+    "allowlists/recipients.example.json",
+    "config/default.yaml"
+  ],
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc -p tsconfig.test.json",
@@ -24,6 +33,10 @@
     "node": ">=20"
   },
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Steeve-Crypto/zshield-mcp.git"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
     "stream-chain": "^4.4.1",
