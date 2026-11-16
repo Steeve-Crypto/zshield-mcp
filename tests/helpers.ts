@@ -8,6 +8,7 @@ import type { CliRunner } from "../src/chain/live.ts";
 import type { ChainAdapter } from "../src/chain/types.ts";
 import { appendAuditEntry } from "../src/audit/log.ts";
 import { storeFor } from "../src/payments/store.ts";
+import { bech32Encode, f4jumble } from "../src/chain/recipient.ts";
 import type { AuditEntry, Config } from "../src/types.ts";
 
 export const ALLOWED = "u1mockrecipientaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -175,4 +176,28 @@ export function seedCall(config: Config, pending: AuditEntry, chain: { stateDir?
     if (r.mock_txid) store.claimTxid(r.mock_txid, i.call_id);
   } else if (r.status === "unknown") store.advance({ ...base, state: "unknown", code: r.code, error: r.error, possible_sends: r.possible_sends });
   else store.advance({ ...base, state: "not_sent", code: r.code, error: r.error });
+}
+
+/** A unified address carrying exactly these receivers (typecode to bytes), for tests. */
+export function encodeUnifiedAddress(network: "mainnet" | "testnet", receivers: Map<number, Uint8Array>): string {
+  const hrp = network === "mainnet" ? "u" : "utest";
+  const parts: number[] = [];
+  for (const type of [...receivers.keys()].sort((x, y) => x - y)) {
+    const r = receivers.get(type)!;
+    if (type >= 0xfd || r.length >= 0xfd) throw new Error("Receiver too large for this test encoder.");
+    parts.push(type, r.length, ...r);
+  }
+  const padding = new Uint8Array(16);
+  padding.set(Buffer.from(hrp, "ascii"));
+  return bech32Encode(hrp, f4jumble(Uint8Array.from([...parts, ...padding])), "bech32m");
+}
+
+/** A testnet unified address with Sapling and Orchard receivers made from `seed`. */
+export function testUnifiedAddress(seed: number): { ua: string; orchardOnly: string; sapling: string } {
+  const sapling = new Uint8Array(43).fill(seed), orchard = new Uint8Array(43).fill(seed ^ 0x5a);
+  return {
+    ua: encodeUnifiedAddress("testnet", new Map([[2, sapling], [3, orchard]])),
+    orchardOnly: encodeUnifiedAddress("testnet", new Map([[3, orchard]])),
+    sapling: bech32Encode("ztestsapling", sapling, "bech32"),
+  };
 }

@@ -1,5 +1,5 @@
 import { assertApproval } from "./approval.js";
-import { reserveSpending, reserveFee } from "./budget.js";
+import { reservePayment } from "./budget.js";
 import { assertPaymentsEnabled } from "./pause.js";
 import { fingerprintViewKey, writeAuditRow } from "../audit/log.js";
 import { assertFingerprintSalt } from "../config.js";
@@ -97,24 +97,27 @@ export async function resumeOriginal(
     if (config.totalSpendingCapZec !== undefined && originalFee !== entry.feeZats) return unknown("The original durable fee does not match the wallet transaction.");
     // Budget and fee gates before any financial audit charge: a policy refusal must not
     // consume protected capacity, and can be repeated safely.
-    reserveSpending(config, store, lock, record.callId, amount, paymentParamsHash(intent), intent.idempotency_key!);
-    reserveFee(config, store, lock, record.callId, originalFee, paymentParamsHash(intent), intent.idempotency_key!);
+    // Principal and fee together: a fee that does not fit charges nothing (F-72).
+    reservePayment(config, store, lock, record.callId, amount, originalFee, paymentParamsHash(intent), intent.idempotency_key!);
     lock.assertHeld();
     await chain.resumeSigned(txid, { fence: () => {
       assertNoOtherSend();
       assertPaymentsEnabled(store);
       assertApproval(config, store, intent.idempotency_key!, paymentParamsHash(intent), fingerprint);
       assertRecipientAllowed(intent.recipient, loadAllowlist(config.allowlistPath));
-      reserveFee(config, store, lock, record.callId, originalFee, paymentParamsHash(intent), intent.idempotency_key!);
-      reserveSpending(config, store, lock, record.callId, amount, paymentParamsHash(intent), intent.idempotency_key!);
+      reservePayment(config, store, lock, record.callId, amount, originalFee, paymentParamsHash(intent), intent.idempotency_key!);
       // Financial evidence is charged only here, after every gate of THIS attempt passed and
       // with the backend lock held, immediately before the network mutation. A refusal at any
       // earlier point consumes no protected audit capacity and can be repeated safely (F-59).
       const audit = writeAuditRow(config, { ...base, status: "unknown", note: "Resuming only the originally signed transaction by exact txid; no replacement transaction authorized." });
       if (!audit.durable) throw new ResumeAuditError("Audit evidence could not be persisted; no resume attempted.");
       attempted = true;
-      // Authorize only once the backend lock is held and the fence checks pass (F-53/F-73).
+      // Authorize only once the backend lock is held and the fence checks pass (F-53, F-73).
       if (!hasTransmitAuthorization(record)) store.authorizeTransmit(record.callId, new Date().toISOString());
+      // A visible record is not a durable one: an earlier attempt may have published its
+      // authorization, staging or txid claim and then failed the directory fsync. Make
+      // every record this transmit relies on durable now, or transmit nothing (F-37).
+      store.syncCall(record.callId);
     }, timeoutMs: RESUME_TIMEOUT_MS });
     return { attempted, row: { ...base, status: "broadcast", confidence: "high", note: "Resumed the original signed transaction by exact txid. No replacement was built." } };
   } catch (e) {

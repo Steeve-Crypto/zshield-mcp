@@ -19,13 +19,21 @@ Set `TOTAL_SPENDING_CAP_ZEC` to an absolute lifetime principal and fee allowance
 additional to the per-payment cap and uses integer zatoshis. It is NOT a rolling
 window and includes backend transaction fees. An operator can raise the absolute
 ceiling after review; no timer, restart, key change or configuration omission resets
-reserved spending. Failed, interrupted and uncertain attempts are not refunded.
+reserved spending. Interrupted and uncertain attempts are not refunded.
+
+Nothing is charged until the exact fee is known. Before the pending audit record, a
+read-only check refuses a payment whose principal plus the estimated fee does not fit;
+that refusal charges neither allowance nor protected audit capacity and can be repeated.
+Once the backend has built and signed the transaction, the principal and the exact fee
+are checked together and only then charged, before anything is transmitted. A fee that
+does not fit refuses the send with `SPENDING_BUDGET_REFUSED` and charges nothing. A
+store's empty ledger is created at its first payment check, before any intent exists.
 
 The shared wallet lock serializes accounting across processes. A fixed-size ledger
 atomically records the new total plus a pending receipt; immutable per-call receipts
 make recovery idempotent. A crash between these steps finishes the same receipt
 before admitting another reservation. The ledger is never reconstructed as zero
-from missing or malformed state. Financial audit capacity is reserved first.
+from missing or malformed state.
 
 An existing wallet with historical intents requires explicit initialization, which
 conservatively charges every historical intent. Historical resumptions lacking a
@@ -143,7 +151,7 @@ remain release decisions with evidence that local fixtures cannot manufacture.
 
 ### Fee-inclusive allowance upgrade
 
-New spending ledgers use version 2. Every payment reserves principal before signing and the exact positive calculated fee before transmission. Fee receipts survive interrupted writes, are idempotent, and are never refunded. Resume requires the original durable fee to agree with the wallet transaction; a missing or changed fee blocks retransmission. The per-call cap still limits recipient principal; the cumulative cap limits principal plus fees.
+New spending ledgers use version 2. Every payment reserves its principal and the exact positive calculated fee together, after signing and before transmission. Fee receipts survive interrupted writes, are idempotent, and are never refunded. Resume requires the original durable fee to agree with the wallet transaction; a missing or changed fee blocks retransmission. The per-call cap still limits recipient principal; the cumulative cap limits principal plus fees.
 
 Version 1 ledgers are refused: their historical fees were not accounted for. Never delete or reset a ledger to upgrade. Existing historical records without durable fee evidence require operator reconciliation before enabling this allowance. `budget-init` refuses incomplete historical fee evidence. Monitoring exposes `reserved_spending_zats` and policy exposes `cumulative_spending_cap_zec`.
 

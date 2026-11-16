@@ -12,7 +12,7 @@ import { storeFor } from "../src/payments/store.ts";
 import { recoverPendingPayments } from "../src/payments/recovery.ts";
 import { executePay } from "../src/tools/pay.ts";
 import type { PaymentRequest } from "../src/types.ts";
-import { tempConfig, withEnv } from "./helpers.ts";
+import { tempConfig, testUnifiedAddress, withEnv } from "./helpers.ts";
 
 // Requirements for CHAIN_MODE=zkool, a testnet backend on a zkool_graphql server:
 // 1. Every caller value (recipient, amount, memo) travels in GraphQL variables, never in
@@ -33,8 +33,11 @@ import { tempConfig, withEnv } from "./helpers.ts";
 //    run unauthenticated, and then anyone who can reach it can spend. ZKOOL_STATE_DIR is
 //    required so every server on the account shares one payment store.
 
-const ADDR = "utest1" + "a".repeat(100);
-const OWN = "utest1" + "o".repeat(100);
+// Real testnet unified addresses: zkool reports each planned output under one receiver,
+// and ZShield decodes both sides to check that the requested address is the one paid.
+const TO = testUnifiedAddress(0xa1), CHANGE = testUnifiedAddress(0xc4), STRANGER = testUnifiedAddress(0x66);
+const ADDR = TO.ua;
+const OWN = testUnifiedAddress(0x0f).ua;
 const UFVK = "uviewtest1" + "q".repeat(80);
 const TXID = "c0".repeat(32);
 const PCZT = "ab".repeat(40);
@@ -45,6 +48,8 @@ interface FakeOptions {
   /** "old": a zkool before #1647, whose UnsignedTx has no txid field. */
   pcztTxid?: "old" | unknown;
   plannedValue?: string;
+  /** The address decodePczt reports for the payment output. */
+  plannedAddress?: string;
   broadcast?: "ok" | "throws" | "other";
   onBroadcast?: () => void;
   history?: { txid: string; height: number; value: string; fee: string; time?: string }[];
@@ -76,7 +81,7 @@ function fakeZkool(opts: FakeOptions = {}) {
         const asked = (variables.pczt === PCZT && (calls.find((c) => c.op === "prepareSend")?.variables.payment as { recipients: { amount: string }[] }).recipients[0].amount) || "0";
         if (opts.pcztTxid === "old") throw new Error('zkool_graphql: Unknown field "txid" on type "UnsignedTx"');
         const txid = "pcztTxid" in opts ? opts.pcztTxid : variables.pczt === PCZT ? TXID : "ff".repeat(32);
-        return { decodePczt: { fee: "0.00010000", txid, recipients: [{ value: opts.plannedValue ?? asked }, { value: "0.50000000" }] } };
+        return { decodePczt: { fee: "0.00010000", txid, recipients: [{ value: opts.plannedValue ?? asked, address: opts.plannedAddress ?? TO.orchardOnly }, { value: "0.50000000", address: CHANGE.orchardOnly }] } };
       }
       case "signTx":
         return { signTx: SIGNED };
@@ -173,8 +178,28 @@ describe("zkool adapter: staged send", () => {
 
   it("refuses a plan without an output of exactly the requested amount, before signing", async () => {
     const fake = fakeZkool({ plannedValue: "0.00005001" });
-    await assert.rejects(adapter(fake).pay({ amountZats: 5000n, recipient: ADDR }), /requested amount/);
+    await assert.rejects(adapter(fake).pay({ amountZats: 5000n, recipient: ADDR }), /5001 zatoshis, not the 5000/);
     assert.ok(!fake.ops().includes("signTx"));
+  });
+
+  it("refuses a plan that pays the amount to another address, before signing", async () => {
+    for (const plannedAddress of [STRANGER.orchardOnly, STRANGER.sapling, "not-an-address"]) {
+      const fake = fakeZkool({ plannedAddress });
+      let staged = false;
+      await assert.rejects(adapter(fake).pay({ amountZats: 5000n, recipient: ADDR, stage: () => { staged = true; } }),
+        (e: unknown) => (e as { code?: string }).code === "RECIPIENT_MISMATCH", plannedAddress);
+      assert.ok(!fake.ops().includes("signTx"), plannedAddress);
+      assert.equal(staged, false);
+    }
+    // Asks zkool for each output's address.
+    const fake = fakeZkool();
+    await adapter(fake).pay({ amountZats: 5000n, recipient: ADDR });
+    assert.match(fake.calls.find((c) => c.op === "decodePczt")!.query, /recipients \{ value address \}/);
+  });
+
+  it("accepts the recipient's Sapling receiver as the paid output", async () => {
+    const fake = fakeZkool({ plannedAddress: TO.sapling });
+    assert.equal((await adapter(fake).pay({ amountZats: 5000n, recipient: ADDR })).txid, TXID);
   });
 
   it("refuses a mainnet database or recipient before building anything", async () => {
@@ -315,6 +340,16 @@ describe("zcash_pay through the zkool adapter", () => {
     assert.equal(stagedAtBroadcast, TXID);
     const prepare = s.fake.calls.find((c) => c.op === "prepareSend")!;
     assert.deepEqual(prepare.variables.payment, { recipients: [{ address: ADDR, amount: "0.00050000", memo: input.memo }], confirmations: 1 });
+  });
+
+  it("refuses a plan paying someone else as RECIPIENT_MISMATCH, sends nothing and keeps the wallet usable", async () => {
+    const s = setup({ plannedAddress: STRANGER.orchardOnly });
+    const r = await withEnv("HEALTH_SYNC_TIMEOUT_MS", "1000", () => executePay(input, { config: s.config, chain: s.chain }));
+    assert.equal(r.code, "RECIPIENT_MISMATCH", r.text);
+    assert.ok(!s.fake.ops().includes("signTx") && !s.fake.ops().includes("broadcastTx"));
+    const record = s.store.readCall(JSON.parse(r.text).call_id)!;
+    assert.equal(record.state, "not_sent");
+    assert.equal(s.store.unresolvedSend(), undefined);
   });
 
   it("leaves a failed broadcast unresolved, then recovery confirms it by txid once mined", async () => {

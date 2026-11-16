@@ -35,6 +35,7 @@ export const PAY_ERROR_CODES = [
   "UNRESOLVED_PAYMENT",
   "PAYMENT_EXPIRED",
   "PAYMENT_FAILED",
+  "RECIPIENT_MISMATCH",
 ] as const;
 
 /**

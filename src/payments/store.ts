@@ -434,6 +434,16 @@ export class PaymentStore {
     this.appendEvent({ ts, call_id: callId, state: "pending", transmit_authorized: true, by: "send" });
   }
 
+  /**
+   * Flush the directories holding a call's records: its events (staging and transmit
+   * authorization), the txid claims, its key binding and the pending marker. Records an
+   * earlier writer published but could not fsync become durable here. Throws on failure.
+   */
+  syncCall(callId: string): void {
+    fsyncDir(this.callDir(callId));
+    for (const sub of ["txids", "keys", "pending"] as const) fsyncDir(this.sub(sub));
+  }
+
   /** Which call a txid was credited to. */
   txidOwner(txid: string): string | undefined {
     const index = this.readJson<{ call_id: string }>(join(this.sub("txids"), safeName(txid, "txid")));
