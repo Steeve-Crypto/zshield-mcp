@@ -173,6 +173,8 @@ New spending ledgers use version 2. Every payment reserves its principal and the
 
 Version 1 ledgers are refused: their historical fees were not accounted for. Never delete or reset a ledger to upgrade. Existing historical records without durable fee evidence require operator reconciliation before enabling this allowance. `budget-init` refuses incomplete historical fee evidence. Monitoring exposes `reserved_spending_zats` and policy exposes `cumulative_spending_cap_zec`.
 
+To go back to an older zshield version, stop zshield and remove the `calls/zshield-generation` folder from the payment store first, since older versions refuse a store that has it.
+
 ### Mainnet configuration
 
 Mainnet is opt-in. All settings below are required, in addition to the normal allow-list, fingerprint salt and audit settings:

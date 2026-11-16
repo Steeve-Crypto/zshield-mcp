@@ -115,7 +115,7 @@ export function createServer(config: Config = loadConfig(), chain: ChainAdapter 
       privacy.run(async () => redactResult(limiter.take(tool) ? await fn(...args) : rateLimitedResult()));
   const server = new McpServer({
     name: "zshield-mcp",
-    version: "0.1.0",
+    version: "0.2.0-beta.1",
   });
 
   server.tool(
