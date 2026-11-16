@@ -1,12 +1,13 @@
 import { validatePaymentState, invalidPaymentState } from "./schema.js";
 import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createExclusive, ensurePrivateDir, fsyncDir, readPrivate, replaceAtomic } from "../fsafe.js";
 import { parseZecToZats } from "../policy/amount.js";
 import type { ChainAdapter } from "../chain/types.js";
 import type { Config, PossibleSend } from "../types.js";
+import { announce, GENERATION_DIR } from "./generation.js";
 
 /**
  * The canonical payment store: idempotency bindings and payment states, shared by every
@@ -126,6 +127,11 @@ export function paymentParamsHash(input: { amount_zec: number | string; recipien
     .digest("hex");
 }
 
+/** A name in calls/ that is a call folder: not a temporary file, not the store generation. */
+export function isCallFolder(name: string): boolean {
+  return !name.startsWith(".tmp-") && name !== GENERATION_DIR;
+}
+
 const NAME = /^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,127}$/;
 
 /** Call ids and txids become file names, so only plain, bounded names are accepted. */
@@ -227,7 +233,7 @@ export class PaymentStore {
     // Older versions cleared the pending index for expired and failed calls. Rebuild once per
     // store instance before live use; failure aborts store initialization.
     for (const callId of fs.readdirSync(this.sub("calls"))) {
-      if (callId.startsWith(".tmp-")) continue;
+      if (!isCallFolder(callId)) continue;
       const record = this.readCall(callId);
       if (!record) continue;
       // Upgrade path (F-76): every unsettled record that may have broadcast stays pending, including
@@ -297,12 +303,15 @@ export class PaymentStore {
   }
 
   private callDir(callId: string): string {
-    return join(this.sub("calls"), safeName(callId, "call id"));
+    const name = safeName(callId, "call id");
+    if (!isCallFolder(name)) throw new Error("Invalid call id for the payment store.");
+    return join(this.sub("calls"), name);
   }
 
   /** Write the intent and the pending marker. The intent file is written once. */
   writeIntent(intent: CallIntent): void {
     const dir = this.callDir(intent.call_id);
+    announce(this.dir, basename(dir));
     ensurePrivateDir(dir);
     createExclusive(dir, "intent.json", JSON.stringify(intent));
     if (intent.operation_id) createExclusive(this.sub("ops"), `${intent.operation_id}.json`, JSON.stringify({ call_id: intent.call_id }));
@@ -362,13 +371,20 @@ export class PaymentStore {
   /** Add one event. Events are never rewritten. */
   appendEvent(event: CallEvent): void {
     const dir = this.callDir(event.call_id);
+    // Announced first, so no reader can miss it (F-91, generation.ts).
+    announce(this.dir, basename(dir));
     ensurePrivateDir(dir);
     const name = `${Date.now().toString().padStart(15, "0")}-${randomBytes(6).toString("hex")}.json`;
     createExclusive(dir, name, JSON.stringify(event));
+    // A charge is announced again once written, so a reader that re-read this call between
+    // the two steps, which only a lost wallet lock would allow, still sees it.
+    if (event.transmit_authorized === true) announce(this.dir, basename(dir));
   }
 
   /** A call's current state, read fresh from disk. Undefined when the store has no such call. */
   readCall(callId: string): CallRecord | undefined {
+    // The store generation folder is not a call. Older versions read it as a corrupt one.
+    if (callId === GENERATION_DIR) return undefined;
     let dir: string;
     try {
       dir = this.callDir(callId);
@@ -558,10 +574,17 @@ function openStore(dir: string): PaymentStore {
   return store;
 }
 
+const resetHooks: (() => void)[] = [];
+/** Run `hook` whenever the opened stores are forgotten, so in-memory state forgets them too. */
+export function onPaymentStoresReset(hook: () => void): void {
+  resetHooks.push(hook);
+}
+
 /** Forget opened stores, as a restart would. For tests. */
 export function resetPaymentStores(): void {
   stores.clear();
   recentRefusals.clear();
+  for (const hook of resetHooks) hook();
 }
 
 /** Calls refused before any send, kept in memory so zcash_payment_status can report them. */
