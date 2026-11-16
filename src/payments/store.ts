@@ -85,6 +85,9 @@ export interface CallEvent {
   /** The txid of the signed transaction, written before it was transmitted */
   staged_txid?: string;
   transmit_authorized?: boolean;
+  /** On a transmit authorization only: the spending charge it carries */
+  charged_principal_zats?: string;
+  charged_fee_zats?: string;
   calculated_fee_zats?: string;
   /** Who wrote it. "import" only on events an older version wrote */
   by: "send" | "recovery" | "status" | "import";
@@ -430,8 +433,15 @@ export class PaymentStore {
     this.appendEvent({ ts, call_id: callId, state: "pending", staged_txid: txid, note: "Signed, not yet transmitted.", by: "send" });
   }
 
-  authorizeTransmit(callId: string, ts: string): void {
-    this.appendEvent({ ts, call_id: callId, state: "pending", transmit_authorized: true, by: "send" });
+  /**
+   * Authorize transmit. With `charge`, the same event is the payment's spending charge:
+   * one immutable record, published by one exclusive link and fsynced, so the charge and
+   * the authorization are never apart. Use authorizeCharged in budget.ts, which checks
+   * the allowance first.
+   */
+  authorizeTransmit(callId: string, ts: string, charge?: { principal: bigint; fee: bigint }): void {
+    this.appendEvent({ ts, call_id: callId, state: "pending", transmit_authorized: true,
+      ...(charge ? { charged_principal_zats: charge.principal.toString(), charged_fee_zats: charge.fee.toString() } : {}), by: "send" });
   }
 
   /**

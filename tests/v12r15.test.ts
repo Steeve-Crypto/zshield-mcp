@@ -7,6 +7,7 @@ import { AUDIT_SLOT_BYTES } from "../src/audit/budget.ts";
 import { fallbackAuditPath, fingerprintViewKey } from "../src/audit/log.ts";
 import { ensurePaymentReservation, JOURNAL_HEADER_BYTES, JOURNAL_SLOT_BYTES, paymentReservationUsage } from "../src/audit/reservation.ts";
 import { paymentParamsHash, storeFor } from "../src/payments/store.ts";
+import { spentZats } from "../src/payments/budget.ts";
 import { executePay } from "../src/tools/pay.ts";
 import type { ChainAdapter } from "../src/chain/types.ts";
 import type { Config, PaymentRequest, TxSummary } from "../src/types.ts";
@@ -50,9 +51,9 @@ const protectedSlots = (config: Config) =>
   paymentReservationUsage(join(config.auditDir, "2000-01-01.jsonl"), true)
   + paymentReservationUsage(fallbackAuditPath(config.auditDir, config.auditFallbackPath), false);
 
+/** What the cumulative allowance counts: the ledger plus every charged transmit authorization. */
 function ledgerTotal(config: Config, chain: ChainAdapter): bigint {
-  const file = join(storeFor(config, chain).dir, "spending-budget", "ledger.json");
-  return fs.existsSync(file) ? BigInt(JSON.parse(fs.readFileSync(file, "utf8")).total) : 0n;
+  return spentZats(storeFor(config, chain)) ?? 0n;
 }
 
 describe("V12 run 15 regressions", () => {

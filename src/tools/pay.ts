@@ -1,5 +1,5 @@
 import { assertApproval } from "../payments/approval.js";
-import { checkSpending, reservePayment } from "../payments/budget.js";
+import { authorizeCharged, checkSpending } from "../payments/budget.js";
 import { assertPaymentsEnabled } from "../payments/pause.js";
 import { resumeOriginal, RESUME_TIMEOUT_MS } from "../payments/resume.js";
 import { eventFor, recordReconcile } from "../payments/recovery.js";
@@ -999,10 +999,10 @@ async function runPay(
               assertApproval(config, store, keyFields.idempotency_key ?? callId, keyFields.params_sha256 ?? paymentParamsHash(input), viewKeyFingerprint);
               assertRecipientAllowed(input.recipient, loadAllowlist(config.allowlistPath));
               // The single charge point: every final gate has passed and the backend lock is
-              // held. Principal and fee are charged by the stored idempotency identity, then
-              // transmit is authorized. Any earlier refusal charged nothing (F-72).
-              reservePayment(config, store, lock!, callId, amountZats!, calculatedFee, keyFields.params_sha256 ?? paymentParamsHash(input), keyFields.idempotency_key ?? callId);
-              store.authorizeTransmit(callId, now());
+              // held. One durable event is both the transmit authorization and the principal
+              // and fee charge, by the stored idempotency identity, so neither can exist
+              // without the other. Any earlier refusal charged nothing (F-72).
+              authorizeCharged(config, store, lock!, { callId, intent, events: [] }, amountZats!, calculatedFee);
             },
             stage: (txid) => {
               // Between signing and transmitting: the lock must still be this call's, and

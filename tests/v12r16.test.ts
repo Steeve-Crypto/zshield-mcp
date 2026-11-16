@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { fingerprintViewKey } from "../src/audit/log.ts";
-import { initializeHistoricalBudget } from "../src/payments/budget.ts";
+import { initializeHistoricalBudget, spentZats } from "../src/payments/budget.ts";
 import { acquireWalletLock } from "../src/payments/lock.ts";
 import { recoverPendingPayments } from "../src/payments/recovery.ts";
 import { paymentParamsHash, storeFor } from "../src/payments/store.ts";
@@ -57,9 +57,9 @@ function liveConfig(overrides: Partial<Config> = {}): Config {
   return config;
 }
 
+/** What the cumulative allowance counts: the ledger plus every charged transmit authorization. */
 function ledgerTotal(config: Config, chain: ChainAdapter): bigint {
-  const file = join(storeFor(config, chain).dir, "spending-budget", "ledger.json");
-  return fs.existsSync(file) ? BigInt(JSON.parse(fs.readFileSync(file, "utf8")).total) : 0n;
+  return spentZats(storeFor(config, chain)) ?? 0n;
 }
 
 const revoke = (config: Config) => fs.writeFileSync(config.allowlistPath, JSON.stringify({ recipients: [] }));
