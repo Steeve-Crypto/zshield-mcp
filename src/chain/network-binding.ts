@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { join } from "node:path";
 import { createExclusive, readPrivate } from "../fsafe.js";
+import { GENERATION_DIR } from "../payments/generation.js";
 
 /** A wallet directory cannot be repurposed across chains by changing configuration. */
 export function bindWalletNetwork(directory: string, network: "mainnet" | "testnet"): () => void {
@@ -9,7 +10,7 @@ export function bindWalletNetwork(directory: string, network: "mainnet" | "testn
   const expected = `${network}\n`;
   if (readPrivate(file, 32) === undefined) {
     const calls = join(directory, ".zshield-state", "calls");
-    if (network === "mainnet" && fs.existsSync(calls) && fs.readdirSync(calls).length) {
+    if (network === "mainnet" && fs.existsSync(calls) && fs.readdirSync(calls).some((n) => n !== GENERATION_DIR)) {
       throw new Error("Unbound historical wallet state cannot be adopted as mainnet.");
     }
     createExclusive(directory, filename, expected);

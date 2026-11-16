@@ -156,6 +156,8 @@ export interface WalletLock {
   assertHeld(): void;
   /** Gives the lock up. Resolves once the OS lock is really released. Safe to call twice. */
   release(): Promise<void>;
+  /** True only for an exclusive hold of the OS wallet lock, which shuts out every other process */
+  readonly exclusiveAcrossProcesses?: boolean;
 }
 
 /**
@@ -368,6 +370,7 @@ export async function acquireWalletLock(
     }
     let released = false;
     return {
+      exclusiveAcrossProcesses: exclusive && os !== undefined && priority !== undefined,
       assertHeld() {
         if (released) throw new LockLostError();
         os?.assertHeld();
@@ -401,6 +404,6 @@ export async function acquireMaintenanceLock(store: { dir: string; requireOsLock
   const app = await acquireWalletLock(store, waitMs, "maintenance");
   try {
     const backend = await takeOsLock(join(store.dir, "zingo.flock"), waitMs);
-    return { assertHeld() { app.assertHeld(); backend.assertHeld(); }, async release() { await backend.release(); await app.release(); } };
+    return { exclusiveAcrossProcesses: app.exclusiveAcrossProcesses, assertHeld() { app.assertHeld(); backend.assertHeld(); }, async release() { await backend.release(); await app.release(); } };
   } catch (error) { await app.release(); throw error; }
 }
