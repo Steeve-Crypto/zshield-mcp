@@ -5,7 +5,7 @@ import { createExclusive, ensurePrivateDir, fsyncDir, readPrivate } from "../fsa
 import { parseZecToZats } from "../policy/amount.js";
 import { PolicyError } from "../policy/caps.js";
 import type { Config } from "../types.js";
-import { mayHaveBroadcast, onPaymentStoresReset, paymentParamsHash, type CallEvent, type CallIntent, type CallRecord, type PaymentStore } from "./store.js";
+import { LateAnnouncementError, mayHaveBroadcast, onPaymentStoresReset, paymentParamsHash, type CallEvent, type CallIntent, type CallRecord, type PaymentStore } from "./store.js";
 import type { WalletLock } from "./lock.js";
 import { announce, changedSince, GENERATION_DIR, markOf, readGeneration, UNNAMED, type Mark } from "./generation.js";
 
@@ -354,7 +354,19 @@ export function authorizeCharged(config: Config, store: PaymentStore, lock: Wall
   const authorized = record.events.some((e) => e.transmit_authorized === true);
   if (onlyIfNeeded && authorized && more === 0n) return false;
   lock.assertHeld();
-  store.authorizeTransmit(record.callId, new Date().toISOString(), capped ? { principal, fee: fee! } : undefined);
+  try {
+    store.authorizeTransmit(record.callId, new Date().toISOString(), capped ? { principal, fee: fee! } : undefined);
+  } catch (e) {
+    if (!(e instanceof LateAnnouncementError)) throw e;
+    // The charge is durable and every full recount counts it; only the announcement after
+    // it failed. That announcement guards readers that re-read this call between the event
+    // and its first announcement, and only a process holding the wallet lock updates a
+    // tally. If the lock is still ours, none could have, so refusing now would only leave
+    // a charged payment unsent. This process rebuilds its own tally on its next decision.
+    // If the lock was lost, the transmit is refused, as for any lost lock.
+    lock.assertHeld();
+    tallies.delete(storeKey(store.dir));
+  }
   return true;
 }
 

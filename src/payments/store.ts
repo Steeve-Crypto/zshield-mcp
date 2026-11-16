@@ -209,6 +209,18 @@ export function newOperationId(): string {
   return `op_${randomBytes(16).toString("hex")}`;
 }
 
+/**
+ * The announcement after a transmit authorization event failed. The event itself is
+ * published and fsynced, so every full recount counts its charge; only cache freshness
+ * for readers that ignored the wallet lock is in doubt.
+ */
+export class LateAnnouncementError extends Error {
+  constructor(readonly cause: unknown) {
+    super(`The store generation could not be updated after the transmit authorization was recorded: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = "LateAnnouncementError";
+  }
+}
+
 export class PaymentStore {
   readonly dir: string;
   /** Live mode: the OS wallet lock is required, not best effort. Set by storeFor */
@@ -377,8 +389,16 @@ export class PaymentStore {
     const name = `${Date.now().toString().padStart(15, "0")}-${randomBytes(6).toString("hex")}.json`;
     createExclusive(dir, name, JSON.stringify(event));
     // A charge is announced again once written, so a reader that re-read this call between
-    // the two steps, which only a lost wallet lock would allow, still sees it.
-    if (event.transmit_authorized === true) announce(this.dir, basename(dir));
+    // the two steps, which only a lost wallet lock would allow, still sees it. The event is
+    // already published and fsynced here, so a failure is reported as LateAnnouncementError:
+    // the caller decides, under its lock, whether the charge may still be relied on.
+    if (event.transmit_authorized === true) {
+      try {
+        announce(this.dir, basename(dir));
+      } catch (e) {
+        throw new LateAnnouncementError(e);
+      }
+    }
   }
 
   /** A call's current state, read fresh from disk. Undefined when the store has no such call. */
