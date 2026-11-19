@@ -4,6 +4,8 @@
 
 # zshield-mcp
 
+[![ZShield MCP server](https://mcprush.com/badge/zshield-mcp/card.svg)](https://mcprush.com/to/zshield-mcp?ref=badge)
+
 Open-source **MCP server** that exposes `zcash_pay` for agent-initiated **shielded ZEC** payments under human policy, plus read-only wallet tools that never move funds. `zcash_pay` is guarded by:
 
 - **Hard per-call spending cap**
