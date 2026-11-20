@@ -1,7 +1,23 @@
 # Financial-use release assessment
 
-Assessment date: 2026-11-05. Mainnet implementation is opt-in and requires financial controls.
-Native wallet and final-review evidence are still pending.
+Assessment date: 2026-11-20. Mainnet implementation is opt-in and requires financial controls.
+Real shielded payments have been confirmed on Zcash testnet (see below). Interrupted-send
+qualification on a real wallet, deployment storage and independent review are still pending.
+No mainnet payment has been made.
+
+## Confirmed testnet payments
+
+- 2026-10-12, `CHAIN_MODE=testnet` (zingo-cli): one 0.001 TAZ shielded payment through
+  `zcash_pay`, tx [`59d9cb1b5a473a84602c4812a7809217f6e9d359174deb178e7fd52c151ae8fc`](https://blockexplorer.one/zcash/testnet/tx/59d9cb1b5a473a84602c4812a7809217f6e9d359174deb178e7fd52c151ae8fc).
+  An over-cap attempt in the same run was refused before anything was sent.
+- 2026-11-14, `CHAIN_MODE=ironclad` (FROST co-signer wallet), through the MCP server over stdio
+  ([write-up](https://ironclad.adilhusain.dev/zshield.html)):
+  - 0.001 TAZ co-signed and mined in block 4,618,918, tx
+    [`3202e8ce9d3f0e5008716b8f9a84e69f936f955751493ebb3494f5659dab2b87`](https://ironclad.adilhusain.dev/tx/3202e8ce9d3f0e5008716b8f9a84e69f936f955751493ebb3494f5659dab2b87).
+  - 0.21 TAZ refused by the co-signer's 0.2 TAZ per-payment cap; `zcash_pay` returned
+    `CHAIN_ERROR` and nothing was sent.
+  - With the co-signer offline, `zcash_pay` returned `CHAIN_ERROR` after its timeout and
+    nothing was sent.
 
 ## Review changes
 
@@ -21,7 +37,7 @@ not proof that dependencies are vulnerability-free.
 
 | Gate | Current limitation / required evidence |
 | --- | --- |
-| Native wallet and funded testnet | Not run here: no native zingo-cli or configured funded scratch wallet. Run the pinned backend and retain txids, wallet observations and process results. |
+| Native wallet and funded testnet | Partly done: ordinary shielded sends are confirmed on funded testnet wallets through zingo-cli and the Ironclad co-signer (see above). Still open: the full `npm run test:testnet` suite on the pinned backend, with retained txids, wallet observations and process results. |
 | Exact-transaction continuation | Demonstrate persistence after stage, interrupted transmission, same-txid retry and confirmation with the actual backend. Fake subprocess tests cannot establish backend behavior. |
 | Independent audit | A fresh V12 review of the final commit has not been run. Prior findings and local tests are not approval of this revision. |
 | Deployment filesystem | Validate OS ownership, lock lifetime and durability on the intended filesystem and OS. Simulated UID metadata is not a multi-user deployment test; process SIGKILL is not a host power-loss test. |
@@ -58,7 +74,7 @@ See [operator controls](OPERATOR_CONTROLS.md) for configuration, trust boundarie
 commands and incident procedures. Each distinct change is committed separately:
 payment pause; cumulative principal and fee allowance; signed approvals; coordinated
 snapshots; operational alerts; and financial deployment prerequisites. Commit
-subjects are limited to five words, recorded in the repository's AGENTS.md.
+subjects are limited to five words.
 
 The native harness remains testnet-only. These additions do not provide external certification,
 automatic rolling resets, off-host backup encryption,
@@ -88,7 +104,7 @@ move, malformed fee reports, crash-safe fee receipts, legacy ledger refusal,
 original-fee verification on resume, cross-network approvals and recovery,
 mainnet CLI arguments, server and wallet mismatches, and wallet network binding.
 The final HTTPS prerequisite checks also passed all eight mainnet/deployment tests.
-The native-wallet suite remained disabled; no real network payment was performed.
+The native-wallet suite remained disabled; that run made no network payment.
 
 The first full run caught three error-message/check-order regressions. The checks
 were corrected, targeted tests passed, and the complete suite was rerun successfully.
@@ -98,11 +114,11 @@ and its resulting tree was compared with the committed source tree.
 
 ## 2026-11-06 root-cause review
 
-Code fixes have passed local verification. Financial deployment is not approved without the remaining native, storage and independent qualification. See [per-finding evidence](../V12-RUN14-RESPONSE.md), [physical audit contract](PAYMENT_AUDIT_JOURNAL.md) and [incident runbook](INCIDENT_RUNBOOK.md).
+Code fixes have passed local verification. Financial deployment is not approved without the remaining native, storage and independent qualification. See the [physical audit contract](PAYMENT_AUDIT_JOURNAL.md) and [incident runbook](INCIDENT_RUNBOOK.md).
 
 | Risk / status | Area | Evidence / remaining work |
 | --- | --- | --- |
-| Critical release gate | Native payment lifecycle | Fake subprocess crash and concurrency tests pass. Qualify the actual pinned wallet's calculated-tx persistence, exact-txid continuation, automatic broadcast behavior and recovery on a funded disposable testnet wallet. No native or real-network payment was performed here. |
+| Critical release gate | Native payment lifecycle | Fake subprocess crash and concurrency tests pass. Ordinary testnet sends are confirmed (see above). Still qualify the actual pinned wallet's calculated-tx persistence, exact-txid continuation, automatic broadcast behavior and recovery on a funded disposable testnet wallet. |
 | High release gate | Deployment storage and rollout | Real zero-filled, fsynced extents protect payment evidence. Allocation failure, injected traffic ENOSPC, SIGKILL initialization, restart, incomplete slots, migration charges and cross-process ownership pass locally. Rehearse actual volume exhaustion, inodes, quotas, host power loss and offline upgrade on deployment storage. Never mix old and new writers or reflink/deduplicate/compress live journals. |
 | Required release gate | Independent review | Review the final commit independently before owner merge and deployment approval. No V12 trigger or review request was sent. |
 | High, locally fixed | Send/resume consistency | Shared eligibility and wallet-wide gates apply before resume and inside the execution fence. Never-authorized tracked calls cannot revive. Legacy pending one-step crash windows and orphan markers block replacement. |
@@ -119,11 +135,12 @@ Code fixes have passed local verification. Financial deployment is not approved 
 - [x] Fix F-82 using real allocated payment extents, with exhaustion, crash, restart and concurrency regressions.
 - [x] Reject corrupt or unknown persisted payment records instead of silently ignoring them.
 - [x] Preserve complete default test discovery, typecheck, build, dependency audit and coverage gates.
-- [ ] Native testnet qualification and explicit operator approval for any funded tests.
+- [x] Ordinary shielded testnet payments confirmed through zingo-cli and the Ironclad co-signer.
+- [ ] Native testnet qualification of interrupted sends and recovery, with explicit operator approval for any funded tests.
 - [ ] Qualify deployed storage guarantees, actual full-volume behavior and offline migration.
 - [ ] Review actual legacy records against the strict schemas without deleting financial identity.
 - [ ] Define and test recovery-aware readiness and bounded shutdown with surviving backend processes.
 - [ ] Rehearse backups, audit-journal export, storage incidents and reviewed unpause.
 - [ ] Independent review of the final commit, followed by owner merge and deployment decision.
 
-The clean base passed 596 tests. Node 24 passed all 623 tests after the first physical/schema fixes, and the expanded Node 22 suite passed 625 tests. The final CI-matching Node 22 rerun after bounded test allocations also passed all 625 tests across 143 suites, with zero failures. Typecheck, build and dependency audit passed; there were zero known advisories. The 83-point original-payment crash sweep had no duplicate sends, with 17 safe preauthorization refusals rather than completion. Full evidence is in V12-RUN14-RESPONSE.md. Native tests remain disabled; no mainnet or testnet transaction was submitted.
+The clean base passed 596 tests. Node 24 passed all 623 tests after the first physical/schema fixes, and the expanded Node 22 suite passed 625 tests. The final CI-matching Node 22 rerun after bounded test allocations also passed all 625 tests across 143 suites, with zero failures. Typecheck, build and dependency audit passed; there were zero known advisories. The 83-point original-payment crash sweep had no duplicate sends, with 17 safe preauthorization refusals rather than completion. Native tests were disabled for that run, and it submitted no transaction.

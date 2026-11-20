@@ -4,7 +4,7 @@ This document describes what zshield-mcp protects, what it trusts, and where it 
 
 ## Summary
 
-zshield-mcp lets an AI agent ask for shielded ZEC payments without ever holding a key. The agent can only call MCP tools. The server checks every payment against a per-call cap, an allow-list, and the network, writes an audit row, and only then asks `zingo-cli` to send. The default is a mock chain that moves nothing. Mainnet requires explicit opt-in and mandatory financial controls; live operations bind the wallet, recipient and approval to the configured network.
+zshield-mcp lets an AI agent ask for shielded ZEC payments without ever holding a key. The agent can only call MCP tools. The server checks every payment against a per-call cap, an allow-list, and the network, writes an audit row, and only then sends through the configured backend: zingo-cli, a zkool_graphql server, or an Ironclad FROST co-signer wallet. Mock mode, for local tests, moves nothing. Mainnet requires explicit opt-in and mandatory financial controls; live operations bind the wallet, recipient and approval to the configured network.
 
 It is a policy gate for a single local operator. It is not a custody system, it does not authenticate anyone, and it does not provide a rolling daily allowance. A durable cumulative principal and fee allowance and signed approvals are available, and required by the mainnet financial profile.
 
@@ -38,7 +38,7 @@ Limits today:
 - Change its own policy. No tool writes the allow-list, the cap, the mode, or the audit settings.
 - Export the seed or a viewing key to the agent. No code path calls `zingo-cli recovery_info`. `export_ufvk` runs only to compute the audit fingerprint, and the key stays in memory.
 - Run arbitrary `zingo-cli` commands on behalf of the agent. The server uses a fixed set of commands: `quicksend`, `balance`, `spendable_balance`, `addresses`, `transactions`, `export_ufvk`, and for the pre-send check `info` and `height`.
-- Construct a replacement transaction for a bound `idempotency_key`, or transmit during `zcash_payment_status`. Startup recovery may retransmit the same authorized, verified staged transaction by exact txid. See the current release blockers in [the run 14 response](../V12-RUN14-RESPONSE.md).
+- Construct a replacement transaction for a bound `idempotency_key`, or transmit during `zcash_payment_status`. Startup recovery may retransmit the same authorized, verified staged transaction by exact txid. See the current release blockers in [production readiness](PRODUCTION_READINESS.md).
 
 ## Network isolation
 
