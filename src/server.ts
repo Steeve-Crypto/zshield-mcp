@@ -120,7 +120,7 @@ export function createServer(config: Config = loadConfig(), chain: ChainAdapter 
 
   server.tool(
     "zcash_pay",
-    "Pay shielded ZEC to an allow-listed recipient under a hard per-call spending cap. Mock chain by default; writes a viewing-key-fingerprinted audit log entry.",
+    "Pay shielded ZEC to an allow-listed recipient under a hard per-call spending cap. Sends a real shielded payment when the server runs a live chain (testnet, zkool, Ironclad or opt-in mainnet); the default mock chain is for local tests. Writes a viewing-key-fingerprinted audit log entry.",
     payInputSchema.shape,
     limited("zcash_pay", async (args: Record<string, unknown>) => {
       const parsed = payInputSchema.parse(args);

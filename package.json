@@ -2,7 +2,7 @@
   "name": "zshield-mcp",
   "version": "0.2.0-beta.1",
   "mcpName": "io.github.Steeve-Crypto/zshield-mcp",
-  "description": "MCP server for agent-initiated shielded ZEC payments under human policy (caps, allow-list, viewing-key audit). Mock chain first.",
+  "description": "MCP server for shielded Zcash payments by AI agents, with a spending cap, recipient allow-list and viewing-key audit log. Testnet beta, mainnet controls available.",
   "type": "module",
   "bin": {
     "zshield-mcp": "dist/index.js"
