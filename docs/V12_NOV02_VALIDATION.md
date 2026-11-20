@@ -67,5 +67,5 @@ being misreported as never paid. Local `not_sent` proof requires the adapter's e
 `stagesBeforeBroadcast` contract and a missing staged/returned txid.
 
 References: [ZIP 203](https://zips.z.cash/zip-0203),
-[upstream CLI commands](https://github.com/zingolabs/zingolib/blob/dev/zingo-cli/src/commands.rs),
+[upstream CLI commands](https://github.com/zingolabs/zingolib/blob/181a91103b93e7155017d4a05af0722b013b774e/zingo-cli/src/commands.rs),
 [stream-json token parser](https://github.com/uhop/stream-json/blob/master/src/core/parser.js).

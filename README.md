@@ -22,7 +22,7 @@ Financial-use release status and outstanding validation: [production readiness](
 
 Agents need a payment tool they can call safely. This server enforces policy *before* any payment attempt, records an audit row for every call (success or reject), and stores only a short fingerprint in place of key material.
 
-Built as a concrete, minimal artifact for design-partner review of shielded agent-payment MCP surfaces (see Zcash Community Grants discussions around agent payment tooling over MCP).
+Built for teams that want AI agents to make shielded Zcash payments under human policy.
 
 ## Demo
 
@@ -32,8 +32,36 @@ For real testnet payments, see [the live testnet proof](#proof-live-testnet-paym
 
 ## Quickstart
 
+Run the published package with `npx`. This config pays on Zcash testnet through zingo-cli. Build zingo-cli and fund a testnet wallet first, as shown in [testnet mode](#testnet-mode).
+
+```json
+{
+  "mcpServers": {
+    "zshield": {
+      "command": "npx",
+      "args": ["-y", "zshield-mcp@beta"],
+      "env": {
+        "CHAIN_MODE": "testnet",
+        "ZINGO_BIN": "/absolute/path/to/zingo-cli",
+        "ZINGO_DATA_DIR": "/absolute/path/to/.zshield-testnet/wallet",
+        "SPENDING_CAP_ZEC": "0.01",
+        "ALLOWLIST_PATH": "/absolute/path/to/recipients.json",
+        "AUDIT_DIR": "/absolute/path/to/audits",
+        "VIEW_KEY_FINGERPRINT_SALT": "output of openssl rand -hex 32"
+      }
+    }
+  }
+}
+```
+
+The allow-list uses the format of [allowlists/recipients.example.json](allowlists/recipients.example.json). For [zkool mode](#zkool-mode) or [Ironclad mode](#ironclad-mode), change `CHAIN_MODE` and add that mode's settings.
+
+To try it without a wallet, use the mock chain: set `"CHAIN_MODE": "mock"` and keep only `SPENDING_CAP_ZEC`, `ALLOWLIST_PATH` and `AUDIT_DIR`. It moves no coins and is meant for local tests and demos.
+
+From source:
+
 ```bash
-git clone <this-repo> zshield-mcp && cd zshield-mcp
+git clone https://github.com/Steeve-Crypto/zshield-mcp.git && cd zshield-mcp
 cp .env.example .env
 npm install
 npm test
@@ -42,26 +70,7 @@ npm run build
 npm start   # stdio MCP server
 ```
 
-Point your MCP client (Cursor, Claude Desktop, etc.) at:
-
-```json
-{
-  "mcpServers": {
-    "zshield": {
-      "command": "node",
-      "args": ["/absolute/path/to/zshield-mcp/dist/index.js"],
-      "env": {
-        "SPENDING_CAP_ZEC": "0.1",
-        "ALLOWLIST_PATH": "/absolute/path/to/zshield-mcp/allowlists/recipients.example.json",
-        "CHAIN_MODE": "mock",
-        "AUDIT_DIR": "/absolute/path/to/zshield-mcp/audits"
-      }
-    }
-  }
-}
-```
-
-Or during development: `"command": "npx", "args": ["tsx", "src/index.ts"]` with `cwd` set to the repo.
+From a checkout, point your MCP client at `"command": "node"` with `"args": ["/absolute/path/to/zshield-mcp/dist/index.js"]` and the same `env`. During development you can use `"command": "npx", "args": ["tsx", "src/index.ts"]` with `cwd` set to the repo.
 
 ## Tool: `zcash_pay`
 
@@ -382,7 +391,7 @@ zingo-cli --chain testnet --server https://testnet.zec.rocks:443 \
   --data-dir ~/.zshield-testnet/wallet addresses
 ```
 
-Fund that address with TAZ from a testnet faucet such as https://faucet.testnet.valargroup.dev (API claim) or https://zcashfaucet.jinolabs.xyz and wait for it to confirm. Keep `~/.zshield-testnet/` private; it holds the wallet seed and is never inside the repo. `zingo-cli` creates the wallet with your default umask, which usually leaves it readable by other users, so lock it down:
+Fund that address with TAZ from a testnet faucet such as https://faucet.testnet.valargroup.dev (API claim) and wait for it to confirm. Keep `~/.zshield-testnet/` private; it holds the wallet seed and is never inside the repo. `zingo-cli` creates the wallet with your default umask, which usually leaves it readable by other users, so lock it down:
 
 ```bash
 chmod 700 ~/.zshield-testnet ~/.zshield-testnet/wallet
@@ -653,4 +662,4 @@ continues to require a POSIX platform; mock mode on Windows needs a compatible P
 
 ## Current reliability checkpoint
 
-See [V12 run 14 response](V12-RUN14-RESPONSE.md), [production readiness](docs/PRODUCTION_READINESS.md), and the [incident runbook](docs/INCIDENT_RUNBOOK.md). Local passing tests alone are not financial release approval. Physical payment-audit reservation is implemented; native-wallet, deployment-storage and independent qualification remain release gates. The [reserved journal runbook](docs/PAYMENT_AUDIT_JOURNAL.md) explains capacity, private export and offline upgrades.
+See [production readiness](docs/PRODUCTION_READINESS.md), and the [incident runbook](docs/INCIDENT_RUNBOOK.md). Local passing tests alone are not financial release approval. Physical payment-audit reservation is implemented; native-wallet, deployment-storage and independent qualification remain release gates. The [reserved journal runbook](docs/PAYMENT_AUDIT_JOURNAL.md) explains capacity, private export and offline upgrades.
