@@ -12,7 +12,7 @@ Open-source **MCP server** that exposes `zcash_pay` for agent-initiated **shield
 - **Recipient allow-list**
 - **Append-only viewing-key fingerprinted audit log**
 
-Spend keys never belong in the model. Mock chain by default. A live adapter sends real shielded payments on Zcash testnet through zingo-cli, with explicitly enabled mainnet support under mandatory financial controls. See [mainnet configuration](docs/OPERATOR_CONTROLS.md#mainnet-configuration).
+Sends real shielded payments on Zcash testnet through zingo-cli, a [zkool_graphql](#zkool-mode) server, or an [Ironclad FROST co-signer](#ironclad-mode) wallet. Mainnet support through zingo-cli is explicitly enabled and runs under mandatory financial controls; see [mainnet configuration](docs/OPERATOR_CONTROLS.md#mainnet-configuration). Spend keys never belong in the model. A mock chain is included for local tests and demos.
 
 Financial-use release status and outstanding validation: [production readiness](docs/PRODUCTION_READINESS.md).
 
@@ -26,7 +26,7 @@ Built as a concrete, minimal artifact for design-partner review of shielded agen
 
 ## Demo
 
-Real output of `npm run demo:mock` (mock chain, no coins spent): one payment allowed, one blocked by the spending cap, one blocked by the allow-list, then the audit log.
+For real testnet payments, see [the live testnet proof](#proof-live-testnet-payment) and the [Ironclad run](#ironclad-mode). The quick local demo below is real output of `npm run demo:mock` (mock chain, no coins spent): one payment allowed, one blocked by the spending cap, one blocked by the allow-list, then the audit log.
 
 ![Mock demo terminal output](docs/images/demo.png)
 
@@ -356,7 +356,7 @@ The viewing key itself is **never** written or returned, only a short fingerprin
 
 ```
 src/policy/   caps + allow-list
-src/chain/    mock adapter, testnet adapter, address checks
+src/chain/    zingo-cli, zkool and Ironclad adapters, mock adapter, address checks
 src/audit/    JSONL writer + fingerprint
 src/payments/ idempotency index, send lock and wallet lock file, startup recovery
 src/chain/sync.ts bounded wallet sync through the zingo-cli prompt
@@ -509,8 +509,9 @@ One real shielded 0.001 TAZ payment through `zcash_pay`, plus a blocked over-cap
 
 ## Status and non-goals
 
-- ✅ Mock payments, policy enforcement, audit
 - ✅ Testnet shielded sends via zingo-cli
+- ✅ Testnet shielded sends via zkool_graphql and an Ironclad FROST co-signer wallet
+- ✅ Policy enforcement and audit, plus a mock chain for local tests and demos
 - ✅ Read-only balance, receive address, and history tools
 - ✅ Stable rejection codes
 - ✅ Idempotency keys (required for live payments), an OS-level wallet lock, a two-stage send with the txid recorded before broadcast, one send at a time per wallet, pre-send health check, startup recovery, and `zcash_payment_status`
