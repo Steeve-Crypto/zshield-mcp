@@ -19,7 +19,7 @@
       "environmentVariables": [
         { "name": "ALLOWLIST_PATH", "description": "Path to the recipient allow-list JSON", "isRequired": true, "format": "string" },
         { "name": "SPENDING_CAP_ZEC", "description": "Hard max ZEC per payment", "isRequired": true, "format": "string" },
-        { "name": "CHAIN_MODE", "description": "mock (default), testnet, zkool or ironclad", "isRequired": false, "format": "string" },
+        { "name": "CHAIN_MODE", "description": "testnet, zkool, ironclad, mainnet (needs MAINNET_ENABLED=1) or mock (default, for local tests)", "isRequired": false, "format": "string" },
         { "name": "AUDIT_DIR", "description": "Directory for append-only audit logs", "isRequired": false, "format": "string" },
         { "name": "VIEW_KEY_FINGERPRINT_SALT", "description": "Unique salt, required outside mock mode", "isRequired": false, "format": "string", "isSecret": true },
         { "name": "TOTAL_SPENDING_CAP_ZEC", "description": "Lifetime principal plus fee allowance", "isRequired": false, "format": "string" }
