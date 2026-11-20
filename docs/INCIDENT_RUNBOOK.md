@@ -1,6 +1,6 @@
 # Payment incident runbook
 
-This revision is not approved for financial deployment without native and independent qualification. See [review evidence](../V12-RUN14-RESPONSE.md).
+This revision is not approved for financial deployment without native and independent qualification. See [production readiness](PRODUCTION_READINESS.md).
 
 ## Stuck or uncertain payment
 
