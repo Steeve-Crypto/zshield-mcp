@@ -2,8 +2,11 @@
 
 Beta software. Do not use with real funds.
 
-## Unreleased
+## 0.2.0-beta.2 (2026-11-21)
 
+Install: `npm install zshield-mcp@beta`
+
+- Shorter README. Full tool and error code reference moved to docs/TOOLS.md.
 - README, package description and the `zcash_pay` tool description now lead with real testnet payments. The mock chain is described as a tool for local tests and demos.
 - Quickstart starts with `npx -y zshield-mcp@beta` and a testnet config.
 
