@@ -2,7 +2,7 @@
 
 Beta software. Do not use with real funds.
 
-## 0.2.0-beta.2 (2026-11-21)
+## 0.2.0 (2026-11-21)
 
 Install: `npm install zshield-mcp@beta`
 
