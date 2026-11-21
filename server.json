@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Steeve-Crypto/zshield-mcp",
   "title": "ZShield MCP",
-  "description": "Capped, allow-listed shielded Zcash payments for AI agents. Testnet beta.",
+  "description": "Capped, allow-listed shielded Zcash payments for AI agents.",
   "repository": {
     "url": "https://github.com/Steeve-Crypto/zshield-mcp",
     "source": "github"

@@ -12,7 +12,7 @@ ZShield is an open-source [MCP](https://modelcontextprotocol.io/) server that le
 
 Supports a local mock wallet, real Zcash testnet payments via `zingo-cli`, and integrations with `zkool_graphql` and Ironclad FROST wallets. Mainnet is opt-in and requires additional operator controls.
 
-> **Status:** Testnet beta. Mainnet has not been validated for production financial use. Read [production readiness](docs/PRODUCTION_READINESS.md) before using a funded wallet.
+> **Status:** Mainnet has not been validated for production financial use. Read [production readiness](docs/PRODUCTION_READINESS.md) before using a funded wallet.
 
 ![Flow: AI agent to zshield-mcp to Zcash testnet](docs/images/flow.png)
 
@@ -30,14 +30,14 @@ npm run demo:mock
 
 ![Mock demo terminal output](docs/images/demo.png)
 
-**Connect an MCP client** using the published beta package. This example runs in mock mode, so it does not send real ZEC:
+**Connect an MCP client** using the published package. This example runs in mock mode, so it does not send real ZEC:
 
 ```json
 {
   "mcpServers": {
     "zshield": {
       "command": "npx",
-      "args": ["-y", "zshield-mcp@beta"],
+      "args": ["-y", "zshield-mcp"],
       "env": {
         "CHAIN_MODE": "mock",
         "SPENDING_CAP_ZEC": "0.01",
