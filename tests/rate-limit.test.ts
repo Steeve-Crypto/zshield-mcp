@@ -100,8 +100,8 @@ describe("RATE_LIMIT_PER_MIN", () => {
 });
 
 describe("rate limit docs", () => {
-  it("RATE_LIMITED and RATE_LIMIT_PER_MIN are in the README", () => {
-    const readme = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "README.md"), "utf8");
+  it("RATE_LIMITED and RATE_LIMIT_PER_MIN are in docs/TOOLS.md", () => {
+    const readme = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "docs", "TOOLS.md"), "utf8");
     for (const code of RATE_LIMIT_CODES) assert.ok(readme.includes(`\`${code}\``));
     assert.ok(readme.includes("`RATE_LIMIT_PER_MIN`"));
   });

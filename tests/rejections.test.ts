@@ -173,10 +173,10 @@ describe("zcash_pay error codes", () => {
     expectCode(r, config, "error", "CONFIG_ERROR");
   });
 
-  it("every code is documented in the README", () => {
-    const readme = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "README.md"), "utf8");
+  it("every code is documented in docs/TOOLS.md", () => {
+    const readme = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "docs", "TOOLS.md"), "utf8");
     for (const code of [...PAY_REJECTION_CODES, ...PAY_ERROR_CODES, "INVALID_LIMIT"]) {
-      assert.ok(readme.includes(`\`${code}\``), `${code} missing from README`);
+      assert.ok(readme.includes(`\`${code}\``), `${code} missing from docs/TOOLS.md`);
     }
   });
 });
