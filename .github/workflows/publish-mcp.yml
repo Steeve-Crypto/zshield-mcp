@@ -1,3 +1,4 @@
+# Publish npm package before registering its version
 name: Publish to MCP Registry
 on:
   workflow_dispatch:
